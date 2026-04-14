@@ -1,0 +1,142 @@
+[
+    {
+        "path": "tests/samples/criminal/guilty/case_1.pdf",
+        "type": "criminal_guilty",
+        "expected_verdict": "guilty",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/criminal/guilty/case_2.pdf",
+        "type": "criminal_guilty",
+        "expected_verdict": "guilty",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/criminal/guilty/case_3.pdf",
+        "type": "criminal_guilty",
+        "expected_verdict": "guilty",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/criminal/guilty/case_4.pdf",
+        "type": "criminal_guilty",
+        "expected_verdict": "guilty",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/criminal/guilty/case_5.pdf",
+        "type": "criminal_guilty",
+        "expected_verdict": "guilty",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/criminal/acquitted/case_1.pdf",
+        "type": "criminal_acquitted",
+        "expected_verdict": "acquitted",
+        "expected_appeal": "yes",
+        "expected_days": "90"
+    },
+    {
+        "path": "tests/samples/criminal/acquitted/case_2.pdf",
+        "type": "criminal_acquitted",
+        "expected_verdict": "acquitted",
+        "expected_appeal": "yes",
+        "expected_days": "90"
+    },
+    {
+        "path": "tests/samples/criminal/acquitted/case_3.pdf",
+        "type": "criminal_acquitted",
+        "expected_verdict": "acquitted",
+        "expected_appeal": "yes",
+        "expected_days": "90"
+    },
+    {
+        "path": "tests/samples/criminal/acquitted/case_4.pdf",
+        "type": "criminal_acquitted",
+        "expected_verdict": "acquitted",
+        "expected_appeal": "yes",
+        "expected_days": "90"
+    },
+    {
+        "path": "tests/samples/criminal/acquitted/case_5.pdf",
+        "type": "criminal_acquitted",
+        "expected_verdict": "acquitted",
+        "expected_appeal": "yes",
+        "expected_days": "90"
+    },
+    {
+        "path": "tests/samples/civil/plaintiff_won/case_1.pdf",
+        "type": "civil_won",
+        "expected_verdict": "won",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/civil/plaintiff_won/case_2.pdf",
+        "type": "civil_won",
+        "expected_verdict": "won",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/civil/plaintiff_won/case_3.pdf",
+        "type": "civil_won",
+        "expected_verdict": "won",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/civil/plaintiff_won/case_4.pdf",
+        "type": "civil_won",
+        "expected_verdict": "won",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/civil/plaintiff_won/case_5.pdf",
+        "type": "civil_won",
+        "expected_verdict": "won",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/civil/plaintiff_lost/case_1.pdf",
+        "type": "civil_lost",
+        "expected_verdict": "lost",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/civil/plaintiff_lost/case_2.pdf",
+        "type": "civil_lost",
+        "expected_verdict": "lost",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/civil/plaintiff_lost/case_3.pdf",
+        "type": "civil_lost",
+        "expected_verdict": "lost",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/civil/plaintiff_lost/case_4.pdf",
+        "type": "civil_lost",
+        "expected_verdict": "lost",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    },
+    {
+        "path": "tests/samples/civil/plaintiff_lost/case_5.pdf",
+        "type": "civil_lost",
+        "expected_verdict": "lost",
+        "expected_appeal": "yes",
+        "expected_days": "30"
+    }
+]
