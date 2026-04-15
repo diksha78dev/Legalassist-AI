@@ -1,8 +1,6 @@
 import streamlit as st
 from openai import OpenAI
 import PyPDF2
-import re
-import time
 
 # -----------------------------
 # App Config
@@ -71,6 +69,8 @@ def extract_text_from_pdf(uploaded_pdf):
         page_text = page.extract_text()
         if page_text:
             text += page_text + "\n"
+    if not text.strip():
+        raise ValueError("No extractable text found. The PDF may be image-only or empty.")
     return text
 
 # -----------------------------
@@ -144,37 +144,29 @@ def build_remedies_prompt(judgment_text, language):
     based on the actual judgment content
     """
     return f"""
-You are a Legal Rights Advisor. Read this judgment and answer these questions:
+You are a Legal Rights Advisor. Read this judgment and answer in SIMPLE format.
 
 JUDGMENT:
 {judgment_text}
 
 Answer ONLY these questions in {language}. Be practical and direct.
 
-1. WHAT HAPPENED?
-   - Who won and who lost? (1 sentence)
+1. What happened? (Who won and who lost; 1 sentence)
+2. Can the loser appeal? (Yes/No + reason; 1-2 sentences)
+3. Appeal timeline: How many days? (Just number)
+4. Appeal court: Which court should they go to? (Court name only)
+5. Cost estimate: Rough cost in rupees? (e.g., 5000-15000)
+6. First action: What should they do first? (1 sentence)
+7. Important deadline: What key deadline should they remember? (1 sentence)
 
-2. CAN THE LOSER APPEAL?
-   - Yes or No? Why/Why not? (1-2 sentences)
-
-3. IF YES TO APPEAL:
-   - How many days do they have? (Just the number)
-   - Which court should they go to? (Court name only)
-   - Rough cost in rupees? (e.g., 5000-15000)
-
-4. WHAT SHOULD THEY DO FIRST?
-   - What is the first action to take? (1 sentence)
-
-5. IMPORTANT DATES:
-   - What deadline should they remember? (1 sentence)
-
-Format your answer clearly with each question number and answer.
+Output in numbered form like:
+1. ...\n2. ...\n3. ... etc.
 """
 
 
 def parse_remedies_response(response_text):
     """
-    Extract structured info from LLM response
+    Extract structured info from LLM response using numbered-line parsing.
     """
     remedies = {
         "what_happened": "",
@@ -183,49 +175,40 @@ def parse_remedies_response(response_text):
         "appeal_court": "",
         "cost": "",
         "first_action": "",
-        "deadline": ""
+        "deadline": "",
+        "appeal_details": ""
     }
-    
-    lines = response_text.split("\n")
-    current_section = None
-    current_answer = ""
-    
-    for line in lines:
-        # Detect question headers
-        if "1. WHAT HAPPENED" in line or "1. What happened" in line:
-            if current_section and current_answer:
-                remedies[current_section] = current_answer.strip()
-            current_section = "what_happened"
-            current_answer = ""
-        elif "2. CAN THE LOSER" in line or "2. Can the" in line:
-            if current_section and current_answer:
-                remedies[current_section] = current_answer.strip()
-            current_section = "can_appeal"
-            current_answer = ""
-        elif "3. IF YES" in line:
-            if current_section and current_answer:
-                remedies[current_section] = current_answer.strip()
-            current_section = "appeal_details"
-            current_answer = ""
-        elif "4. WHAT SHOULD" in line:
-            if current_section and current_answer:
-                remedies[current_section] = current_answer.strip()
-            current_section = "first_action"
-            current_answer = ""
-        elif "5. IMPORTANT" in line:
-            if current_section and current_answer:
-                remedies[current_section] = current_answer.strip()
-            current_section = "deadline"
-            current_answer = ""
-        else:
-            # Collect answer text
-            if current_section and line.strip():
-                current_answer += line + " "
-    
-    # Save last section
-    if current_section and current_answer:
-        remedies[current_section] = current_answer.strip()
-    
+
+    text = response_text.strip()
+    if not text:
+        return remedies
+
+    key_map = [
+        (1, "what_happened"),
+        (2, "can_appeal"),
+        (3, "appeal_days"),
+        (4, "appeal_court"),
+        (5, "cost"),
+        (6, "first_action"),
+        (7, "deadline"),
+    ]
+
+    for i, key in key_map:
+        marker = f"{i}."
+        if marker not in text:
+            continue
+        start = text.index(marker) + len(marker)
+        end = len(text)
+        for j in range(i + 1, 8):
+            next_marker = f"{j}."
+            if next_marker in text[start:]:
+                end = text.index(next_marker, start)
+                break
+        answer = text[start:end].strip()
+        remedies[key] = answer
+        if i in (3, 4, 5):
+            remedies["appeal_details"] += answer + " "
+
     return remedies
 
 
@@ -233,7 +216,7 @@ def get_remedies_advice(judgment_text, language):
     """
     Call LLM to get remedies for this judgment
     """
-    prompt = build_remedies_prompt(judgment_text, language)
+    prompt = build_remedies_prompt(compress_text(judgment_text), language)
     
     response = client.chat.completions.create(
         model="meta-llama/llama-3.1-8b-instruct",
