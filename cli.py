@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import PyPDF2
+from pypdf import PdfReader
 from langdetect import DetectorFactory, LangDetectException, detect
 from openai import OpenAI
 from tqdm import tqdm
@@ -90,7 +90,7 @@ def get_client() -> OpenAI:
 def extract_text_from_pdf(pdf_path: Path) -> str:
     text_parts: List[str] = []
     with pdf_path.open("rb") as f:
-        reader = PyPDF2.PdfReader(f)
+        reader = PdfReader(f)
         for page in reader.pages:
             page_text = page.extract_text() or ""
             if page_text.strip():
