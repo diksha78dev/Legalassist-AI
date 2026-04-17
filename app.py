@@ -3,6 +3,8 @@ from openai import OpenAI
 import re
 import core
 
+DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct"
+
 # -----------------------------
 # App Config
 # -----------------------------
@@ -95,7 +97,7 @@ def get_remedies_advice(judgment_text, language):
     prompt = core.build_remedies_prompt(core.compress_text(judgment_text), language)
     
     response = client.chat.completions.create(
-        model="meta-llama/llama-3.1-8b-instruct",
+        model=DEFAULT_MODEL,
         messages=[
             {
                 "role": "system",
@@ -163,7 +165,7 @@ def main():
                 prompt = core.build_summary_prompt(safe_text, language)
 
                 # ⚡ Best multilingual model for Hindi/Bengali/Urdu
-                model_id = "meta-llama/llama-3.1-8b-instruct"
+                model_id = DEFAULT_MODEL
 
 
                 # -----------------------------
