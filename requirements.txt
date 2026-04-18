@@ -1,6 +1,7 @@
 ﻿streamlit
 openai
 pypdf
+fpdf2
 pytest
 tqdm
 langdetect
