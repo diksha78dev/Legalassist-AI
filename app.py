@@ -1,24 +1,52 @@
 import streamlit as st
 from openai import OpenAI
+from pypdf import PdfReader
+import logging
+import os
 import re
 import core
 
+# ==================== Notification System Setup ====================
+from database import init_db, SessionLocal, get_db
+from scheduler import start_scheduler, stop_scheduler
+
+# Initialize database
+init_db()
+
+# Constants
 DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct"
 
-# -----------------------------
-# App Config
-# -----------------------------
+# Start background scheduler on app startup
+if "scheduler_started" not in st.session_state:
+    try:
+        start_scheduler()
+        st.session_state.scheduler_started = True
+        logging.info("Background scheduler started")
+    except Exception as e:
+        logging.error(f"Failed to start scheduler: {str(e)}")
+        st.session_state.scheduler_started = False
+
+# ==================== Logging Setup ====================
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+
+# ==================== App Config ====================
 st.set_page_config(
     page_title="LegalEase AI",
     page_icon="⚖",
-    layout="centered"
+    layout="wide" if st.query_params.get("page") == "deadlines" else "centered"
 )
 
 
 # -----------------------------
 # Load API Keys (OpenRouter)
 # -----------------------------
+client = None  # Global cache for the client
+
 @st.cache_resource
+
 def _initialize_openai_client():
     """
     Internal function to initialize the OpenAI client using Streamlit secrets.
@@ -28,7 +56,7 @@ def _initialize_openai_client():
         base_url=st.secrets["OPENROUTER_BASE_URL"]
     )
 
-def get_openai_client():
+def get_client():
     """
     Returns the OpenAI client, initializing it only when needed.
     This prevents the application from crashing on import if st.secrets are missing.
@@ -39,12 +67,11 @@ def get_openai_client():
 
     try:
         client = _initialize_openai_client()
-    except (KeyError, FileNotFoundError, RuntimeError, AttributeError):
+    except (KeyError, FileNotFoundError, RuntimeError, AttributeError) as e:
         # Graceful fallback for environments where secrets are not available (e.g., tests)
+        logging.error(f"Failed to initialize OpenAI client: {e}")
         return None
     return client
-
-client = None  # Global cache for the client
 
 # -----------------------------
 # Retro Styling
@@ -83,15 +110,13 @@ st.markdown("""
 # LLM Interaction Helpers (using core)
 # -----------------------------
 
+
 def get_remedies_advice(judgment_text, language):
     """
     Call LLM to get remedies for this judgment
     """
-    client = get_openai_client()
+    client = get_client()
     if not client:
-        # If we can't get a client, we shouldn't continue in this function
-        # This typically happens during testing if mocks aren't set up,
-        # or if the user hasn't configured secrets yet.
         return None
 
     prompt = core.build_remedies_prompt(core.compress_text(judgment_text), language)
@@ -151,7 +176,7 @@ def main():
     st.markdown("---")
 
     if uploaded_file and st.button("🚀 Generate Summary"):
-        client = get_openai_client()
+        client = get_client()
 
         if not client:
             st.error("OpenAI client not initialized. Please ensure OPENROUTER_API_KEY and OPENROUTER_BASE_URL are set in .streamlit/secrets.toml")
@@ -166,13 +191,8 @@ def main():
 
                 # ⚡ Best multilingual model for Hindi/Bengali/Urdu
                 model_id = DEFAULT_MODEL
-
-
-                # -----------------------------
-                # FIRST ATTEMPT
-                # -----------------------------
                 response = client.chat.completions.create(
-                    model=model_id,
+                    model=DEFAULT_MODEL,
                     messages=[
                         {"role": "system", "content": "You are an expert legal simplification engine."},
                         {"role": "user", "content": prompt}
@@ -190,7 +210,7 @@ def main():
                     retry_prompt = core.build_retry_prompt(safe_text, language)
 
                     response2 = client.chat.completions.create(
-                        model=model_id,
+                        model=DEFAULT_MODEL,
                         messages=[
                             {"role": "system", "content": "Strict multilingual rewriting engine."},
                             {"role": "user", "content": retry_prompt}
@@ -253,6 +273,58 @@ def main():
                             
                         except Exception as e:
                             st.error(f"Could not get remedies advice: {str(e)}")
+                    
+                    # ===== ANALYTICS & TRACKING SECTION =====
+                    st.markdown("---")
+                    st.markdown("## 📊 Track Your Case & See Statistics")
+                    
+                    st.info("""
+                    **Help us build better predictions!**
+                    
+                    By tracking your case, you help us understand appeal success rates in your jurisdiction.
+                    Later, when you know the outcome of your appeal, you can report it back.
+                    """)
+                    
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        if st.button("📈 View Analytics", key="view_analytics"):
+                            st.session_state.show_analytics = True
+                    
+                    with col2:
+                        if st.button("🎯 Estimate Appeal Chances", key="estimate_chances"):
+                            st.session_state.show_estimator = True
+                    
+                    with col3:
+                        if st.button("📝 Report Outcome", key="report_outcome"):
+                            st.session_state.show_feedback = True
+                    
+                    # Show analytics if requested
+                    if st.session_state.get("show_analytics"):
+                        st.subheader("📊 Quick Analytics Preview")
+                        try:
+                            from analytics_engine import AnalyticsAggregator
+                            from database import CaseRecord
+                            
+                            db = SessionLocal()
+                            summary = AnalyticsAggregator.get_dashboard_summary(db)
+                            
+                            if summary["total_cases_processed"] > 0:
+                                col1, col2, col3 = st.columns(3)
+                                with col1:
+                                    st.metric("Total Cases Tracked", summary["total_cases_processed"])
+                                with col2:
+                                    st.metric("Appeals Success Rate", f"{AnalyticsAggregator.get_regional_trends(db)[0]['appeal_success_rate'] if AnalyticsAggregator.get_regional_trends(db) else 'N/A'}%")
+                                with col3:
+                                    st.metric("Appeals Filed", summary["appeals_filed"])
+                                
+                                st.write("📌 **Visit Analytics Dashboard for detailed insights** ➡️ [See Full Dashboard]()")
+                            else:
+                                st.info("Analytics will be available as more cases are tracked.")
+                            
+                            db.close()
+                        except Exception as e:
+                            st.info("Analytics module not ready yet.")
                     
                     # ===== FREE LEGAL HELP SECTION =====
                     st.markdown("---")
