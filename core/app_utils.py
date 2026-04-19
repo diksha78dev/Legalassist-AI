@@ -330,3 +330,7 @@ LEGAL_HELP_RESOURCES = """
 """
 
 LANGUAGES = ["English", "Hindi", "Bengali", "Urdu"]
+DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct"
+
+# Alias for backward compatibility
+build_summary_prompt = build_prompt
