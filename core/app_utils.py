@@ -6,21 +6,60 @@ Shared utilities for LegalEase AI
 """
 
 import re
+import logging
 from openai import OpenAI
 from pypdf import PdfReader
 
+# ==================== MODEL CONFIGURATION ====================
+
+DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct"
+
+def get_default_model():
+    """
+    Returns the default model to use, safely accessing st.secrets.
+    Falls back gracefully if secrets are unavailable (e.g., during testing).
+    """
+    try:
+        import streamlit as st
+        return st.secrets.get("DEFAULT_MODEL", DEFAULT_MODEL)
+    except (KeyError, FileNotFoundError, RuntimeError, AttributeError):
+        # Fallback to module DEFAULT_MODEL if secrets are unavailable
+        return DEFAULT_MODEL
+
+
 # ==================== API CLIENT ====================
 
-def get_client():
-    """Get OpenRouter API client from Streamlit secrets"""
+def _initialize_openai_client():
+    """
+    Internal function to initialize the OpenAI client using Streamlit secrets.
+    Uses Streamlit caching to avoid recreating the client.
+    """
     import streamlit as st
-    try:
-        return OpenAI(
-            api_key=st.secrets["OPENROUTER_API_KEY"],
-            base_url=st.secrets["OPENROUTER_BASE_URL"]
-        )
-    except Exception as e:
-        raise RuntimeError(f"Failed to initialize OpenRouter client: {str(e)}")
+    return OpenAI(
+        api_key=st.secrets["OPENROUTER_API_KEY"],
+        base_url=st.secrets["OPENROUTER_BASE_URL"]
+    )
+
+
+def get_client():
+    """
+    Returns the OpenAI client, initializing it only when needed.
+    This prevents the application from crashing on import if st.secrets are missing.
+    Uses Streamlit's cache_resource for efficiency.
+    """
+    import streamlit as st
+    
+    @st.cache_resource
+    def _get_cached_client():
+        """Internal cached client initialization"""
+        try:
+            return _initialize_openai_client()
+        except (KeyError, FileNotFoundError, RuntimeError, AttributeError) as e:
+            # Graceful fallback for environments where secrets are not available (e.g., tests)
+            logging.error(f"Failed to initialize OpenAI client: {e}")
+            return None
+    
+    return _get_cached_client()
 
 
 # ==================== TEXT PROCESSING ====================
@@ -249,28 +288,47 @@ def get_remedies_advice(judgment_text, language, client=None):
     if client is None:
         client = get_client()
     
+    if not client:
+        return None
+    
     prompt = build_remedies_prompt(compress_text(judgment_text), language)
     
-    response = client.chat.completions.create(
-        model="meta-llama/llama-3.1-8b-instruct",
-        messages=[
-            {
-                "role": "system",
-                "content": "You are a helpful legal advisor. Answer questions about legal remedies in India."
-            },
-            {
-                "role": "user",
-                "content": prompt
+    try:
+        response = client.chat.completions.create(
+            model=get_default_model(),
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a helpful legal advisor. Answer questions about legal remedies in India."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            max_tokens=500,  # Longer for detailed answers
+            temperature=0.1,  # Low temp = more consistent
+        )
+        
+        response_text = response.choices[0].message.content.strip()
+        remedies = parse_remedies_response(response_text)
+        
+        if remedies is None:
+            return {
+                "what_happened": None,
+                "can_appeal": None,
+                "appeal_days": None,
+                "appeal_court": None,
+                "cost_estimate": None,
+                "cost": None,
+                "first_action": None,
+                "deadline": None,
             }
-        ],
-        max_tokens=500,  # Longer for detailed answers
-        temperature=0.1,  # Low temp = more consistent
-    )
-    
-    response_text = response.choices[0].message.content.strip()
-    remedies = parse_remedies_response(response_text)
-    
-    return remedies
+        
+        return remedies
+    except Exception as e:
+        logging.error(f"Failed to get remedies advice: {str(e)}")
+        return None
 
 
 # ==================== UI STYLING & CONSTANTS ====================
@@ -330,7 +388,6 @@ LEGAL_HELP_RESOURCES = """
 """
 
 LANGUAGES = ["English", "Hindi", "Bengali", "Urdu"]
-DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct"
 
 # Alias for backward compatibility
 build_summary_prompt = build_prompt
