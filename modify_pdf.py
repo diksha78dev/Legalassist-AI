@@ -1,4 +1,5 @@
 import os
+import structlog
 
 file_path = "pdf_exporter.py"
 with open(file_path, "r", encoding="utf-8") as f:
@@ -105,4 +106,5 @@ content = content.replace(old_status, new_status)
 with open(file_path, "w", encoding="utf-8") as f:
     f.write(content)
 
-print("PDF Exporter modified for legal format.")
+logger = structlog.get_logger(__name__)
+logger.info("pdf_exporter_modified", msg="PDF Exporter modified for legal format.")

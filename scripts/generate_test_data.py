@@ -1,5 +1,6 @@
 
 import os
+import structlog
 from fpdf import FPDF
 import json
 import sys

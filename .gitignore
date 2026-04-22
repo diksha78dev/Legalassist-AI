@@ -21,3 +21,12 @@ legalassist.db
 .claude/
 .vscode/
 .idea/
+
+# Generic
+*.db
+*.log
+htmlcov/
+.coverage
+requirements.txt
+requirements.in
+/.venv

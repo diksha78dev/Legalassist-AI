@@ -4,6 +4,7 @@ Handles delivery tracking and retry logic.
 """
 
 import logging
+import structlog
 import os
 from datetime import datetime, timezone
 from typing import Optional, List, Tuple
@@ -34,7 +35,7 @@ from database import (
     log_notification,
 )
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 @dataclass

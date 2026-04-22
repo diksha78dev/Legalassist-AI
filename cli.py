@@ -2,6 +2,7 @@ import argparse
 import csv
 import json
 import logging
+import structlog
 import os
 import re
 import sys
@@ -17,6 +18,8 @@ from pypdf import PdfReader
 from langdetect import DetectorFactory, LangDetectException, detect
 from openai import OpenAI
 from tqdm import tqdm
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
+from logging_config import configure_logging
 import core
 
 # Make language detection deterministic.
@@ -31,7 +34,7 @@ LANG_CODE_TO_NAME = {
 }
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", core.DEFAULT_MODEL)
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
-LOGGER = logging.getLogger(__name__)
+LOGGER = structlog.get_logger(__name__)
 
 KNOWN_COURTS = {
     "supreme court",
@@ -421,11 +424,7 @@ def collect_pdf_files(folder: Path, recursive: bool) -> List[Path]:
 
 
 def print_cost_summary(snapshot: Dict[str, float]) -> None:
-    print("\n=== Batch Cost Summary ===")
-    print(f"Prompt tokens: {snapshot['prompt_tokens']}")
-    print(f"Completion tokens: {snapshot['completion_tokens']}")
-    print(f"Total tokens: {snapshot['total_tokens']}")
-    print(f"Estimated API cost (USD): ${snapshot['total_cost_usd']:.6f}")
+    LOGGER.info("batch_cost_summary", **snapshot)
 
 
 def process_command(args: argparse.Namespace) -> int:
@@ -444,16 +443,16 @@ def process_command(args: argparse.Namespace) -> int:
         completion_cost_per_1k=args.completion_cost_per_1k,
     )
 
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    LOGGER.info("process_result", result=result)
 
     if args.output:
         out_path = Path(args.output)
         records = [result]
         csv_path, json_path = export_results(records, out_path, args.format)
         if args.format in {"csv", "both"}:
-            print(f"Wrote CSV: {csv_path}")
+            LOGGER.info("wrote_file", path=str(csv_path), format="csv")
         if args.format in {"json", "both"}:
-            print(f"Wrote JSON: {json_path}")
+            LOGGER.info("wrote_file", path=str(json_path), format="json")
 
     return 0 if result.get("status") == "success" else 1
 
@@ -483,17 +482,15 @@ def batch_command(args: argparse.Namespace) -> int:
     if not args.resume and checkpoint_file.exists():
         checkpoint_file.unlink()
 
-    print(f"Total PDFs found: {len(all_files)}")
-    print(f"Already completed (resume): {len(done_success)}")
-    print(f"Pending for this run: {len(to_process)}")
+    LOGGER.info("batch_discovery", total_found=len(all_files), already_completed=len(done_success), pending=len(to_process))
 
     if not to_process:
         csv_path, json_path = export_results(existing_records, output_path, args.format)
-        print("No pending files. Export refreshed from checkpoint.")
+        LOGGER.info("no_pending_files_refresh", msg="No pending files. Export refreshed from checkpoint.")
         if args.format in {"csv", "both"}:
-            print(f"Wrote CSV: {csv_path}")
+            LOGGER.info("wrote_file", path=str(csv_path), format="csv")
         if args.format in {"json", "both"}:
-            print(f"Wrote JSON: {json_path}")
+            LOGGER.info("wrote_file", path=str(json_path), format="json")
         return 0
 
     tracker = CostTracker()
@@ -514,25 +511,32 @@ def batch_command(args: argparse.Namespace) -> int:
             for pdf_path in to_process
         }
 
-        progress = tqdm(total=len(futures), desc="Processing PDFs", unit="file")
-        try:
-            for future in as_completed(futures):
-                record = future.result()
-                run_records.append(record)
-                append_checkpoint(checkpoint_file, record)
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("{task.description}"),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            TimeElapsedColumn(),
+        ) as progress:
+            task_id = progress.add_task("Processing PDFs", total=len(futures))
+            try:
+                for future in as_completed(futures):
+                    record = future.result()
+                    run_records.append(record)
+                    append_checkpoint(checkpoint_file, record)
 
-                tracker.add(
-                    int(record.get("prompt_tokens", 0) or 0),
-                    int(record.get("completion_tokens", 0) or 0),
-                    int(record.get("total_tokens", 0) or 0),
-                    float(record.get("api_cost_usd", 0.0) or 0.0),
-                )
+                    tracker.add(
+                        int(record.get("prompt_tokens", 0) or 0),
+                        int(record.get("completion_tokens", 0) or 0),
+                        int(record.get("total_tokens", 0) or 0),
+                        float(record.get("api_cost_usd", 0.0) or 0.0),
+                    )
 
-                progress.update(1)
-                status = str(record.get("status"))
-                progress.set_postfix({"last": status, "cost_usd": f"{tracker.snapshot()['total_cost_usd']:.4f}"})
-        finally:
-            progress.close()
+                    progress.advance(task_id, 1)
+                    status = str(record.get("status"))
+                    progress.update(task_id, description=f"last={status} cost_usd={tracker.snapshot()['total_cost_usd']:.4f}")
+            finally:
+                pass
 
     all_records = existing_records + run_records
     csv_path, json_path = export_results(all_records, output_path, args.format)
@@ -540,15 +544,11 @@ def batch_command(args: argparse.Namespace) -> int:
     success_count = sum(1 for x in run_records if x.get("status") == "success")
     error_count = len(run_records) - success_count
 
-    print("\n=== Batch Processing Summary ===")
-    print(f"Processed this run: {len(run_records)}")
-    print(f"Successful: {success_count}")
-    print(f"Failed: {error_count}")
-
+    LOGGER.info("batch_summary", processed=len(run_records), successful=success_count, failed=error_count)
     if args.format in {"csv", "both"}:
-        print(f"Wrote CSV: {csv_path}")
+        LOGGER.info("wrote_file", path=str(csv_path), format="csv")
     if args.format in {"json", "both"}:
-        print(f"Wrote JSON: {json_path}")
+        LOGGER.info("wrote_file", path=str(json_path), format="json")
 
     print_cost_summary(tracker.snapshot())
 
@@ -644,16 +644,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    # Configure structured logging and rich output
+    try:
+        configure_logging()
+    except Exception:
+        logging.basicConfig(level=logging.INFO)
+
     if getattr(args, "workers", 1) < 1:
         raise CLIError("--workers must be >= 1")
 
     try:
         return args.func(args)
     except CLIError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        LOGGER.error("cli_error", error=str(exc))
         return 2
     except Exception as exc:  # Defensive catch to keep CLI stable.
-        print(f"Unexpected error: {exc}", file=sys.stderr)
+        LOGGER.exception("unexpected_error", error=str(exc))
         return 3
 
 
