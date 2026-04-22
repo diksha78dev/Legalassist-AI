@@ -299,8 +299,8 @@ class TestRemediesParsingWithFixtures:
         remedies = parse_remedies_response(response_text)
         
         assert isinstance(remedies, dict), f"{fixture_name}: should return dict"
-        assert all(isinstance(v, str) for v in remedies.values()), \
-            f"{fixture_name}: all values should be strings"
+        assert all(isinstance(v, str) for k, v in remedies.items() if not k.startswith("_")), \
+            f"{fixture_name}: all data values should be strings"
     
     def test_criminal_guilty_parsing(self, mock_remedies_response):
         """Test specific parsing of criminal guilty verdict"""

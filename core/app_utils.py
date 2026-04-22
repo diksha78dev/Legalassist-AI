@@ -195,22 +195,93 @@ Output in numbered form like:
 
 # ==================== REMEDIES PARSER ====================
 
+KNOWN_COURTS = {
+    "supreme court",
+    "high court",
+    "district court",
+    "sessions court",
+    "session court",
+    "civil court",
+    "family court",
+    "consumer court",
+    "tribunal",
+}
+
+def _clean_answer(value: str):
+    cleaned = re.sub(r"\s+", " ", (value or "")).strip(" -:\t\n")
+    return cleaned or ""
+
+def _strip_question_label(key: str, value: str) -> str:
+    if not value:
+        return ""
+
+    patterns = {
+        "what_happened": r"^(what happened\??)\s*",
+        "can_appeal": r"^(can the loser appeal\??)\s*",
+        "appeal_days": r"^(appeal timeline\??|how many days\??)\s*",
+        "appeal_court": r"^(appeal court\??|which court(?: should they go to)?\??)\s*",
+        "cost_estimate": r"^(cost estimate\??|rough cost(?: in rupees)?\??)\s*",
+        "first_action": r"^(first action\??|what should they do first\??)\s*",
+        "deadline": r"^(important deadline\??|important dates?\??)\s*",
+    }
+    pattern = patterns.get(key)
+    if pattern:
+        value = re.sub(pattern, "", value, flags=re.IGNORECASE).strip()
+    return value or ""
+
+def _normalize_yes_no(value: str) -> str:
+    if not value:
+        return ""
+    lower = value.lower()
+    if re.search(r"\byes\b", lower) or any(x in lower for x in ["can appeal", "available", "allowed", "has right"]):
+        return "yes"
+    if re.search(r"\bno\b", lower) or any(x in lower for x in ["cannot appeal", "not available", "no right", "no appeal"]):
+        return "no"
+    return ""
+
+def _extract_number(value: str) -> str:
+    if not value:
+        return ""
+    match = re.search(r"\b(\d{1,4})\b", value)
+    return match.group(1) if match else ""
+
+def _validate_court_name(value: str) -> str:
+    if not value:
+        return ""
+    cleaned = _clean_answer(value)
+    if not cleaned:
+        return ""
+
+    normalized = cleaned.lower()
+    if normalized in KNOWN_COURTS or any(court in normalized for court in KNOWN_COURTS):
+        return cleaned
+    return ""
+
 def parse_remedies_response(response_text):
     """
     Extract structured info from LLM response using flexible numbered-line parsing.
     Supports multiple separators: . ) : - 
     Handles both 5-section (old) and 7-section (new) formats.
     """
+    mapping = {
+        1: "what_happened",
+        2: "can_appeal",
+        3: "appeal_days",
+        4: "appeal_court",
+        5: "cost_estimate",
+        6: "first_action",
+        7: "deadline",
+    }
     remedies = {
         "what_happened": "",
         "can_appeal": "",
         "appeal_days": "",
         "appeal_court": "",
         "cost_estimate": "",
-        "cost": "",
+        "cost": "", # For backward compatibility
         "first_action": "",
         "deadline": "",
-        "appeal_details": "",
+        "appeal_details": "", # For backward compatibility
         "_is_partial": False,
         "_warning": ""
     }
@@ -219,100 +290,50 @@ def parse_remedies_response(response_text):
     if not text:
         return remedies
 
-    # Detect all numbered sections (flexible separators: . ) : -)
-    # Only match 1-2 digit numbers to avoid matching content like "5000-10000"
-    pattern = r'^([1-9]\d?)\s*[.):‐-]\s*(.*?)$'
-    sections = {}
-    
-    for line in text.split('\n'):
-        match = re.match(pattern, line.strip())
-        if match:
-            num = int(match.group(1))
-            header = match.group(2).strip()
-            sections[num] = {"header": header, "content": ""}
-    
-    # Extract content for each section
-    lines = text.split('\n')
-    current_section = None
-    
-    for line in lines:
-        match = re.match(pattern, line.strip())
-        if match:
-            current_section = int(match.group(1))
-        elif current_section is not None and current_section in sections:
-            if line.strip():  # Only add non-empty lines
-                sections[current_section]["content"] += line.strip() + " "
-    
-    # Clean up content
-    for num in sections:
-        sections[num]["content"] = sections[num]["content"].strip()
-    
-    # Map sections to keys based on headers (preferred) or indices (fallback)
-    for num, data in sections.items():
-        header = data["header"].lower()
-        content = data["content"]
+    # Use robust marker-based parsing
+    marker_pattern = re.compile(r"(?m)^\s*(\d{1,2})\s*[\.|\)|:|-]\s*(.*)$")
+    matches = list(marker_pattern.finditer(text))
+
+    if not matches:
+        logging.warning("parse_remedies_response: no numbered sections found")
+        return remedies
+
+    for idx, match in enumerate(matches):
+        section_num = int(match.group(1))
+        key = mapping.get(section_num)
+        if not key:
+            continue
+
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        inline_text = _clean_answer(match.group(2))
+        block_text = _clean_answer(text[start:end])
+        section_text = _clean_answer(" ".join(part for part in [inline_text, block_text] if part))
+        cleaned = _strip_question_label(key, section_text)
         
-        # 1. Try keyword matching in headers first (most accurate)
-        if "happened" in header:
-            remedies["what_happened"] = content
-            continue
-        if "can" in header and "appeal" in header:
-            remedies["can_appeal"] = "yes" if "yes" in content.lower() else ("no" if "no" in content.lower() else content)
-            continue
-        if "timeline" in header or "days" in header:
-            days_match = re.search(r'\d+', content)
-            remedies["appeal_days"] = days_match.group() if days_match else content
-            continue
-        if "court" in header:
-            remedies["appeal_court"] = content
-            continue
-        if "cost" in header or "estimate" in header:
-            remedies["cost"] = content
-            remedies["cost_estimate"] = content
-            continue
-        if "first" in header or "action" in header:
-            remedies["first_action"] = content
-            continue
-        if "deadline" in header:
-            remedies["deadline"] = content
-            continue
-        if "details" in header:
-            remedies["appeal_details"] = content
-            extracted = extract_appeal_info(content)
-            if extracted["days"]: remedies["appeal_days"] = extracted["days"]
-            if extracted["court"]: remedies["appeal_court"] = extracted["court"]
-            if extracted["cost"]: remedies["cost"] = extracted["cost"]
-            continue
+        if cleaned:
+            remedies[key] = cleaned
 
-        # 2. Fallback to index-based mapping if header keywords didn't match
-        if num == 1:
-            remedies["what_happened"] = content
-        elif num == 2:
-            remedies["can_appeal"] = "yes" if "yes" in content.lower() else ("no" if "no" in content.lower() else content)
-        elif num == 3:
-            # Likely appeal_days if 7 sections, or appeal_details if 5
-            days_match = re.search(r'\d+', content)
-            if days_match and len(content) < 20:
-                remedies["appeal_days"] = days_match.group()
-            else:
-                remedies["appeal_details"] = content
-        elif num == 4:
-            remedies["appeal_court"] = content
-        elif num == 5:
-            remedies["cost"] = content
-            remedies["cost_estimate"] = content
-        elif num == 6:
-            remedies["first_action"] = content
-        elif num == 7:
-            remedies["deadline"] = content
-
-    # Set partial flag and warning if we don't have everything
-    required_keys = ["what_happened", "can_appeal", "appeal_days", "appeal_court", "cost", "first_action", "deadline"]
-    missing = [k for k in required_keys if not remedies[k]]
+    # Normalization & Compatibility
+    if remedies["can_appeal"]:
+        remedies["can_appeal"] = _normalize_yes_no(remedies["can_appeal"])
     
-    if len(sections) < 7 or missing:
+    if remedies["appeal_days"]:
+        remedies["appeal_days"] = _extract_number(remedies["appeal_days"])
+    
+    if remedies["appeal_court"]:
+        remedies["appeal_court"] = _validate_court_name(remedies["appeal_court"])
+    
+    # Map 'cost_estimate' to 'cost' for backward compatibility
+    if remedies["cost_estimate"]:
+        remedies["cost"] = remedies["cost_estimate"]
+    
+    # Track if all main sections are present
+    required = ["what_happened", "can_appeal", "appeal_days", "appeal_court", "cost", "first_action", "deadline"]
+    missing = [f for f in required if not remedies[f]]
+    if missing:
         remedies["_is_partial"] = True
-        remedies["_warning"] = "Note: Some legal advice sections could not be fully parsed. Information may be incomplete."
+        remedies["_warning"] = "Note: Some information may be incomplete."
 
     return remedies
 
