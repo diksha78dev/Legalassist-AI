@@ -1,4 +1,5 @@
 import streamlit as st
+import openai
 from openai import OpenAI
 from pypdf import PdfReader
 import logging
@@ -351,13 +352,36 @@ def main():
                     
                     st.info(help_options)
 
-            except Exception as e:
-                err = str(e)
+            except ValueError as e:
+                st.error(f"❌ Extraction Error: {str(e)}")
+                logging.error(f"Text extraction failed: {str(e)}")
 
-                if "402" in err or "credits" in err.lower():
-                    st.error("❌ Not enough OpenRouter credits. Please top up.")
+            except openai.APIConnectionError as e:
+                st.error("❌ Network Error: Could not connect to the AI service. Please check your internet.")
+                logging.error(f"API Connection error: {str(e)}")
+
+            except openai.RateLimitError as e:
+                st.error("❌ Rate Limit: Too many requests. Please wait a moment before trying again.")
+                logging.error(f"API Rate limit: {str(e)}")
+
+            except openai.AuthenticationError as e:
+                st.error("❌ API Key Error: Your OpenRouter/OpenAI key is invalid or not found.")
+                logging.error(f"API Auth error: {str(e)}")
+
+            except openai.APIStatusError as e:
+                if e.status_code == 402:
+                    st.error("❌ Out of Credits: Please top up your OpenRouter account to continue.")
                 else:
-                    st.error(f"An error occurred: {err}")
+                    st.error(f"❌ AI Service Error ({e.status_code}): {e.message}")
+                logging.error(f"API Status error: {str(e)}")
+
+            except openai.APIError as e:
+                st.error(f"❌ AI Service Error: {str(e)}")
+                logging.error(f"OpenAI API error: {str(e)}")
+
+            except Exception as e:
+                st.error(f"❌ Unexpected Error: {str(e)}")
+                logging.exception("An unhandled exception occurred in the main loop")
 
 if __name__ == "__main__":
     main()
