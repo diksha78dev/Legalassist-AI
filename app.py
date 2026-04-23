@@ -107,6 +107,10 @@ def main():
 
                     # ⚡ Best multilingual model for Hindi/Bengali/Urdu
                     model_id = get_default_model()
+                    
+                    # Added a 60-second timeout to prevent the Streamlit app
+                    # from spinning indefinitely in case the OpenAI API
+                    # hangs or becomes unresponsive.
                     response = client.chat.completions.create(
                         model=model_id,
                         messages=[
@@ -115,6 +119,7 @@ def main():
                         ],
                         max_tokens=280,
                         temperature=0.05,
+                        timeout=60.0,
                     )
 
                     summary = response.choices[0].message.content.strip()
@@ -125,6 +130,9 @@ def main():
                     if language.lower() != "english" and english_leakage_detected(summary):
                         retry_prompt = build_retry_prompt(safe_text, language)
 
+                        # Added a 60-second timeout to prevent the Streamlit app
+                        # from spinning indefinitely in case the OpenAI API
+                        # hangs or becomes unresponsive.
                         response2 = client.chat.completions.create(
                             model=model_id,
                             messages=[
@@ -133,6 +141,7 @@ def main():
                             ],
                             max_tokens=260,
                             temperature=0.03,
+                            timeout=60.0,
                         )
                         retry_summary = response2.choices[0].message.content.strip()
 
