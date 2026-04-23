@@ -166,6 +166,10 @@ def main():
                     with st.spinner("Analyzing your legal options..."):
                         try:
                             
+                            # Show warning if data is partial
+                            if remedies.get("_is_partial"):
+                                st.warning(remedies.get("_warning", "Note: Some information may be incomplete."))
+                            
                             # Show each answer
                             if remedies.get("what_happened"):
                                 st.subheader("What Happened?")

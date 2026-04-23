@@ -329,7 +329,7 @@ class TestRemediesParsing:
         
         # Should return empty dictionary values gracefully
         assert isinstance(remedies, dict)
-        assert all(isinstance(v, str) for v in remedies.values())
+        assert all(isinstance(v, str) for k, v in remedies.items() if not k.startswith("_"))
 
 
 # ==================== APPEAL INFO EXTRACTION TESTS ====================
