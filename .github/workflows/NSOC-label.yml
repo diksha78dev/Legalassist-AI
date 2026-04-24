@@ -1,0 +1,28 @@
+name: NSOC Label + Duplicate Handler
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  manage-issues:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Add label and handle duplicates
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const issueTitle = issue.title.toLowerCase();
+
+            //   add NSOC label
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              labels: ["NSOC'26"]
+            });
