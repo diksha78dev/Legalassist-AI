@@ -51,13 +51,6 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 
-# ==================== Page Configuration ====================
-st.set_page_config(
-    page_title="LegalEase AI",
-    page_icon="⚖",
-    layout="wide"
-)
-
 # ==================== Import UI Modules ====================
 try:
     from notifications_ui import (
