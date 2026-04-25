@@ -7,6 +7,7 @@ import os
 import hashlib
 import secrets
 import time
+from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple
 import logging
@@ -29,22 +30,73 @@ from database import (
 
 logger = logging.getLogger(__name__)
 
-# Configuration
-JWT_SECRET = os.getenv("JWT_SECRET", secrets.token_urlsafe(32))
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRY_HOURS = 7 * 24  # 7 days
-
-OTP_EXPIRY_MINUTES = int(os.getenv("OTP_EXPIRY_MINUTES", "10"))
-OTP_RATE_LIMIT_HOURS = 1
-OTP_RATE_LIMIT_MAX = 3  # Max OTP requests per email per hour
-
-
 def _is_debug_or_testing_mode() -> bool:
     """Return True when explicit debug/testing flags are enabled."""
     truthy = {"1", "true", "yes", "on"}
     debug_enabled = os.getenv("DEBUG", "").strip().lower() in truthy
     testing_enabled = os.getenv("TESTING", "").strip().lower() in truthy
     return debug_enabled or testing_enabled
+
+
+def _is_development_mode() -> bool:
+    """Return True when app is running in development-like mode."""
+    truthy = {"1", "true", "yes", "on"}
+    env_name = os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "")).strip().lower()
+    dev_env = env_name in {"dev", "development", "local"}
+    dev_flag = os.getenv("DEVELOPMENT", "").strip().lower() in truthy
+    return dev_env or dev_flag or _is_debug_or_testing_mode()
+
+
+def _resolve_jwt_secret() -> str:
+    """Resolve JWT secret with deterministic fallback.
+
+    Resolution order:
+    1) JWT_SECRET env var
+    2) Persistent secret file (JWT_SECRET_FILE or default .jwt_secret)
+    3) Development only: generate random secret, persist it, and warn
+    4) Production-like mode: raise RuntimeError
+    """
+    env_secret = os.getenv("JWT_SECRET", "").strip()
+    if env_secret:
+        return env_secret
+
+    secret_file = Path(os.getenv("JWT_SECRET_FILE", str(Path(__file__).with_name(".jwt_secret"))))
+    if secret_file.exists():
+        file_secret = secret_file.read_text(encoding="utf-8").strip()
+        if file_secret:
+            return file_secret
+
+    if _is_development_mode():
+        generated_secret = secrets.token_urlsafe(32)
+        try:
+            secret_file.parent.mkdir(parents=True, exist_ok=True)
+            secret_file.write_text(generated_secret, encoding="utf-8")
+        except Exception as e:
+            logger.warning(
+                "Failed to persist generated JWT secret to %s: %s",
+                secret_file,
+                str(e),
+            )
+        logger.warning(
+            "JWT_SECRET not set; generated development secret and using fallback file %s. "
+            "Set JWT_SECRET explicitly in production.",
+            secret_file,
+        )
+        return generated_secret
+
+    raise RuntimeError(
+        "JWT_SECRET is not configured. Set JWT_SECRET or provide JWT_SECRET_FILE with a persistent secret."
+    )
+
+
+# Configuration
+JWT_SECRET = _resolve_jwt_secret()
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRY_HOURS = 7 * 24  # 7 days
+
+OTP_EXPIRY_MINUTES = int(os.getenv("OTP_EXPIRY_MINUTES", "10"))
+OTP_RATE_LIMIT_HOURS = 1
+OTP_RATE_LIMIT_MAX = 3  # Max OTP requests per email per hour
 
 
 def _hash_otp(otp: str) -> str:
