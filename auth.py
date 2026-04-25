@@ -39,6 +39,14 @@ OTP_RATE_LIMIT_HOURS = 1
 OTP_RATE_LIMIT_MAX = 3  # Max OTP requests per email per hour
 
 
+def _is_debug_or_testing_mode() -> bool:
+    """Return True when explicit debug/testing flags are enabled."""
+    truthy = {"1", "true", "yes", "on"}
+    debug_enabled = os.getenv("DEBUG", "").strip().lower() in truthy
+    testing_enabled = os.getenv("TESTING", "").strip().lower() in truthy
+    return debug_enabled or testing_enabled
+
+
 def _hash_otp(otp: str) -> str:
     """Hash OTP code before storing"""
     return hashlib.sha256(otp.encode()).hexdigest()
@@ -121,8 +129,8 @@ def request_otp(email: str) -> Tuple[bool, str]:
         # Check rate limiting
         now = datetime.now(timezone.utc)
         
-        # DUMMY CREDENTIALS FOR TESTING
-        if email.lower() == "test@example.com":
+        # Test OTP bypass is only allowed with explicit debug/testing flags.
+        if _is_debug_or_testing_mode() and email.lower() == "test@example.com":
             otp = "123456"
             otp_hash = _hash_otp(otp)
             expires_at = now + timedelta(minutes=OTP_EXPIRY_MINUTES)
@@ -130,7 +138,8 @@ def request_otp(email: str) -> Tuple[bool, str]:
             user = get_user_by_email(db, email)
             if not user:
                 create_user(db, email)
-            return True, "Dummy OTP sent"
+            logger.warning("Using test OTP bypass for test@example.com in debug/testing mode")
+            return True, "Test OTP sent"
 
         rate_limit_start = now - timedelta(hours=OTP_RATE_LIMIT_HOURS)
 
