@@ -263,7 +263,7 @@ def _validate_court_name(value: Optional[str]) -> Optional[str]:
     # NEW: Log as warning and return None if not a known court
     return None
 
-def parse_remedies_response(response_text: str) -> Dict[str, Optional[str]]:
+def parse_remedies_response(response_text: str) -> Optional[Dict[str, Optional[str]]]:
     """
     Extract structured info from LLM response using flexible numbered-line parsing.
     Supports multiple formats and performs normalization.
@@ -319,6 +319,10 @@ def parse_remedies_response(response_text: str) -> Dict[str, Optional[str]]:
         if cleaned is not None:
             remedies[key] = cleaned
             parsed_sections += 1
+
+    if parsed_sections == 0:
+        LOGGER.warning("parse_remedies_response: no valid sections parsed")
+        return None
 
     # Normalization & Compatibility
     if remedies["can_appeal"]:

@@ -275,10 +275,8 @@ class TestRemediesParsing:
     def test_parse_empty_response(self):
         """Test parsing of empty response"""
         remedies = parse_remedies_response("")
-        
-        assert remedies["what_happened"] == ""
-        assert remedies["can_appeal"] == ""
-        assert remedies["appeal_days"] == ""
+
+        assert remedies is None
     
     def test_parse_mixed_case_responses(self):
         """Test parsing with various text cases"""
@@ -315,10 +313,8 @@ class TestRemediesParsing:
         """Test parsing of malformed response without numbers"""
         response = "This is not a properly formatted response"
         remedies = parse_remedies_response(response)
-        
-        # Should return empty dictionary values gracefully
-        assert isinstance(remedies, dict)
-        assert all(isinstance(v, str) for v in remedies.values())
+
+        assert remedies is None
 
 
 # ==================== APPEAL INFO EXTRACTION TESTS ====================
