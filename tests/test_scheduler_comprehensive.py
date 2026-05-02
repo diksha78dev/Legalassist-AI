@@ -44,8 +44,10 @@ class TestSchedulerComprehensive:
             # Use +days +1 hour to ensure delta.days == days
             # This works now because we increased the query window to 31 days
             deadline_date = now + timedelta(days=days, hours=1)
+            # Use integer case_id
+            case_id_int = 100 + days
             create_case_deadline(
-                test_db, f"user_{days}", days, f"Title {days}",
+                test_db, f"user_{days}", case_id_int, f"Title {days}",
                 deadline_date, "appeal"
             )
             create_or_update_user_preference(
@@ -74,7 +76,7 @@ class TestSchedulerComprehensive:
         """Test when user has no preferences"""
         now = datetime.now(timezone.utc)
         create_case_deadline(
-            test_db, "no_pref_user", 1, "Title",
+            test_db, "no_pref_user", 999, "Title",
             now + timedelta(days=30, minutes=5), "appeal"
         )
         # No preference created

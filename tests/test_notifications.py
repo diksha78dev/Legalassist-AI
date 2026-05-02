@@ -73,6 +73,35 @@ class TestDatabaseModels:
         assert deadline.is_completed == False
         assert deadline.days_until_deadline() >= 29  # Approximately 30 days
 
+    def test_create_case_deadline_coerces_string_case_id(self, test_db):
+        """Test that string case_id values are normalized to integers"""
+        deadline_date = datetime.now(timezone.utc) + timedelta(days=15)
+
+        deadline = create_case_deadline(
+            db=test_db,
+            user_id="user123",
+            case_id="2",
+            case_title="Appeal Filing",
+            deadline_date=deadline_date,
+            deadline_type="appeal",
+        )
+
+        assert deadline.case_id == 2
+
+    def test_create_case_deadline_rejects_invalid_case_id(self, test_db):
+        """Test that invalid case_id values raise a clear error"""
+        deadline_date = datetime.now(timezone.utc) + timedelta(days=15)
+
+        with pytest.raises(ValueError, match="case_id must be an integer matching cases.id"):
+            create_case_deadline(
+                db=test_db,
+                user_id="user123",
+                case_id="abc",
+                case_title="Appeal Filing",
+                deadline_date=deadline_date,
+                deadline_type="appeal",
+            )
+
     def test_create_user_preference(self, test_db):
         """Test creating user notification preferences"""
         pref = create_or_update_user_preference(

@@ -63,10 +63,10 @@ try:
         page_notification_history,
     )
     # Import original app components
-    from app import (
         get_client,
         get_remedies_advice,
         get_default_model,
+        validate_pdf_metadata,
     )
     import core
     client = None
@@ -155,13 +155,24 @@ def show_judgment_analysis():
     st.markdown(ui["app_intro"])
     st.markdown("---")
 
-    language = st.selectbox(ui["language_label"], core.LANGUAGES, key="integrated_judgment_language")
-    ui = core.get_localized_ui_text(language, client)
-    uploaded_file = st.file_uploader(ui["upload_label"], type=["pdf"])
+    language = st.selectbox("🌐 Select your language", 
+                          ["English", "Hindi", "Bengali", "Urdu"])
+    uploaded_file = st.file_uploader("📄 Upload Judgment PDF", type=["pdf"])
+    
+    # PDF Validation for size and page count
+    is_valid_pdf, validation_msg, validation_level = validate_pdf_metadata(uploaded_file)
+    if validation_msg:
+        if validation_level == "error":
+            st.error(validation_msg)
+        else:
+            st.warning(validation_msg)
+
     st.markdown("---")
 
-    if uploaded_file and st.button(ui["generate_summary"], use_container_width=True):
-        with st.spinner(ui["processing"]):
+    if uploaded_file and is_valid_pdf and st.button("🚀 Generate Summary", use_container_width=True):
+        from app import get_client
+        client = get_client()
+        with st.spinner("Processing judgment…"):
             try:
                 if not client:
                     st.error(f"❌ {ui['openrouter_not_configured']}")
@@ -184,7 +195,9 @@ def show_judgment_analysis():
                     temperature=0.05,
                 )
 
-                summary = response.choices[0].message.content.strip()
+                summary_raw = response.choices[0].message.content.strip()
+                # Structured parser ensures exactly 3 bullets and removes intros
+                summary = core.parse_summary_bullets(summary_raw)
 
                 # Retry if output is not in the selected language
                 if language.lower() != "english" and core.output_language_mismatch_detected(summary, language):
@@ -198,9 +211,9 @@ def show_judgment_analysis():
                         max_tokens=260,
                         temperature=0.03,
                     )
-                    retry_summary = response2.choices[0].message.content.strip()
-                    if len(retry_summary) > 0 and not core.output_language_mismatch_detected(retry_summary, language):
-                        summary = retry_summary
+                    retry_summary_raw = response2.choices[0].message.content.strip()
+                    if len(retry_summary_raw) > 0 and not core.english_leakage_detected(retry_summary_raw):
+                        summary = core.parse_summary_bullets(retry_summary_raw)
 
                 if not summary:
                     st.error(ui["empty_summary"])

@@ -129,7 +129,20 @@ def get_client() -> OpenAI:
 def detect_language_name(text: str) -> str:
     if not text.strip():
         return "English"
-    sample = text[:3000]
+
+    length = len(text)
+    if length <= 3000:
+        sample = text
+    else:
+        # Sample beginning, middle, and end to avoid bias from English cover pages
+        # or administrative footers in local language documents.
+        parts = [
+            text[:1000],
+            text[length // 2 - 500 : length // 2 + 500],
+            text[-1000:]
+        ]
+        sample = " ".join(parts)
+
     try:
         code = detect(sample)
     except LangDetectException:

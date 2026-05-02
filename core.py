@@ -5,6 +5,10 @@ import logging
 from pathlib import Path
 from typing import Dict, Optional, List, Union
 
+# Allow this module to coexist with the core/ package so imports such as
+# `from core.app_utils import ...` continue to resolve.
+__path__ = [str(Path(__file__).with_name("core"))]
+
 LOGGER = logging.getLogger(__name__)
 
 # -----------------------------
