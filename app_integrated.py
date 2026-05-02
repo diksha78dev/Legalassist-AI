@@ -14,11 +14,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ==================== CONFIGURATION ====================
+# FIX: layout="centered" for mobile-first users; sidebar collapsed so it
+#      doesn't cover the screen on first load on narrow viewports.
 st.set_page_config(
     page_title="LegalEase AI",
     page_icon="⚖",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="centered",                 # was "wide" — broke mobile layouts
+    initial_sidebar_state="collapsed", # was "expanded" — blocked mobile screen
 )
 
 # ==================== LOGGING SETUP ====================
@@ -48,12 +50,6 @@ if "scheduler_started" not in st.session_state:
     except Exception as e:
         logger.error(f"Failed to start scheduler: {str(e)}")
         st.session_state.scheduler_started = False
-
-# ==================== Logging Setup ====================
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
 
 # ==================== Import UI Modules ====================
 try:
@@ -126,7 +122,6 @@ def main():
 def show_judgment_analysis():
     """Original app UI for judgment analysis"""
     
-    # Retro Styling (from original app)
     st.markdown("""
     <style>
         .main {
@@ -213,8 +208,8 @@ def show_judgment_analysis():
                         except Exception as e:
                             st.error(f"{ui['remedies_error']}: {str(e)}")
 
-                    result_text = core.build_judgment_result_text(summary, remedies, ui)
-                    core.render_shareable_result_box(result_text, ui)
+                    result = core.build_judgment_result_text(summary, remedies, ui)
+                    core.render_shareable_result_box(result, ui)
                     st.success(ui["summary_success"])
                     
             except Exception as e:
