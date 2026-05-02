@@ -68,11 +68,11 @@ def check_and_send_reminders():
             should_notify = False
             if days_left == 30 and user_preference.notify_30_days:
                 should_notify = True
-            elif days_left == 10 and user_preference.notify_10_days:
+            if days_left == 10 and user_preference.notify_10_days:
                 should_notify = True
-            elif days_left == 3 and user_preference.notify_3_days:
+            if days_left == 3 and user_preference.notify_3_days:
                 should_notify = True
-            elif days_left == 1 and user_preference.notify_1_day:
+            if days_left == 1 and user_preference.notify_1_day:
                 should_notify = True
 
             if not should_notify:
