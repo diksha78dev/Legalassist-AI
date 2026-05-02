@@ -111,7 +111,7 @@ class AnalyticsCalculator:
         """Calculate appeal success rate for cases with appeal data"""
         cases_with_appeals = [
             case for case in cases
-            if case.outcome_data and case.outcome_data.appeal_filed
+            if case.outcome_data is not None and case.outcome_data.appeal_filed
         ]
         
         if not cases_with_appeals:
@@ -119,7 +119,7 @@ class AnalyticsCalculator:
         
         successful = sum(
             1 for case in cases_with_appeals
-            if case.outcome_data.appeal_success is True
+            if case.outcome_data is not None and case.outcome_data.appeal_success is True
         )
         
         return (successful / len(cases_with_appeals)) * 100
@@ -358,9 +358,14 @@ class AppealProbabilityEstimator:
         times = []
         
         for case in cases_with_outcome:
-            if case.outcome_data.appeal_cost:
+            outcome_data = case.outcome_data
+
+            if outcome_data is None:
+                continue
+
+            if outcome_data.appeal_cost:
                 # Try to extract numeric value
-                cost_str = case.outcome_data.appeal_cost
+                cost_str = outcome_data.appeal_cost
                 try:
                     # Very basic extraction - assumes format like "12000" or "12000-15000"
                     import re
@@ -370,8 +375,8 @@ class AppealProbabilityEstimator:
                 except Exception:
                     pass
             
-            if case.outcome_data.time_to_appeal_verdict:
-                times.append(case.outcome_data.time_to_appeal_verdict)
+            if outcome_data.time_to_appeal_verdict:
+                times.append(outcome_data.time_to_appeal_verdict)
         
         # Calculate averages
         avg_cost = sum(costs) / len(costs) if costs else None
