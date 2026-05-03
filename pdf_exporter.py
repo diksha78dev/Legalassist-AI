@@ -352,15 +352,21 @@ For more information, visit LegalAssist AI or contact your legal representative.
         db.close()
 
 
-def generate_anonymized_pdf(case_id: int, anon_id: str) -> Optional[bytes]:
+def generate_anonymized_pdf(case_id: int, anon_id: str, user_id: int) -> Optional[bytes]:
     """
     Generate anonymized PDF for sharing with lawyers.
     Removes personal identifiers.
+    Requires user ownership verification.
     """
     db = SessionLocal()
     try:
         case = db.query(Case).filter(Case.id == case_id).first()
         if not case:
+            return None
+
+        # Verify case ownership
+        if case.user_id != user_id:
+            logger.warning(f"Unauthorized access attempt: user {user_id} tried to export case {case_id}")
             return None
 
         documents = db.query(CaseDocument).filter(CaseDocument.case_id == case_id).all()
