@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from typing import Optional, List, Tuple
 from dataclasses import dataclass
 from enum import Enum
+import html
+
 
 from sqlalchemy.orm import Session
 
@@ -143,58 +145,98 @@ class NotificationService:
             f"Deadline: {formatted_date}. Log in to check details."
         )
 
-    def build_email_message(self, case_title: str, days_left: int, deadline_date: datetime, case_id: str) -> Tuple[str, str]:
+    def build_email_message(self, deadline: CaseDeadline, days_left: int) -> Tuple[str, str]:
         """
-        Build email reminder content.
+        Build a premium email reminder content.
+        Uses modern HTML/CSS with glassmorphism-inspired design.
         Returns: (subject, html_content)
         """
-        formatted_date = deadline_date.strftime("%d %B %Y")
+        formatted_date = deadline.deadline_date.strftime("%d %B %Y")
+        escaped_title = html.escape(deadline.case_title)
+        escaped_type = html.escape(deadline.deadline_type.title())
+        escaped_desc = html.escape(deadline.description) if deadline.description else "No additional details provided."
         
-        subject = f"⚖️ Urgent: {case_title} - Deadline in {days_left} day(s)"
+        # Urgency color coding
+        if days_left <= 3:
+            accent_color = "#ff5252" # Critical Red
+            urgency_label = "URGENT"
+        elif days_left <= 10:
+            accent_color = "#ff9100" # Warning Orange
+            urgency_label = "SOON"
+        else:
+            accent_color = "#1a5490" # Info Blue
+            urgency_label = "REMINDER"
+
+        subject = f"⚖️ {urgency_label}: {deadline.case_title} - {escaped_type} Deadline"
         
         html_content = f"""
+        <!DOCTYPE html>
         <html>
-            <body style="font-family: Arial, sans-serif; color: #333;">
-                <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
-                    <h2 style="color: #1a5490;">⚖️ Deadline Reminder</h2>
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <style>
+                body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8f9fa; margin: 0; padding: 0; }}
+                .container {{ max-width: 600px; margin: 40px auto; background: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.1); border: 1px solid #eee; }}
+                .header {{ background: linear-gradient(135deg, #1a5490 0%, #0d2c4d 100%); padding: 40px 30px; text-align: center; color: white; }}
+                .header h1 {{ margin: 0; font-size: 24px; letter-spacing: 1px; }}
+                .content {{ padding: 40px 30px; color: #444; line-height: 1.6; }}
+                .status-badge {{ display: inline-block; padding: 4px 12px; background: {accent_color}22; color: {accent_color}; border: 1px solid {accent_color}; border-radius: 20px; font-size: 12px; font-weight: bold; margin-bottom: 20px; text-transform: uppercase; }}
+                .case-title {{ font-size: 22px; font-weight: 700; color: #1a5490; margin-bottom: 10px; }}
+                .deadline-box {{ background: #fdfdfd; border-radius: 12px; border-left: 6px solid {accent_color}; padding: 25px; margin: 30px 0; box-shadow: 0 4px 12px rgba(0,0,0,0.03); }}
+                .deadline-item {{ margin-bottom: 15px; }}
+                .deadline-label {{ color: #888; font-size: 13px; text-transform: uppercase; font-weight: 600; display: block; }}
+                .deadline-value {{ font-size: 18px; color: #222; font-weight: 600; }}
+                .description {{ background: #f9f9f9; padding: 20px; border-radius: 8px; font-style: italic; color: #666; margin-top: 20px; border-left: 3px solid #ddd; }}
+                .cta-button {{ display: inline-block; background: #1a5490; color: white !important; padding: 16px 40px; text-decoration: none; border-radius: 30px; font-weight: bold; margin-top: 30px; transition: all 0.3s ease; box-shadow: 0 4px 15px rgba(26, 84, 144, 0.3); }}
+                .footer {{ background: #f4f4f4; padding: 30px; text-align: center; color: #999; font-size: 12px; }}
+                .footer a {{ color: #1a5490; text-decoration: none; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>⚖️ LegalAssist AI</h1>
+                </div>
+                <div class="content">
+                    <div class="status-badge">{urgency_label} ACTION REQUIRED</div>
+                    <div class="case-title">Case: {escaped_title}</div>
+                    <p>Dear Litigant,</p>
+                    <p>This is a formal reminder regarding an upcoming deadline for your ongoing legal matter. Timely action is critical to protect your legal rights.</p>
                     
-                    <p style="font-size: 16px;">Dear Litigant,</p>
-                    
-                    <p style="font-size: 16px;">
-                        Your case <strong>"{case_title}"</strong> has an important deadline approaching.
-                    </p>
-                    
-                    <div style="background-color: #fff3cd; border-left: 4px solid #ff9800; padding: 15px; margin: 20px 0;">
-                        <p style="margin: 0; font-size: 18px; font-weight: bold;">
-                            ⏰ Deadline: <span style="color: #d32f2f;">{formatted_date}</span>
-                        </p>
-                        <p style="margin: 5px 0; font-size: 16px;">
-                            <strong>{days_left} day(s) remaining</strong>
-                        </p>
+                    <div class="deadline-box">
+                        <div class="deadline-item">
+                            <span class="deadline-label">Deadline Type</span>
+                            <span class="deadline-value">{escaped_type}</span>
+                        </div>
+                        <div class="deadline-item">
+                            <span class="deadline-label">Due Date</span>
+                            <span class="deadline-value" style="color: {accent_color};">{formatted_date}</span>
+                        </div>
+                        <div class="deadline-item" style="margin-bottom: 0;">
+                            <span class="deadline-label">Time Remaining</span>
+                            <span class="deadline-value">{days_left} Days</span>
+                        </div>
                     </div>
-                    
-                    <p style="font-size: 16px;">
-                        Missing this deadline could result in case closure or dismissal. 
-                        Please take action immediately.
-                    </p>
-                    
-                    <div style="margin: 30px 0;">
-                        <a href="https://legalassist.ai/cases/{case_id}" 
-                           style="background-color: #1a5490; color: white; padding: 12px 30px; 
-                                  text-decoration: none; border-radius: 5px; display: inline-block;
-                                  font-weight: bold;">
-                            View Case Details
+
+                    <div class="deadline-label">Details</div>
+                    <div class="description">
+                        "{escaped_desc}"
+                    </div>
+
+                    <div style="text-align: center;">
+                        <a href="https://legalassist.ai/cases/{deadline.case_id}" class="cta-button">
+                            View Case Dashboard
                         </a>
                     </div>
-                    
-                    <hr style="border: none; border-top: 1px solid #ddd; margin: 20px 0;">
-                    
-                    <p style="font-size: 12px; color: #666;">
-                        This is an automated reminder from LegalAssist AI. 
-                        You can manage your notification preferences in your account settings.
-                    </p>
                 </div>
-            </body>
+                <div class="footer">
+                    <p>This is an automated notification from your LegalAssist AI account.<br>
+                    Missing deadlines can lead to dismissal of your case. Please consult with your legal counsel immediately.</p>
+                    <p>Manage your <a href="https://legalassist.ai/settings">Notification Preferences</a></p>
+                </div>
+            </div>
+        </body>
         </html>
         """
         
