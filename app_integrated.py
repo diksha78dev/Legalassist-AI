@@ -14,11 +14,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ==================== CONFIGURATION ====================
+# FIX: layout="centered" for mobile-first users; sidebar collapsed so it
+#      doesn't cover the screen on first load on narrow viewports.
 st.set_page_config(
     page_title="LegalEase AI",
     page_icon="⚖",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="centered",                 # was "wide" — broke mobile layouts
+    initial_sidebar_state="collapsed", # was "expanded" — blocked mobile screen
 )
 
 # ==================== LOGGING SETUP ====================
@@ -110,7 +112,6 @@ def main():
 def show_judgment_analysis():
     """Original app UI for judgment analysis"""
     
-    # Retro Styling (from original app)
     st.markdown("""
     <style>
         .main {

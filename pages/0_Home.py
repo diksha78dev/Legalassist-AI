@@ -29,6 +29,50 @@ from core.app_utils import (
 
 st.markdown(RETRO_STYLING, unsafe_allow_html=True)
 
+# FIX: DevTools revealed the winning rule is:
+#   .st-emotion-cache-za2i0z h1 { font-size: 2.75rem }
+# We cannot hardcode that hash (it changes between Streamlit versions/builds).
+# Solution: use st.markdown() to inject a completely custom <div> that is NOT
+# an <h1> at all — Streamlit's h1 rules never touch it. We style it ourselves
+# with clamp() so it scales with viewport width.
+# subheader (h2) has the same problem, so we replace that too.
+
+MOBILE_HEADER_CSS = """
+<style>
+  .app-title {
+    font-size: clamp(1.0rem, 5.5vw, 1.5rem);
+    font-weight: 700;
+    line-height: 1.2;
+    margin: 0.4rem 0 0.1rem;
+    color: inherit;
+    white-space: nowrap;
+  }
+  .app-subtitle {
+    font-size: clamp(0.85rem, 3.8vw, 1.25rem);
+    font-weight: 600;
+    line-height: 1.3;
+    margin: 0.2rem 0 0.6rem;
+    color: inherit;
+    white-space: nowrap;
+  }
+  /* Samsung Galaxy S and similarly narrow devices (360px) */
+  @media (max-width: 380px) {
+    .app-title    { font-size: 1.05rem !important; }
+    .app-subtitle { font-size: 0.85rem !important; }
+    /* Reduce Streamlit's default side padding to reclaim horizontal space */
+    .block-container,
+    div[data-testid="stAppViewBlockContainer"] {
+      padding-left: 0.6rem !important;
+      padding-right: 0.6rem !important;
+    }
+  }
+  @media (max-width: 340px) {
+    .app-title    { font-size: 0.95rem !important; white-space: normal; word-break: keep-all; }
+    .app-subtitle { font-size: 0.8rem  !important; white-space: normal; word-break: keep-all; }
+  }
+</style>
+"""
+
 
 def render_page():
     """Render the judgment analysis page"""
