@@ -28,14 +28,36 @@ _scheduler: Optional[BackgroundScheduler] = None
 notification_service = NotificationService()
 
 
+def is_reminder_time_for_user(user_timezone: str, reminder_hour: int = 8) -> bool:
+    """
+    Check if current time matches the reminder hour in user's local timezone.
+    
+    Args:
+        user_timezone: User's timezone as IANA string (e.g., "Asia/Kolkata")
+        reminder_hour: Hour to send reminders (default 8 AM)
+    
+    Returns:
+        True if current time in user's timezone is within the reminder hour
+    """
+    try:
+        tz = pytz.timezone(user_timezone)
+        user_now = datetime.now(tz)
+        return user_now.hour == reminder_hour
+    except pytz.exceptions.UnknownTimeZoneError:
+        logger.warning(f"Invalid timezone '{user_timezone}', falling back to UTC")
+        # Fallback to UTC if timezone is invalid
+        user_now = datetime.now(timezone.utc)
+        return user_now.hour == reminder_hour
+
+
 def check_and_send_reminders():
     """
-    Daily job: Check all upcoming deadlines and send reminders.
-    This runs at 8 AM UTC and checks for deadlines at 30, 10, 3, and 1 day marks.
+    Hourly job: Check all upcoming deadlines and send reminders at 8 AM in each user's local timezone.
+    This runs every hour and evaluates 8 AM per user based on their saved timezone preference.
     """
     logger.info("=" * 60)
     logger.info("Starting deadline reminder check job")
-    logger.info(f"Check time: {datetime.now(timezone.utc)}")
+    logger.info(f"Check time: {datetime.now(timezone.utc)} UTC")
 
     db = SessionLocal()
     try:
@@ -62,6 +84,15 @@ def check_and_send_reminders():
 
             if not user_preference:
                 logger.warning(f"No preferences found for user {deadline.user_id}. Skipping.")
+                continue
+            
+            # Check if it's currently 8 AM in the user's local timezone
+            if not is_reminder_time_for_user(user_preference.timezone):
+                logger.debug(
+                    f"Not 8 AM yet in user's timezone",
+                    user_id=deadline.user_id,
+                    user_timezone=user_preference.timezone,
+                )
                 continue
 
             # Check if reminders should be sent based on preferences
@@ -112,18 +143,18 @@ def get_scheduler() -> BackgroundScheduler:
     if _scheduler is None:
         _scheduler = BackgroundScheduler(daemon=True)
         
-        # Schedule daily job at 8 AM UTC
-        # You can customize the timezone by setting pytz timezone
+        # Schedule hourly job that checks if it's 8 AM in each user's local timezone
+        # This respects each user's saved timezone preference
         _scheduler.add_job(
             check_and_send_reminders,
-            trigger=CronTrigger(hour=8, minute=0, second=0),  # 8 AM UTC daily
+            trigger=CronTrigger(minute=0, second=0),  # Run at the start of every hour
             id="deadline_reminder_job",
-            name="Daily Deadline Reminder Check",
+            name="Hourly Deadline Reminder Check",
             replace_existing=True,
             misfire_grace_time=300,  # 5 minute grace for misfires
         )
         
-        logger.info("Scheduler initialized. Job scheduled for 8:00 AM UTC daily.")
+        logger.info("Scheduler initialized. Job scheduled hourly to check 8 AM in user's local timezone.")
     
     return _scheduler
 
