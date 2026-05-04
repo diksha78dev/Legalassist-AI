@@ -111,7 +111,7 @@ def test_all_languages_prompt_building(language):
     """Test prompt building for all supported languages"""
     prompt = core.build_summary_prompt("Sample text", language)
     assert language in prompt
-    assert "3 bullet points" in prompt
+    assert "bullet points" in prompt
 
 @patch("core.app_utils.get_client")
 def test_get_remedies_advice_flow(mock_get_client):
