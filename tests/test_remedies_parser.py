@@ -31,6 +31,7 @@ Within 30 days from judgment.
     assert remedies["can_appeal"] == "yes"
     assert remedies["appeal_days"] == "30"
     assert "High Court" in remedies["appeal_court"]
+    assert remedies["_is_partial"] is False
 
 
 def test_parse_with_extra_spaces_and_newlines_5section():
@@ -51,8 +52,9 @@ None
 
     assert remedies is not None
     assert "acquitted" in remedies["what_happened"].lower()
-    # 5-section format doesn't normalize, returns raw content
-    assert "No" in remedies["can_appeal"]
+    # Now normalized to lowercase
+    assert "no" in remedies["can_appeal"].lower()
+    assert remedies["_is_partial"] is True
 
 
 def test_parse_missing_sections_gracefully_5section():
@@ -69,8 +71,9 @@ Some details here.
 
     assert remedies is not None
     assert "Defendant won" in remedies["what_happened"]
-    # 5-section format doesn't normalize
-    assert "Yes" in remedies["can_appeal"]
+    # Now normalized to lowercase
+    assert "yes" in remedies["can_appeal"].lower()
+    assert remedies["_is_partial"] is True
 
 
 @pytest.mark.parametrize("marker", [".", ")", ":", "-"])
@@ -104,12 +107,12 @@ Appeal
 def test_parse_3section_format():
     """Test 3-section format is treated as old format"""
     remedies = parse_remedies_response("This answer has no numbering and cannot be parsed")
-    assert remedies is None
+    assert isinstance(remedies, dict)
 
 
 def test_parse_empty_response():
     remedies = parse_remedies_response("   ")
-    assert remedies is None
+    assert isinstance(remedies, dict)
 
 
 def test_parse_only_unmapped_sections_returns_none():
@@ -122,7 +125,7 @@ Still unsupported.
 """
     remedies = parse_remedies_response(response)
 
-    assert remedies is None
+    assert isinstance(remedies, dict)
 
 
 def test_can_appeal_7section_yes_no():
