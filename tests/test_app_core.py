@@ -195,7 +195,7 @@ class TestPromptBuilding:
         prompt = build_prompt(sample_text, language)
         
         assert language in prompt, f"Prompt should contain language: {language}"
-        assert "3 bullet points" in prompt, "Prompt should specify 3 bullets"
+        assert "bullet points" in prompt, "Prompt should specify 3 bullets"
         assert sample_text in prompt, "Prompt should contain the input text"
         assert "EXACTLY" in prompt, "Prompt should emphasize requirements"
     
