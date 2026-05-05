@@ -26,6 +26,7 @@ from pypdf import PdfReader
 from langdetect import detect, DetectorFactory, detect_langs
 import pdfplumber
 from typing import Any, Dict, List
+import html as html_lib
 
 try:
     from dotenv import dotenv_values, load_dotenv

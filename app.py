@@ -25,6 +25,8 @@ from core.app_utils import (
     get_remedies_advice,
     parse_summary_bullets,
     validate_pdf_metadata,
+    get_localized_ui_text,
+    localize_yes_no,
 )
 
 # ==================== Notification System Setup ====================

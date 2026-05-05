@@ -1,4 +1,4 @@
-﻿**Legalassist AI**
+**Legalassist AI**
 
 The challenge is the Information Barrier in the Judiciary that prevents citizens from understanding their own legal outcomes. 
 Specifically: Court judgments are inaccessible to the public due to complex legal jargon and language diversity.
@@ -206,10 +206,10 @@ python scripts/generate_sample_analytics_data.py clear
 
 #### 3. Start the App
 ```bash
-streamlit run app_integrated.py
+streamlit run pages/0_Home.py
 ```
 
-**Note:** The main application entry point is `app_integrated.py`. 
+**Note:** The main application entry point is `pages/0_Home.py`. 
 - Multi-page structure with Streamlit's automatic routing
 - Pages located in `pages/` directory:
   - `0_Home.py` - Judgment analysis (main feature)
@@ -217,7 +217,7 @@ streamlit run app_integrated.py
   - `2_History.py` - Notification history
   - `3_Settings.py` - User preferences
 - Core utilities extracted to `core/app_utils.py`
-- Legacy files (`app.py`, `app_fixed.py`) have been consolidated into this unified structure
+- Legacy files (`app.py`, `app_integrated.py`) have been deprecated and consolidated into this unified structure
 
 #### 4. Access the Pages
 
