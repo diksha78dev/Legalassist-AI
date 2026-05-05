@@ -55,10 +55,10 @@ try:
         page_notification_history,
     )
     # Import original app components
+    from app import (
         get_client,
         get_remedies_advice,
         get_default_model,
-        validate_pdf_metadata,
     )
     import core
     client = None
