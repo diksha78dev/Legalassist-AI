@@ -694,9 +694,11 @@ def parse_remedies_response(response_text):
         "_warning": "",
     }
 
-    text = response_text.strip()
+    text = (response_text or "").strip()
     if not text:
-        return None
+        remedies["_is_partial"] = True
+        remedies["_warning"] = "Empty response"
+        return remedies
 
     # Detect all numbered sections (flexible separators: . ) : -)
     # Only match 1-2 digit numbers to avoid matching content like "5000-10000"
@@ -835,7 +837,7 @@ def get_remedies_advice(judgment_text, language, client=None):
 
     except Exception as e:
         logging.error(f"Failed to get remedies advice: {str(e)}")
-        raise
+        return None
 
 
 # ==================== UI STYLING & CONSTANTS ====================
