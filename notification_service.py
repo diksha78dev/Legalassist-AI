@@ -324,12 +324,7 @@ class NotificationService:
         days_left: int,
     ) -> NotificationResult:
         """Send email reminder for a deadline"""
-        case = db.query(Case).filter(Case.id == deadline.case_id).first()
-        case_number = case.case_number if case else str(deadline.case_id)
-
-        subject, html_content = self.build_email_message(
-            deadline.case_title, days_left, deadline.deadline_date, case_number
-        )
+        subject, html_content = self.build_email_message(deadline, days_left)
         success, message_id, error = self.email_client.send_email(
             user_preference.email, subject, html_content
         )

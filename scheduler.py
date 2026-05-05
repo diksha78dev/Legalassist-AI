@@ -11,6 +11,7 @@ import os
 from datetime import datetime, timezone
 from typing import Optional
 
+import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -156,6 +157,17 @@ def setup_scheduler(scheduler_class):
     return scheduler
 
 
+def get_scheduler():
+    """
+    Get or create the global background scheduler instance.
+    This is the singleton accessor for the scheduler.
+    """
+    global _scheduler
+    if _scheduler is None:
+        _scheduler = setup_scheduler(BackgroundScheduler)
+    return _scheduler
+
+
 def start_scheduler():
     """
     Start the background scheduler (legacy support for app.py).
@@ -225,14 +237,18 @@ def run_worker():
         logger.info("Worker stopped.")
 
 
-def check_reminders_sync(target_days: Optional[int] = None):
+def check_reminders_sync(target_days: Optional[int] = None, db: Optional[object] = None):
     """
     Synchronous version for testing. Optionally check only specific day threshold.
     Args:
         target_days: If specified, only check this day threshold (e.g., 30, 10, 3, 1)
         db: Optional database session. If not provided, uses SessionLocal()
     """
-    db = SessionLocal()
+    should_close = False
+    if db is None:
+        db = SessionLocal()
+        should_close = True
+    
     try:
         logger.info(f"Running synchronous reminder check (target_days={target_days})")
         upcoming_deadlines = get_upcoming_deadlines(db, days_before=31)
@@ -262,7 +278,8 @@ def check_reminders_sync(target_days: Optional[int] = None):
         return sent_count
 
     finally:
-        db.close()
+        if should_close:
+            db.close()
 
 
 if __name__ == "__main__":

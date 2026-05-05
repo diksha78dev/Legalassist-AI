@@ -678,6 +678,7 @@ def parse_remedies_response(response_text):
     Extract structured info from LLM response using flexible numbered-line parsing.
     Supports multiple separators: . ) : - 
     Handles both 5-section (old) and 7-section (new) formats.
+    Returns dict with remedies and _is_partial flag set appropriately.
     """
     remedies = {
         "what_happened": "",
@@ -695,7 +696,7 @@ def parse_remedies_response(response_text):
 
     text = response_text.strip()
     if not text:
-        return None
+        return remedies
 
     # Detect all numbered sections (flexible separators: . ) : -)
     # Only match 1-2 digit numbers to avoid matching content like "5000-10000"
@@ -708,6 +709,11 @@ def parse_remedies_response(response_text):
             num = int(match.group(1))
             header = match.group(2).strip()
             sections[num] = {"header": header, "content": ""}
+    
+    # If no numbered sections found, return empty dict with partial flag
+    if not sections:
+        remedies["_is_partial"] = True
+        return remedies
     
     # Extract content for each section
     lines = text.split('\n')
@@ -748,12 +754,14 @@ def parse_remedies_response(response_text):
             remedies["first_action"] = sections[6]["content"]
         if 7 in sections:
             remedies["deadline"] = sections[7]["content"]
+        remedies["_is_partial"] = False  # Full 7-section response
     else:
-        # 5-section format (old)
+        # 5-section format (old) - mark as partial
+        remedies["_is_partial"] = True
         if 1 in sections:
             remedies["what_happened"] = sections[1]["content"]
         if 2 in sections:
-            remedies["can_appeal"] = sections[2]["content"]
+            remedies["can_appeal"] = sections[2]["content"].lower()
         if 3 in sections:
             remedies["appeal_details"] = sections[3]["content"]
         if 4 in sections:
@@ -803,7 +811,7 @@ def get_remedies_advice(judgment_text, language, client=None):
                     "role": "system",
                     # FIX-1: was generic English; now strictly enforces the target language.
                     "content": (
-                        f"You are a legal rights advisor for Indian citizens. "
+                        f"You are a legal advisor for Indian citizens. "
                         f"You MUST answer ONLY in {language}. {language_rule} "
                         f"Never use English words or sentences unless {language} is English. "
                         f"Never mix languages. Be thorough and write 2-3 sentences per answer."
