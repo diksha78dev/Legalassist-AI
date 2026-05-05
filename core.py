@@ -502,7 +502,8 @@ def parse_remedies_response(response_text: str) -> Optional[Dict[str, Optional[s
 
     if parsed_sections == 0:
         LOGGER.warning("parse_remedies_response: no valid sections parsed")
-        return None
+        remedies["_is_partial"] = True
+        return remedies
 
     # Normalization & Compatibility
     if remedies["can_appeal"]:

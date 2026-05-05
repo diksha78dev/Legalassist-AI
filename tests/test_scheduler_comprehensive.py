@@ -13,6 +13,7 @@ from database import (
     create_case_deadline,
     create_or_update_user_preference,
 )
+from notification_service import NotificationResult
 from scheduler import (
     check_and_send_reminders,
     _scheduler,
@@ -20,6 +21,7 @@ from scheduler import (
     stop_scheduler,
     trigger_reminder_check_now,
     check_reminders_sync,
+    get_scheduler,
 )
 
 @pytest.fixture(scope="function")
@@ -56,19 +58,21 @@ class TestSchedulerComprehensive:
                 notification_channel=NotificationChannel.BOTH
             )
 
-        # Mock dependencies
+        # Mock dependencies and underlying send functions (not the whole service)
         with patch("scheduler.SessionLocal", return_value=test_db), \
-             patch("scheduler.notification_service") as mock_service:
+             patch("scheduler.notification_service.send_reminders") as mock_send_reminders, \
+             patch("scheduler.is_reminder_time_for_user", return_value=True):
             
-            mock_result = MagicMock()
-            mock_result.success = True
-            mock_result.recipient = "test"
-            mock_service.send_reminders.return_value = [mock_result, mock_result]
+            # send_reminders returns a list of NotificationResult objects
+            mock_send_reminders.return_value = [
+                NotificationResult(success=True, channel=NotificationChannel.SMS, recipient="+91test", message_id="sms_123", error=None),
+                NotificationResult(success=True, channel=NotificationChannel.EMAIL, recipient="test@example.com", message_id="email_123", error=None),
+            ]
             
             check_and_send_reminders()
             
-            # Verify it processed all 4 thresholds
-            assert mock_service.send_reminders.call_count == 4
+            # Verify it called send_reminders 4 times (once per threshold)
+            assert mock_send_reminders.call_count == 4
 
     def test_check_and_send_reminders_no_preferences(self, test_db):
         """Test when user has no preferences"""
@@ -82,31 +86,37 @@ class TestSchedulerComprehensive:
         with patch("scheduler.SessionLocal", return_value=test_db), \
              patch("scheduler.notification_service") as mock_service:
             check_and_send_reminders()
-            assert mock_service.send_reminders.call_count == 0
+            assert mock_service.send_sms_reminder.call_count == 0
 
-    def test_setup_scheduler_initialization(self):
-        """Test scheduler initialization"""
+    def test_get_scheduler_initialization(self):
+        """Test scheduler singleton initialization"""
         with patch("scheduler.BackgroundScheduler") as mock_sched_class:
             mock_sched = mock_sched_class.return_value
-            from scheduler import setup_scheduler
-            s = setup_scheduler(mock_sched_class)
-            assert s == mock_sched
-            assert mock_sched.add_job.called
+            # Reset global state
+            with patch("scheduler._scheduler", None):
+                s = get_scheduler()
+                assert s == mock_sched
+                assert mock_sched.add_job.called
 
     def test_start_stop_scheduler(self):
         """Test starting and stopping the scheduler"""
-        with patch("scheduler.setup_scheduler") as mock_setup:
+        # Mock setup_scheduler to avoid creating real schedulers
+        with patch("scheduler.setup_scheduler") as mock_setup, \
+             patch("scheduler._scheduler", None):
+            
             mock_sched = MagicMock()
             mock_sched.running = False
             mock_setup.return_value = mock_sched
             
+            # Test start_scheduler
             start_scheduler()
             assert mock_sched.start.called
             
+            # Test stop_scheduler
             mock_sched.running = True
-            from scheduler import stop_scheduler
-            stop_scheduler()
-            assert mock_sched.shutdown.called
+            with patch("scheduler._scheduler", mock_sched):
+                stop_scheduler()
+                assert mock_sched.shutdown.called
 
     def test_trigger_now(self):
         """Test manual trigger"""

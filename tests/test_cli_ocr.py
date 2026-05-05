@@ -36,14 +36,19 @@ def test_parser_accepts_enable_ocr_flags():
 
 
 def test_process_one_pdf_uses_diagnostics(monkeypatch):
-    mock_extract = MagicMock()
-    mock_extract.return_value = {
+    mock_core = MagicMock()
+    mock_core.extract_text_with_diagnostics.return_value = {
         "text": "Sample judgment text",
         "method": "ocr_tesseract",
         "ocr_used": True,
         "confidence": 88.2,
     }
-    monkeypatch.setattr(cli.core, "extract_text_with_diagnostics", mock_extract)
+    # Mock other core functions that are called
+    mock_core.compress_text.return_value = "Sample judgment text"
+    mock_core.build_summary_prompt.return_value = "Summarize: Sample judgment text"
+    mock_core.output_language_mismatch_detected.return_value = False
+    mock_core.build_remedies_prompt.return_value = "Analyze remedies: Sample judgment text"
+    monkeypatch.setattr(cli, "core", mock_core)
 
     result = cli.process_one_pdf(
         pdf_path=Path("sample.pdf"),
@@ -63,4 +68,4 @@ def test_process_one_pdf_uses_diagnostics(monkeypatch):
     assert result["ocr_used"] is True
     assert result["ocr_enabled"] is True
     assert result["extraction_confidence"] == "88.2"
-    mock_extract.assert_called_once()
+    mock_core.extract_text_with_diagnostics.assert_called_once()
