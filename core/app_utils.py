@@ -694,8 +694,10 @@ def parse_remedies_response(response_text):
         "_warning": "",
     }
 
-    text = response_text.strip()
+    text = (response_text or "").strip()
     if not text:
+        remedies["_is_partial"] = True
+        remedies["_warning"] = "Empty response"
         return remedies
 
     # Detect all numbered sections (flexible separators: . ) : -)
