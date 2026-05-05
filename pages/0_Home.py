@@ -43,123 +43,152 @@ def render_page():
 
     language = st.selectbox(ui["language_label"], LANGUAGES, key="judgment_language")
     ui = get_localized_ui_text(language, client)
-    uploaded_file = st.file_uploader(ui["upload_label"], type=["pdf"])
+    
+    input_method = st.radio(
+        ui["input_method"],
+        [ui["upload_pdf"], ui["paste_text"]],
+        horizontal=True,
+    )
+
+    is_valid_input = False
+    uploaded_file = None
+    pasted_text = None
+
+    if input_method == ui["upload_pdf"]:
+        uploaded_file = st.file_uploader(ui["upload_label"], type=["pdf"])
+        if uploaded_file:
+            is_valid_input = True
+    else:
+        pasted_text = st.text_area(
+            ui.get("paste_text", "📋 Paste Text"),
+            height=250,
+        )
+        if pasted_text and pasted_text.strip():
+            is_valid_input = True
+
     st.markdown("---")
 
-    if uploaded_file and st.button(ui["generate_summary"], use_container_width=True):
-        with st.spinner(ui["processing"]):
-            try:
+    if st.button(ui["generate_summary"], use_container_width=True):
+        if not is_valid_input:
+            st.error("Please upload a PDF or paste the judgment text to continue.")
+        else:
+            with st.spinner(ui["processing"]):
                 try:
-                    client = get_client()
-                    ui = get_localized_ui_text(language, client)
-                except Exception as e:
-                    st.error(f"❌ {ui['api_client_failed']}: {str(e)}")
-                    return
+                    try:
+                        client = get_client()
+                        ui = get_localized_ui_text(language, client)
+                    except Exception as e:
+                        st.error(f"❌ {ui['api_client_failed']}: {str(e)}")
+                        return
 
-                raw_text = extract_text_from_pdf(uploaded_file)
-                safe_text = compress_text(raw_text)
+                    if input_method == ui["upload_pdf"]:
+                        raw_text = extract_text_from_pdf(uploaded_file)
+                    else:
+                        raw_text = pasted_text
+                    
+                    safe_text = compress_text(raw_text)
 
-                prompt = build_prompt(safe_text, language)
-                model_id = "meta-llama/llama-3.1-8b-instruct"
+                    prompt = build_prompt(safe_text, language)
+                    model_id = "meta-llama/llama-3.1-8b-instruct"
 
-                response = client.chat.completions.create(
-                    model=model_id,
-                    messages=[
-                        {"role": "system", "content": f"You are an expert legal simplification engine. Output only in {language}."},
-                        {"role": "user", "content": prompt},
-                    ],
-                    max_tokens=280,
-                    temperature=0.05,
-                )
-
-                summary = response.choices[0].message.content.strip()
-
-                if language.lower() != "english" and output_language_mismatch_detected(summary, language):
-                    retry_prompt = build_retry_prompt(safe_text, language)
-                    response2 = client.chat.completions.create(
+                    response = client.chat.completions.create(
                         model=model_id,
                         messages=[
-                            {"role": "system", "content": f"Strict multilingual rewriting engine. Output only in {language}."},
-                            {"role": "user", "content": retry_prompt},
+                            {"role": "system", "content": f"You are an expert legal simplification engine. Output only in {language}."},
+                            {"role": "user", "content": prompt},
                         ],
-                        max_tokens=260,
-                        temperature=0.03,
+                        max_tokens=280,
+                        temperature=0.05,
                     )
-                    retry_summary = response2.choices[0].message.content.strip()
-                    if len(retry_summary) > 0 and not output_language_mismatch_detected(retry_summary, language):
-                        summary = retry_summary
 
-                if not summary:
-                    st.error(ui["empty_summary"])
-                else:
-                    remedies = {}
+                    summary = response.choices[0].message.content.strip()
 
-                    with st.spinner(ui["remedies_spinner"]):
-                        try:
-                            remedies = get_remedies_advice(raw_text, language, client) or {}
-                        except Exception as e:
-                            st.error(f"{ui['remedies_error']}: {str(e)}")
+                    if language.lower() != "english" and output_language_mismatch_detected(summary, language):
+                        retry_prompt = build_retry_prompt(safe_text, language)
+                        response2 = client.chat.completions.create(
+                            model=model_id,
+                            messages=[
+                                {"role": "system", "content": f"Strict multilingual rewriting engine. Output only in {language}."},
+                                {"role": "user", "content": retry_prompt},
+                            ],
+                            max_tokens=260,
+                            temperature=0.03,
+                        )
+                        retry_summary = response2.choices[0].message.content.strip()
+                        if len(retry_summary) > 0 and not output_language_mismatch_detected(retry_summary, language):
+                            summary = retry_summary
 
-                    # build_judgment_result_text now returns (plain_text, structured_dict)
-                    result = build_judgment_result_text(summary, remedies, ui)
+                    if not summary:
+                        st.error(ui["empty_summary"])
+                    else:
+                        remedies = {}
 
-                    # render_shareable_result_box accepts the tuple directly
-                    render_shareable_result_box(result, ui)
-                    st.success(ui["summary_success"])
+                        with st.spinner(ui["remedies_spinner"]):
+                            try:
+                                remedies = get_remedies_advice(raw_text, language, client) or {}
+                            except Exception as e:
+                                st.error(f"{ui['remedies_error']}: {str(e)}")
 
-                    # ===== ANALYTICS & TRACKING SECTION =====
-                    st.markdown("---")
-                    st.markdown(f"## {ui['track_title']}")
-                    st.info(ui["track_info"])
+                        # build_judgment_result_text now returns (plain_text, structured_dict)
+                        result = build_judgment_result_text(summary, remedies, ui)
 
-                    col1, col2, col3 = st.columns(3)
+                        # render_shareable_result_box accepts the tuple directly
+                        render_shareable_result_box(result, ui)
+                        st.success(ui["summary_success"])
 
-                    with col1:
-                        if st.button(ui["view_analytics"], key="view_analytics"):
-                            st.session_state.show_analytics = True
+                        # ===== ANALYTICS & TRACKING SECTION =====
+                        st.markdown("---")
+                        st.markdown(f"## {ui['track_title']}")
+                        st.info(ui["track_info"])
 
-                    with col2:
-                        if st.button(ui["estimate_chances"], key="estimate_chances"):
-                            st.session_state.show_estimator = True
+                        col1, col2, col3 = st.columns(3)
 
-                    with col3:
-                        if st.button(ui["report_outcome"], key="report_outcome"):
-                            st.session_state.show_feedback = True
+                        with col1:
+                            if st.button(ui["view_analytics"], key="view_analytics"):
+                                st.session_state.show_analytics = True
 
-                    if st.session_state.get("show_analytics"):
-                        st.subheader(ui["quick_analytics_preview"])
-                        try:
-                            from analytics_engine import AnalyticsAggregator
-                            from database import SessionLocal
+                        with col2:
+                            if st.button(ui["estimate_chances"], key="estimate_chances"):
+                                st.session_state.show_estimator = True
 
-                            db = SessionLocal()
-                            summary_data = AnalyticsAggregator.get_dashboard_summary(db)
+                        with col3:
+                            if st.button(ui["report_outcome"], key="report_outcome"):
+                                st.session_state.show_feedback = True
 
-                            if summary_data.get("total_cases_processed", 0) > 0:
-                                col1, col2, col3 = st.columns(3)
-                                with col1:
-                                    st.metric(ui["total_cases_tracked"], summary_data["total_cases_processed"])
-                                with col2:
-                                    trends = AnalyticsAggregator.get_regional_trends(db)
-                                    success_rate = trends[0]['appeal_success_rate'] if trends else 'N/A'
-                                    st.metric(ui["appeals_success_rate"], f"{success_rate}%")
-                                with col3:
-                                    st.metric(ui["appeals_filed"], summary_data.get("appeals_filed", 0))
-                                st.write(f"📌 **{ui['analytics_link_text']}**")
-                            else:
-                                st.info(ui["analytics_empty"])
+                        if st.session_state.get("show_analytics"):
+                            st.subheader(ui["quick_analytics_preview"])
+                            try:
+                                from analytics_engine import AnalyticsAggregator
+                                from database import SessionLocal
 
-                            db.close()
-                        except Exception as e:
-                            st.info(ui["analytics_not_ready"])
+                                db = SessionLocal()
+                                summary_data = AnalyticsAggregator.get_dashboard_summary(db)
 
-            except Exception as e:
-                err = str(e)
-                if "402" in err or "credits" in err.lower():
-                    st.error(ui["not_enough_credits"])
-                else:
-                    st.error(ui["generic_error"].format(error=err))
-                    logging.error(f"Error in judgment analysis: {err}")
+                                if summary_data.get("total_cases_processed", 0) > 0:
+                                    col1, col2, col3 = st.columns(3)
+                                    with col1:
+                                        st.metric(ui["total_cases_tracked"], summary_data["total_cases_processed"])
+                                    with col2:
+                                        trends = AnalyticsAggregator.get_regional_trends(db)
+                                        success_rate = trends[0]['appeal_success_rate'] if trends else 'N/A'
+                                        st.metric(ui["appeals_success_rate"], f"{success_rate}%")
+                                    with col3:
+                                        st.metric(ui["appeals_filed"], summary_data.get("appeals_filed", 0))
+                                    st.write(f"📌 **{ui['analytics_link_text']}**")
+                                else:
+                                    st.info(ui["analytics_empty"])
+
+                                db.close()
+                            except Exception as e:
+                                st.info(ui["analytics_not_ready"])
+
+                except Exception as e:
+                    err = str(e)
+                    if "402" in err or "credits" in err.lower():
+                        st.error(ui["not_enough_credits"])
+                    else:
+                        st.error(ui["generic_error"].format(error=err))
+                        logging.error(f"Error in judgment analysis: {err}")
 
 
 if __name__ == "__main__":

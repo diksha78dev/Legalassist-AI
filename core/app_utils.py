@@ -688,6 +688,9 @@ UI_TEXT = {
         "complex court judgments into clear, 3-point summaries in your chosen language."
     ),
     "language_label": "🌐 Select your language",
+    "input_method": "How would you like to provide the judgment?",
+    "upload_pdf": "📄 Upload PDF",
+    "paste_text": "📋 Paste Text",
     "download_summary_txt": "Download Summary (TXT)",
     "copy_result": "Copy",
     "copied_result": "Copied",
@@ -1091,6 +1094,17 @@ def _format_result_paragraph(paragraph):
 
     def split_bullets(text):
         raw_lines = [line.strip() for line in text.splitlines() if line.strip()]
+        
+        # Skip intro sentences by finding the first actual bullet
+        first_bullet_idx = 0
+        for i, line in enumerate(raw_lines):
+            if bullet_pattern.match(line):
+                first_bullet_idx = i
+                break
+        
+        if first_bullet_idx > 0:
+            raw_lines = raw_lines[first_bullet_idx:]
+            
         items = []
         for line in raw_lines:
             normalized_line = re.sub(r"\s+([*\u2022])\s+", r"\n\1 ", line)
@@ -1098,7 +1112,8 @@ def _format_result_paragraph(paragraph):
             parts = [part.strip() for part in normalized_line.splitlines() if part.strip()]
             for part in parts:
                 cleaned = bullet_pattern.sub("", part, count=1).strip(" -")
-                if cleaned:
+                # Also ignore trailing intro statements that might have been part of the line
+                if cleaned and not cleaned.endswith(":"):
                     items.append(cleaned)
         if len(items) <= 1:
             compact_parts = re.split(r"\s+(?:[-*\u2022]|\d+[.)])\s+(?=\S)", text)
