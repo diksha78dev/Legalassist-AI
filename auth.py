@@ -131,8 +131,11 @@ def send_otp_email(email: str, otp: str) -> bool:
         from_email = os.getenv("SENDGRID_FROM_EMAIL", "noreply@legalassist.ai")
 
         if not api_key:
-            logger.warning("SendGrid API key not configured, logging OTP instead")
-            logger.info(f"OTP for {email}: {otp}")
+            logger.warning("SendGrid API key not configured - using masked OTP logging")
+            if _is_debug_or_testing_mode():
+                logger.debug(f"OTP for {email}: [MASKED-{otp[:2]}***{otp[-1]}]")
+            else:
+                logger.warning(f"OTP requested for {email} (email delivery skipped - missing config)")
             return True  # Return True in development mode
 
         sg = sendgrid.SendGridAPIClient(api_key=api_key)
@@ -169,8 +172,11 @@ def send_otp_email(email: str, otp: str) -> bool:
 
     except Exception as e:
         logger.error(f"Failed to send OTP email to {email}: {str(e)}")
-        # Fallback: log OTP for development
-        logger.info(f"OTP for {email}: {otp}")
+        # Fallback: masked OTP logging only in debug mode
+        if _is_debug_or_testing_mode():
+            logger.debug(f"OTP for {email}: [MASKED-{otp[:2]}***{otp[-1]}]")
+        else:
+            logger.warning(f"OTP delivery failed for {email} (check email service config)")
         return False
 
 
@@ -328,7 +334,12 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
 
         # Check if OTP is locked due to too many failed attempts
         if otp_record.is_locked():
-            remaining_time = (otp_record.locked_until - datetime.now(timezone.utc)).total_seconds() / 60
+            # Ensure locked_until is timezone-aware
+            locked_until = otp_record.locked_until
+            if locked_until and locked_until.tzinfo is None:
+                locked_until = locked_until.replace(tzinfo=timezone.utc)
+            
+            remaining_time = (locked_until - datetime.now(timezone.utc)).total_seconds() / 60
             logger.warning(f"OTP verification attempt for {email} blocked - OTP is locked (remaining time: {remaining_time:.1f} minutes)")
             return False, f"Too many failed attempts. Please request a new OTP after {int(remaining_time)} minutes.", None
 

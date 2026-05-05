@@ -11,6 +11,7 @@ import os
 from datetime import datetime, timezone
 from typing import Optional
 
+import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -38,14 +39,40 @@ _scheduler: Optional[BackgroundScheduler] = None
 notification_service = NotificationService()
 
 
+def is_reminder_time_for_user(user_timezone: str, reminder_hour: int = 8) -> bool:
+    """
+    Check if current time matches the reminder hour in user's local timezone.
+    
+    Args:
+        user_timezone: User's timezone as IANA string (e.g., "Asia/Kolkata")
+        reminder_hour: Hour to send reminders (default 8 AM)
+    
+    Returns:
+        True if current time in user's timezone is within the reminder hour
+    """
+    try:
+        tz = pytz.timezone(user_timezone)
+        user_now = datetime.now(tz)
+        return user_now.hour == reminder_hour
+    except pytz.exceptions.UnknownTimeZoneError:
+        logger.warning(f"Invalid timezone '{user_timezone}', falling back to UTC")
+        # Fallback to UTC if timezone is invalid
+        user_now = datetime.now(timezone.utc)
+        return user_now.hour == reminder_hour
+
+
 def check_and_send_reminders():
     """
-    Daily job: Check all upcoming deadlines and send reminders.
-    This runs at 8 AM UTC and checks for deadlines at 30, 10, 3, and 1 day marks.
+    Hourly job: Check all upcoming deadlines and send reminders at 8 AM in each user's local timezone.
+    This runs every hour and evaluates 8 AM per user based on their saved timezone preference.
     """
     logger.info("=" * 60)
     logger.info("Starting deadline reminder check job")
-    logger.info(f"Check time: {datetime.now(timezone.utc)}")
+    logger.info(f"Check time: {datetime.now(timezone.utc)} UTC")
+
+    # Ensure tables exist when running from a fresh DB.
+    from database import init_db
+    init_db()
 
     db = SessionLocal()
     try:
@@ -70,6 +97,15 @@ def check_and_send_reminders():
 
             if not user_preference:
                 logger.warning(f"No preferences found for user {deadline.user_id}. Skipping.")
+                continue
+            
+            # Check if it's currently 8 AM in the user's local timezone
+            if not is_reminder_time_for_user(user_preference.timezone):
+                logger.debug(
+                    f"Not 8 AM yet in user's timezone",
+                    user_id=deadline.user_id,
+                    user_timezone=user_preference.timezone,
+                )
                 continue
 
             # Check if reminders should be sent based on preferences
@@ -123,6 +159,17 @@ def setup_scheduler(scheduler_class):
     )
     
     return scheduler
+
+
+def get_scheduler():
+    """
+    Get or create the global background scheduler instance.
+    This is the singleton accessor for the scheduler.
+    """
+    global _scheduler
+    if _scheduler is None:
+        _scheduler = setup_scheduler(BackgroundScheduler)
+    return _scheduler
 
 
 def start_scheduler():
@@ -194,13 +241,18 @@ def run_worker():
         logger.info("Worker stopped.")
 
 
-def check_reminders_sync(target_days: Optional[int] = None):
+def check_reminders_sync(target_days: Optional[int] = None, db: Optional[object] = None):
     """
     Synchronous version for testing. Optionally check only specific day threshold.
     Args:
         target_days: If specified, only check this day threshold (e.g., 30, 10, 3, 1)
+        db: Optional database session. If not provided, uses SessionLocal()
     """
-    db = SessionLocal()
+    should_close = False
+    if db is None:
+        db = SessionLocal()
+        should_close = True
+    
     try:
         logger.info(f"Running synchronous reminder check (target_days={target_days})")
         upcoming_deadlines = get_upcoming_deadlines(db, days_before=31)
@@ -230,7 +282,8 @@ def check_reminders_sync(target_days: Optional[int] = None):
         return sent_count
 
     finally:
-        db.close()
+        if should_close:
+            db.close()
 
 
 if __name__ == "__main__":

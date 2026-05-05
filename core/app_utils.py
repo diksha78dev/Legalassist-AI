@@ -52,6 +52,7 @@ def get_default_model():
         import streamlit as st
         return st.secrets.get("DEFAULT_MODEL", DEFAULT_MODEL)
     except (KeyError, FileNotFoundError, RuntimeError, AttributeError):
+        # Fallback to module DEFAULT_MODEL if secrets are unavailable
         return DEFAULT_MODEL
 
 
@@ -675,16 +676,10 @@ def _validate_court_name(value: str) -> str:
 def parse_remedies_response(response_text):
     """
     Extract structured info from LLM response using flexible numbered-line parsing.
+    Supports multiple separators: . ) : - 
+    Handles both 5-section (old) and 7-section (new) formats.
+    Returns dict with remedies and _is_partial flag set appropriately.
     """
-    mapping = {
-        1: "what_happened",
-        2: "can_appeal",
-        3: "appeal_days",
-        4: "appeal_court",
-        5: "cost_estimate",
-        6: "first_action",
-        7: "deadline",
-    }
     remedies = {
         "what_happened": "",
         "can_appeal": "",
@@ -699,52 +694,82 @@ def parse_remedies_response(response_text):
         "_warning": "",
     }
 
-    text = response_text.strip()
+    text = (response_text or "").strip()
     if not text:
-        return remedies
-
-    # Use robust marker-based parsing
-    marker_pattern = re.compile(r"(?m)^\s*(?:\*\*)?(\d{1,2})(?:\*\*)?\s*[\.|\)|:|-]\s*(.*)$")
-    matches = list(marker_pattern.finditer(text))
-
-    if not matches:
-        logging.warning("parse_remedies_response: no numbered sections found")
-        return remedies
-
-    for idx, match in enumerate(matches):
-        section_num = int(match.group(1))
-        key = mapping.get(section_num)
-        if not key:
-            continue
-        start = match.end()
-        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
-        inline_text = _clean_answer(match.group(2))
-        block_text = _clean_answer(text[start:end])
-        section_text = _clean_answer(
-            " ".join(part for part in [inline_text, block_text] if part)
-        )
-        cleaned = _strip_question_label(key, section_text)
-        if cleaned:
-            remedies[key] = cleaned
-
-    # Normalize
-    if remedies["can_appeal"]:
-        remedies["can_appeal"] = _normalize_yes_no(remedies["can_appeal"])
-
-    if remedies["appeal_days"]:
-        remedies["appeal_days"] = _extract_number(remedies["appeal_days"])
-
-    if remedies["appeal_court"]:
-        remedies["appeal_court"] = _validate_court_name(remedies["appeal_court"])
-
-    if remedies["cost_estimate"]:
-        remedies["cost"] = remedies["cost_estimate"]
-
-    required = ["what_happened", "can_appeal", "appeal_days", "appeal_court", "cost", "first_action", "deadline"]
-    missing = [f for f in required if not remedies[f]]
-    if missing:
         remedies["_is_partial"] = True
-        remedies["_warning"] = "Note: Some information may be incomplete."
+        remedies["_warning"] = "Empty response"
+        return remedies
+
+    # Detect all numbered sections (flexible separators: . ) : -)
+    # Only match 1-2 digit numbers to avoid matching content like "5000-10000"
+    pattern = r'^([1-9]\d?)\s*[.):‐-]\s*(.*?)$'
+    sections = {}
+    
+    for line in text.split('\n'):
+        match = re.match(pattern, line.strip())
+        if match:
+            num = int(match.group(1))
+            header = match.group(2).strip()
+            sections[num] = {"header": header, "content": ""}
+    
+    # If no numbered sections found, return empty dict with partial flag
+    if not sections:
+        remedies["_is_partial"] = True
+        return remedies
+    
+    # Extract content for each section
+    lines = text.split('\n')
+    current_section = None
+    
+    for line in lines:
+        match = re.match(pattern, line.strip())
+        if match:
+            current_section = int(match.group(1))
+        elif current_section is not None and current_section in sections:
+            if line.strip():  # Only add non-empty lines
+                sections[current_section]["content"] += line.strip() + " "
+    
+    # Clean up content
+    for num in sections:
+        sections[num]["content"] = sections[num]["content"].strip()
+    
+    # Map sections to keys based on count
+    is_7section = len(sections) >= 7
+    
+    if is_7section:
+        if 1 in sections:
+            remedies["what_happened"] = sections[1]["content"]
+        if 2 in sections:
+            can_appeal_text = sections[2]["content"].lower()
+            remedies["can_appeal"] = "yes" if "yes" in can_appeal_text else "no"
+        if 3 in sections:
+            # Extract just the number from "30 days"
+            appeal_days_text = sections[3]["content"]
+            match = re.search(r'\d+', appeal_days_text)
+            remedies["appeal_days"] = match.group() if match else appeal_days_text
+        if 4 in sections:
+            remedies["appeal_court"] = sections[4]["content"]
+        if 5 in sections:
+            remedies["cost_estimate"] = sections[5]["content"]
+            remedies["cost"] = sections[5]["content"]  # Support both keys
+        if 6 in sections:
+            remedies["first_action"] = sections[6]["content"]
+        if 7 in sections:
+            remedies["deadline"] = sections[7]["content"]
+        remedies["_is_partial"] = False  # Full 7-section response
+    else:
+        # 5-section format (old) - mark as partial
+        remedies["_is_partial"] = True
+        if 1 in sections:
+            remedies["what_happened"] = sections[1]["content"]
+        if 2 in sections:
+            remedies["can_appeal"] = sections[2]["content"].lower()
+        if 3 in sections:
+            remedies["appeal_details"] = sections[3]["content"]
+        if 4 in sections:
+            remedies["first_action"] = sections[4]["content"]
+        if 5 in sections:
+            remedies["deadline"] = sections[5]["content"]
 
     return remedies
 
@@ -788,7 +813,7 @@ def get_remedies_advice(judgment_text, language, client=None):
                     "role": "system",
                     # FIX-1: was generic English; now strictly enforces the target language.
                     "content": (
-                        f"You are a legal rights advisor for Indian citizens. "
+                        f"You are a legal advisor for Indian citizens. "
                         f"You MUST answer ONLY in {language}. {language_rule} "
                         f"Never use English words or sentences unless {language} is English. "
                         f"Never mix languages. Be thorough and write 2-3 sentences per answer."
@@ -862,6 +887,13 @@ UI_TEXT = {
         "complex court judgments into clear, 3-point summaries in your chosen language."
     ),
     "language_label": "🌐 Select your language",
+    "input_method": "How would you like to provide the judgment?",
+    "upload_pdf": "📄 Upload PDF",
+    "paste_text": "📋 Paste Text",
+    "download_summary_txt": "Download Summary (TXT)",
+    "copy_result": "Copy",
+    "copied_result": "Copied",
+    "download_result_txt": "Download",
     "upload_label": "📄 Upload Judgment PDF",
     "generate_summary": "🚀 Generate Summary",
     "processing": "Processing judgment...",
@@ -1100,6 +1132,620 @@ def localize_yes_no(value, ui_text):
     if normalized == "no":
         return ui_text.get("no", "No")
     return value
+
+
+def _plain_text_from_markdown(text):
+    plain_text = str(text or "")
+    plain_text = re.sub(r"\*\*(.*?)\*\*", r"\1", plain_text)
+    plain_text = re.sub(r"(?m)^\s*[-*]\s+", "- ", plain_text)
+    return plain_text.strip()
+
+
+def _normalize_bullet_lines(text):
+    normalized = str(text or "").strip()
+    if not normalized:
+        return ""
+    normalized = re.sub(r"\s+([*\u2022])\s+", r"\n\1 ", normalized)
+    normalized = re.sub(r"\s+-\s+(?=[A-Z0-9\"'])", "\n- ", normalized)
+    normalized = re.sub(r"\s+(\d+[.)])\s+(?=\S)", r"\n\1 ", normalized)
+    normalized = re.sub(r"^\n+", "", normalized)
+    return normalized.strip()
+
+
+# ==================== FIX-2: build_judgment_result_text returns structured data ====================
+# OLD: returned a single flat plain-text string; the HTML renderer tried to guess
+#      question/answer pairs by alternating lines — this broke when content had
+#      varying line counts per field.
+# FIX: now returns a tuple (plain_text: str, structured: dict).
+#      render_shareable_result_box uses the structured dict for HTML rendering,
+#      and plain_text for copy/download — so both are always correct.
+
+def build_judgment_result_text(summary, remedies, ui_text):
+    """
+    Build result content.
+    Returns: (plain_text: str, structured: dict)
+    - plain_text  → used for copy/download buttons (unchanged from before)
+    - structured  → used by render_shareable_result_box for correct HTML layout
+    """
+    ui_text = ui_text or UI_TEXT
+    remedies = remedies or {}
+    summary = _normalize_bullet_lines(summary)
+
+    # ---- plain text (unchanged behaviour) ----
+    sections = [
+        f"{ui_text.get('simplified_judgment', 'Simplified Judgment')}\n\n{str(summary or '').strip()}"
+    ]
+
+    remedies_lines = [ui_text.get("remedies_title", "What Can You Do Now?")]
+
+    if remedies.get("_is_partial"):
+        remedies_lines.append(ui_text.get("partial_warning", remedies.get("_warning", "")))
+
+    if remedies.get("what_happened"):
+        remedies_lines.extend([
+            ui_text.get("what_happened", "What Happened?"),
+            str(remedies["what_happened"]).strip(),
+        ])
+
+    if remedies.get("can_appeal"):
+        can_appeal_value = str(remedies["can_appeal"]).strip()
+        remedies_lines.extend([
+            ui_text.get("can_appeal", "Can You Appeal?"),
+            str(localize_yes_no(can_appeal_value, ui_text)).strip(),
+        ])
+        if can_appeal_value.lower() == "yes":
+            appeal_details = []
+            if remedies.get("appeal_days"):
+                appeal_details.append(
+                    f"{ui_text.get('days_to_file_appeal', 'Days to File Appeal')}: {remedies['appeal_days']}"
+                )
+            if remedies.get("appeal_court"):
+                appeal_details.append(
+                    f"{ui_text.get('appeal_to', 'Appeal to')}: {remedies['appeal_court']}"
+                )
+            if remedies.get("cost"):
+                appeal_details.append(
+                    f"{ui_text.get('estimated_cost', 'Estimated Cost')}: {remedies['cost']}"
+                )
+            if appeal_details:
+                remedies_lines.append(ui_text.get("appeal_details", "Appeal Details"))
+                remedies_lines.extend(appeal_details)
+
+    if remedies.get("first_action"):
+        remedies_lines.extend([
+            ui_text.get("first_action", "What Should You Do First?"),
+            str(remedies["first_action"]).strip(),
+        ])
+
+    if remedies.get("deadline"):
+        remedies_lines.extend([
+            ui_text.get("important_deadline", "Important Deadline"),
+            str(remedies["deadline"]).strip(),
+        ])
+
+    if len(remedies_lines) == 1:
+        remedies_lines.append(ui_text.get("partial_warning", "Note: Some information may be incomplete."))
+
+    sections.append("\n\n".join(line for line in remedies_lines if str(line).strip()))
+
+    legal_help = _plain_text_from_markdown(ui_text.get("legal_help_resources", ""))
+    if legal_help:
+        sections.append(
+            f"{ui_text.get('free_legal_help', 'Free Legal Help')}\n\n{legal_help}"
+        )
+
+    plain_text = "\n\n".join(section.strip() for section in sections if section.strip())
+
+    # ---- structured dict for HTML renderer ----
+    can_appeal_raw = str(remedies.get("can_appeal", "")).strip()
+    can_appeal_display = localize_yes_no(can_appeal_raw, ui_text)
+
+    qa_pairs = []  # list of {"question": str, "answer": str}
+
+    if remedies.get("what_happened"):
+        qa_pairs.append({
+            "question": ui_text.get("what_happened", "What Happened?"),
+            "answer": str(remedies["what_happened"]).strip(),
+        })
+
+    if remedies.get("can_appeal"):
+        answer_parts = [can_appeal_display]
+        if can_appeal_raw.lower() == "yes":
+            if remedies.get("appeal_days"):
+                answer_parts.append(
+                    f"{ui_text.get('days_to_file_appeal', 'Days to File Appeal')}: {remedies['appeal_days']}"
+                )
+            if remedies.get("appeal_court"):
+                answer_parts.append(
+                    f"{ui_text.get('appeal_to', 'Appeal to')}: {remedies['appeal_court']}"
+                )
+            if remedies.get("cost"):
+                answer_parts.append(
+                    f"{ui_text.get('estimated_cost', 'Estimated Cost')}: {remedies['cost']}"
+                )
+        qa_pairs.append({
+            "question": ui_text.get("can_appeal", "Can You Appeal?"),
+            "answer": "\n".join(answer_parts),
+        })
+
+    if remedies.get("first_action"):
+        qa_pairs.append({
+            "question": ui_text.get("first_action", "What Should You Do First?"),
+            "answer": str(remedies["first_action"]).strip(),
+        })
+
+    if remedies.get("deadline"):
+        qa_pairs.append({
+            "question": ui_text.get("important_deadline", "⏰ Important Deadline"),
+            "answer": str(remedies["deadline"]).strip(),
+        })
+
+    structured = {
+        "summary_title": ui_text.get("simplified_judgment", "✅ Simplified Judgment"),
+        "summary": str(summary or "").strip(),
+        "remedies_title": ui_text.get("remedies_title", "⚖️ What Can You Do Now?"),
+        "qa_pairs": qa_pairs,
+        "partial_warning": remedies.get("_warning", "") if remedies.get("_is_partial") else "",
+        "free_legal_help_title": ui_text.get("free_legal_help", "📞 Free Legal Help"),
+        "legal_help_resources": _plain_text_from_markdown(ui_text.get("legal_help_resources", "")),
+    }
+
+    return plain_text, structured
+
+
+def _format_result_paragraph(paragraph):
+    """Convert plain-text paragraph into readable, styled HTML."""
+    paragraph = str(paragraph or "").strip()
+    if not paragraph:
+        return ""
+
+    bullet_pattern = re.compile(r"^\s*(?:[-*\u2022]|\d+[.)])\s+")
+
+    def format_inline(text):
+        escaped = html_lib.escape(str(text or "").strip())
+        return re.sub(
+            r"^([^:]{2,42}):\s*(.+)$",
+            r"<strong>\1:</strong> \2",
+            escaped,
+            count=1,
+        )
+
+    def split_bullets(text):
+        raw_lines = [line.strip() for line in text.splitlines() if line.strip()]
+        
+        # Skip intro sentences by finding the first actual bullet
+        first_bullet_idx = 0
+        for i, line in enumerate(raw_lines):
+            if bullet_pattern.match(line):
+                first_bullet_idx = i
+                break
+        
+        if first_bullet_idx > 0:
+            raw_lines = raw_lines[first_bullet_idx:]
+            
+        items = []
+        for line in raw_lines:
+            normalized_line = re.sub(r"\s+([*\u2022])\s+", r"\n\1 ", line)
+            normalized_line = re.sub(r"\s+-\s+(?=[A-Z0-9\"'])", "\n- ", normalized_line)
+            parts = [part.strip() for part in normalized_line.splitlines() if part.strip()]
+            for part in parts:
+                cleaned = bullet_pattern.sub("", part, count=1).strip(" -")
+                # Also ignore trailing intro statements that might have been part of the line
+                if cleaned and not cleaned.endswith(":"):
+                    items.append(cleaned)
+        if len(items) <= 1:
+            compact_parts = re.split(r"\s+(?:[-*\u2022]|\d+[.)])\s+(?=\S)", text)
+            if len(compact_parts) > 1:
+                items = [part.strip(" -") for part in compact_parts if part.strip(" -")]
+        return items
+
+    items = split_bullets(paragraph)
+    is_list = len(items) > 1 or bullet_pattern.match(paragraph)
+
+    if is_list:
+        if len(items) == 1 and "." in items[0]:
+            sentence_items = re.split(r"(?<=[.!?])\s+(?=[A-Z])", items[0])
+            if len(sentence_items) >= 3:
+                items = [item.strip() for item in sentence_items if item.strip()]
+        list_items = []
+        for item in items:
+            cleaned = bullet_pattern.sub("", item, count=1).strip()
+            if cleaned:
+                list_items.append(f"<li>{format_inline(cleaned)}</li>")
+        return f"<ol class=\"result-list\">{''.join(list_items)}</ol>" if list_items else ""
+
+    return f"<p>{format_inline(paragraph)}</p>"
+
+
+def _build_qa_group_html(title, qa_pairs, partial_warning="", modifier=""):
+    """
+    FIX-2: Render the remedies section using explicit question/answer dicts.
+    OLD: received flat list of paragraphs and guessed pairs by alternating index.
+    FIX: receives list of {"question": str, "answer": str} dicts — no guessing needed.
+    """
+    if not title and not qa_pairs:
+        return ""
+
+    cards = []
+
+    if partial_warning:
+        cards.append(
+            f"""
+            <article class="qa-card note-card">
+                <div class="answer-text"><p>{html_lib.escape(partial_warning)}</p></div>
+            </article>
+            """
+        )
+
+    for pair in qa_pairs:
+        question = str(pair.get("question", "")).strip()
+        answer = str(pair.get("answer", "")).strip()
+        if not question and not answer:
+            continue
+        cards.append(
+            f"""
+            <article class="qa-card">
+                <div class="question-label">{html_lib.escape(question)}</div>
+                <div class="answer-text">{_format_result_paragraph(answer)}</div>
+            </article>
+            """
+        )
+
+    if not cards:
+        return ""
+
+    return f"""
+    <section class="result-group {modifier}">
+        <h3>{html_lib.escape(title)}</h3>
+        <div class="qa-stack">{''.join(cards)}</div>
+    </section>
+    """
+
+
+def _build_legal_help_group_html(title, paragraphs):
+    if not title:
+        return ""
+    intro = paragraphs[0] if paragraphs else ""
+    resources = paragraphs[1:] if len(paragraphs) > 1 else []
+    cards = []
+    for block in resources:
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if not lines:
+            continue
+        resource_title = re.sub(r"^\s*(?:[-*\u2022]|\d+[.)])\s+", "", lines[0]).strip()
+        detail_text = "\n".join(lines[1:]) if len(lines) > 1 else ""
+        cards.append(
+            f"""
+            <article class="qa-card legal-card">
+                <div class="question-label">{html_lib.escape(resource_title)}</div>
+                <div class="answer-text">{_format_result_paragraph(detail_text)}</div>
+            </article>
+            """
+        )
+    return f"""
+    <section class="result-group legal-help-group">
+        <h3>{html_lib.escape(title)}</h3>
+        <div class="group-intro">{_format_result_paragraph(intro)}</div>
+        <div class="qa-stack">{''.join(cards)}</div>
+    </section>
+    """
+
+
+# ==================== FIX-2: _build_result_body_html uses structured dict ====================
+# OLD: parsed layout from flat plain-text string — fragile and ambiguous.
+# FIX: accepts optional `structured` dict; uses it when available for guaranteed layout.
+
+def _build_result_body_html(result_text, ui_text=None, structured=None):
+    """
+    Build richer visual layout.
+    When `structured` dict is provided (from build_judgment_result_text),
+    uses it for correct Q&A pairing.  Falls back to text parsing otherwise.
+    """
+    ui_text = ui_text or UI_TEXT
+
+    if structured:
+        body_parts = [
+            f"""
+            <header class="result-hero">
+                <div>
+                    <span class="result-kicker">LegalEase AI</span>
+                    <h2>{html_lib.escape(structured.get("summary_title", ""))}</h2>
+                </div>
+            </header>
+            """
+        ]
+
+        if structured.get("summary"):
+            body_parts.append(
+                f"""
+                <section class="result-summary-card">
+                    <span class="section-chip">Key outcome</span>
+                    {_format_result_paragraph(structured["summary"])}
+                </section>
+                """
+            )
+
+        if structured.get("qa_pairs") or structured.get("partial_warning"):
+            body_parts.append(
+                _build_qa_group_html(
+                    structured.get("remedies_title", ""),
+                    structured.get("qa_pairs", []),
+                    partial_warning=structured.get("partial_warning", ""),
+                    modifier="remedies-group",
+                )
+            )
+
+        if structured.get("legal_help_resources"):
+            legal_paras = [
+                p.strip()
+                for p in re.split(r"\n\s*\n", structured["legal_help_resources"])
+                if p.strip()
+            ]
+            body_parts.append(
+                _build_legal_help_group_html(
+                    structured.get("free_legal_help_title", ""),
+                    legal_paras,
+                )
+            )
+
+        return "".join(body_parts)
+
+    # ---- legacy fallback (plain text parsing, unchanged) ----
+    paragraphs = [
+        paragraph.strip()
+        for paragraph in re.split(r"\n\s*\n", str(result_text or ""))
+        if paragraph.strip()
+    ]
+    if not paragraphs:
+        return ""
+
+    title = html_lib.escape(paragraphs[0])
+    summary_html = _format_result_paragraph(paragraphs[1]) if len(paragraphs) > 1 else ""
+    body_parts = [
+        f"""
+        <header class="result-hero">
+            <div>
+                <span class="result-kicker">LegalEase AI</span>
+                <h2>{title}</h2>
+            </div>
+        </header>
+        """
+    ]
+    if summary_html:
+        body_parts.append(
+            f"""
+            <section class="result-summary-card">
+                <span class="section-chip">Key outcome</span>
+                {summary_html}
+            </section>
+            """
+        )
+    content = paragraphs[2:] if len(paragraphs) > 2 else []
+    if content:
+        free_help_title = ui_text.get("free_legal_help", "Free Legal Help")
+        free_help_idx = next(
+            (idx for idx, p in enumerate(content)
+             if p.strip() == free_help_title or "Free Legal Help" in p or "Legal Help" in p),
+            -1,
+        )
+        remedies_content = content[:free_help_idx] if free_help_idx >= 0 else content
+        legal_content = content[free_help_idx:] if free_help_idx >= 0 else []
+        if remedies_content:
+            # Legacy: convert flat paragraphs into qa_pairs best-effort
+            pairs = []
+            idx = 0
+            while idx < len(remedies_content) - 1:
+                pairs.append({"question": remedies_content[idx], "answer": remedies_content[idx + 1]})
+                idx += 2
+            body_parts.append(_build_qa_group_html(remedies_content[0] if remedies_content else "", pairs[1:], modifier="remedies-group"))
+        if legal_content:
+            body_parts.append(_build_legal_help_group_html(legal_content[0], legal_content[1:]))
+
+    return "".join(body_parts)
+
+
+# ==================== FIX-2: render_shareable_result_box accepts structured dict ====================
+# OLD: only received result_text string; passed it to _build_result_body_html which guessed layout.
+# FIX: now accepts optional `structured` dict from build_judgment_result_text and passes it through.
+
+def render_shareable_result_box(
+    result_text,
+    ui_text=None,
+    file_name="judgment_summary.txt",
+    structured=None,
+):
+    """
+    Render a result box with top-right copy and download controls.
+
+    Args:
+        result_text:  Plain text string (for copy/download). Can also be a tuple
+                      (plain_text, structured_dict) as returned by build_judgment_result_text.
+        ui_text:      Localized UI strings dict.
+        file_name:    Download filename.
+        structured:   Optional structured dict from build_judgment_result_text for correct HTML layout.
+    """
+    import streamlit.components.v1 as components
+
+    # FIX-2: support tuple input from build_judgment_result_text
+    if isinstance(result_text, tuple):
+        result_text, structured = result_text
+
+    ui_text = ui_text or UI_TEXT
+    result_text = str(result_text or "")
+    copy_label = ui_text.get("copy_result", "Copy")
+    copied_label = ui_text.get("copied_result", "Copied")
+    download_label = ui_text.get("download_result_txt", "Download")
+
+    line_count = result_text.count("\n") + 1
+    height = min(max(560, line_count * 30 + 240), 980)
+    # FIX-2: pass structured dict so HTML uses guaranteed Q&A pairs
+    result_body_html = _build_result_body_html(result_text, ui_text, structured=structured)
+    text_json = json.dumps(result_text, ensure_ascii=False)
+    file_name_json = json.dumps(file_name, ensure_ascii=False)
+    copy_label_json = json.dumps(copy_label, ensure_ascii=False)
+    copied_label_json = json.dumps(copied_label, ensure_ascii=False)
+
+    components.html(
+        f"""
+        <div class="shareable-result-box">
+            <div class="result-toolbar">
+                <button type="button" id="copy-result">{html_lib.escape(copy_label)}</button>
+                <button type="button" id="download-result">{html_lib.escape(download_label)}</button>
+            </div>
+            <main class="result-content">{result_body_html}</main>
+        </div>
+        <script>
+            const resultText = {text_json};
+            const fileName = {file_name_json};
+            const copyLabel = {copy_label_json};
+            const copiedLabel = {copied_label_json};
+            const copyButton = document.getElementById("copy-result");
+            const downloadButton = document.getElementById("download-result");
+
+            function fallbackCopy(text) {{
+                const textarea = document.createElement("textarea");
+                textarea.value = text;
+                textarea.setAttribute("readonly", "");
+                textarea.style.position = "fixed";
+                textarea.style.left = "-9999px";
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand("copy");
+                document.body.removeChild(textarea);
+            }}
+
+            copyButton.addEventListener("click", async () => {{
+                try {{
+                    if (navigator.clipboard && window.isSecureContext) {{
+                        await navigator.clipboard.writeText(resultText);
+                    }} else {{
+                        fallbackCopy(resultText);
+                    }}
+                    copyButton.textContent = copiedLabel;
+                    window.setTimeout(() => {{
+                        copyButton.textContent = copyLabel;
+                    }}, 1600);
+                }} catch (error) {{
+                    fallbackCopy(resultText);
+                }}
+            }});
+
+            downloadButton.addEventListener("click", () => {{
+                const blob = new Blob([resultText], {{ type: "text/plain;charset=utf-8" }});
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement("a");
+                link.href = url;
+                link.download = fileName;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                URL.revokeObjectURL(url);
+            }});
+        </script>
+        <style>
+            html, body {{
+                margin: 0; padding: 0; background: transparent;
+                font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            }}
+            .shareable-result-box {{
+                min-height: 100%;
+                border: 1px solid #cfd8e3;
+                border-radius: 8px;
+                background: linear-gradient(135deg, rgba(15,118,110,0.10), rgba(234,179,8,0.10)), #f8fafc;
+                color: #111827;
+                overflow: hidden;
+                box-sizing: border-box;
+                box-shadow: 0 18px 45px rgba(15,23,42,0.10);
+            }}
+            .result-toolbar {{
+                position: sticky; top: 0; z-index: 2;
+                display: flex; justify-content: flex-end; gap: 8px;
+                padding: 12px;
+                background: rgba(255,255,255,0.94);
+                border-bottom: 1px solid rgba(148,163,184,0.34);
+                backdrop-filter: blur(10px);
+            }}
+            .result-toolbar button {{
+                min-width: 88px; border: 1px solid #0f766e; border-radius: 6px;
+                background: #ffffff; color: #0f766e; cursor: pointer;
+                font-size: 14px; font-weight: 700; line-height: 1; padding: 9px 12px;
+            }}
+            .result-toolbar button:hover {{ background: #ecfdf5; transform: translateY(-1px); }}
+            .result-content {{ padding: 18px; }}
+            .result-hero {{
+                display: flex; align-items: center; min-height: 112px; padding: 22px;
+                border-radius: 8px;
+                background: linear-gradient(135deg, rgba(15,118,110,0.96), rgba(30,64,175,0.92)), #0f766e;
+                color: #ffffff;
+            }}
+            .result-kicker {{
+                display: inline-flex; margin-bottom: 10px; padding: 5px 9px;
+                border-radius: 999px; background: rgba(255,255,255,0.16); color: #d9f99d;
+                font-size: 12px; font-weight: 800; text-transform: uppercase;
+            }}
+            .result-hero h2 {{ margin: 0; font-size: 26px; line-height: 1.18; }}
+            .result-summary-card, .result-group {{
+                margin-top: 14px; border: 1px solid rgba(148,163,184,0.36);
+                border-radius: 8px; background: rgba(255,255,255,0.96);
+                box-shadow: 0 10px 28px rgba(15,23,42,0.07);
+            }}
+            .result-summary-card {{ padding: 20px; border-left: 6px solid #eab308; }}
+            .section-chip {{
+                display: inline-flex; margin-bottom: 14px; padding: 6px 10px;
+                border-radius: 999px; background: #fef3c7; color: #854d0e;
+                font-size: 12px; font-weight: 800; text-transform: uppercase;
+            }}
+            .result-group {{ overflow: hidden; }}
+            .result-group h3 {{
+                margin: 0; padding: 15px 18px; background: #0f172a; color: #ffffff;
+                font-size: 18px; font-weight: 800; line-height: 1.25;
+            }}
+            .legal-help-group h3 {{ background: #14532d; }}
+            .qa-stack {{ display: grid; gap: 12px; padding: 14px; }}
+            .qa-card {{
+                border: 1px solid rgba(20,184,166,0.22); border-radius: 8px;
+                background: linear-gradient(90deg, #ffffff, #f0fdfa); overflow: hidden;
+            }}
+            .legal-card {{ background: linear-gradient(90deg,#ffffff,#f7fee7); border-color: rgba(101,163,13,0.24); }}
+            .note-card {{ border-left: 6px solid #dc2626; background: #fff7ed; }}
+            .question-label {{
+                padding: 10px 12px; background: rgba(15,118,110,0.10); color: #0f766e;
+                font-size: 13px; font-weight: 900; text-transform: uppercase;
+            }}
+            .answer-text {{ padding: 13px 14px; }}
+            .group-intro {{ padding: 14px 16px 0; }}
+            .result-summary-card p, .answer-text p, .group-intro p {{
+                margin: 0; color: #1f2937; font-size: 16px; line-height: 1.62;
+            }}
+            .result-list {{
+                display: grid; gap: 18px; margin: 0; padding: 0;
+                list-style: none; counter-reset: result-item;
+            }}
+            .result-list li {{
+                position: relative; min-height: 44px; padding: 15px 16px 15px 50px;
+                border: 1px solid rgba(20,184,166,0.22); border-radius: 8px;
+                background: linear-gradient(90deg,#ffffff,#f0fdfa);
+                color: #111827; font-size: 16px; line-height: 1.58;
+            }}
+            .result-list li::before {{
+                counter-increment: result-item; content: counter(result-item);
+                position: absolute; left: 13px; top: 13px; width: 24px; height: 24px;
+                border-radius: 999px; background: #0f766e; color: #ffffff;
+                font-size: 13px; font-weight: 900; line-height: 24px; text-align: center;
+            }}
+            strong {{ color: #0f172a; font-weight: 900; }}
+            @media (max-width: 720px) {{
+                .result-content {{ padding: 12px; }}
+                .result-hero {{ min-height: 98px; padding: 18px; }}
+                .result-hero h2 {{ font-size: 22px; }}
+                .qa-stack {{ padding: 12px; }}
+            }}
+        </style>
+        """,
+        height=height,
+        scrolling=True,
+    )
+
 
 SCHEDULED_INDIAN_LANGUAGES = [
     "Assamese",

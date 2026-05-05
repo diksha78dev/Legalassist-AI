@@ -59,7 +59,6 @@ try:
         get_client,
         get_remedies_advice,
         get_default_model,
-        validate_pdf_metadata,
     )
     import core
     client = None
@@ -141,131 +140,105 @@ def show_judgment_analysis():
     st.markdown(ui["app_intro"])
     st.markdown("---")
 
-    language = st.selectbox("🌐 Select your language", 
-                          ["English", "Hindi", "Bengali", "Urdu"])
-    uploaded_file = st.file_uploader("📄 Upload Judgment PDF", type=["pdf"])
-    
-    # PDF Validation for size and page count
-    is_valid_pdf, validation_msg, validation_level = validate_pdf_metadata(uploaded_file)
-    if validation_msg:
-        if validation_level == "error":
-            st.error(validation_msg)
-        else:
-            st.warning(validation_msg)
+    language = st.selectbox(ui["language_label"], core.LANGUAGES, key="integrated_judgment_language")
+    ui = core.get_localized_ui_text(language, client)
+    input_method = st.radio(
+        ui["input_method"],
+        [ui["upload_pdf"], ui["paste_text"]],
+        horizontal=True,
+    )
+
+    is_valid_input = False
+    uploaded_file = None
+    pasted_text = None
+
+    if input_method == ui["upload_pdf"]:
+        uploaded_file = st.file_uploader(ui["upload_label"], type=["pdf"])
+        if uploaded_file:
+            is_valid_input = True
+    else:
+        pasted_text = st.text_area(
+            ui.get("paste_text", "📋 Paste Text"),
+            height=250,
+        )
+        if pasted_text and pasted_text.strip():
+            is_valid_input = True
 
     st.markdown("---")
 
-    if uploaded_file and is_valid_pdf and st.button("🚀 Generate Summary", use_container_width=True):
-        from app import get_client
-        client = get_client()
-        with st.spinner("Processing judgment…"):
-            try:
-                if not client:
-                    st.error(f"❌ {ui['openrouter_not_configured']}")
-                    return
-                ui = core.get_localized_ui_text(language, client)
+    if st.button(ui["generate_summary"], use_container_width=True):
+        if not is_valid_input:
+            st.error("Please upload a PDF or paste the judgment text to continue.")
+        else:
+            with st.spinner(ui["processing"]):
+                try:
+                    if not client:
+                        st.error(f"❌ {ui['openrouter_not_configured']}")
+                        return
+                    ui = core.get_localized_ui_text(language, client)
 
-                raw_text = core.extract_text_from_pdf(uploaded_file)
-                safe_text = core.compress_text(raw_text)
+                    if input_method == ui["upload_pdf"]:
+                        raw_text = core.extract_text_from_pdf(uploaded_file)
+                    else:
+                        raw_text = pasted_text
+                    
+                    safe_text = core.compress_text(raw_text)
 
-                prompt = core.build_summary_prompt(safe_text, language)
+                    prompt = core.build_summary_prompt(safe_text, language)
 
-                # First attempt
-                response = client.chat.completions.create(
-                    model=get_default_model(),
-                    messages=[
-                        {"role": "system", "content": f"You are an expert legal simplification engine. Output only in {language}."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    max_tokens=280,
-                    temperature=0.05,
-                )
-
-                summary_raw = response.choices[0].message.content.strip()
-                # Structured parser ensures exactly 3 bullets and removes intros
-                summary = core.parse_summary_bullets(summary_raw)
-
-                # Retry if output is not in the selected language
-                if language.lower() != "english" and core.output_language_mismatch_detected(summary, language):
-                    retry_prompt = core.build_retry_prompt(safe_text, language)
-                    response2 = client.chat.completions.create(
+                    # First attempt
+                    response = client.chat.completions.create(
                         model=get_default_model(),
                         messages=[
-                            {"role": "system", "content": f"Strict multilingual rewriting engine. Output only in {language}."},
-                            {"role": "user", "content": retry_prompt}
+                            {"role": "system", "content": f"You are an expert legal simplification engine. Output only in {language}."},
+                            {"role": "user", "content": prompt}
                         ],
-                        max_tokens=260,
-                        temperature=0.03,
+                        max_tokens=280,
+                        temperature=0.05,
                     )
-                    retry_summary_raw = response2.choices[0].message.content.strip()
-                    if len(retry_summary_raw) > 0 and not core.english_leakage_detected(retry_summary_raw):
-                        summary = core.parse_summary_bullets(retry_summary_raw)
 
-                if not summary:
-                    st.error(ui["empty_summary"])
-                else:
-                    st.markdown(f"## {ui['simplified_judgment']}")
-                    st.write(summary)
-                    st.success(ui["summary_success"])
-                    
-                    # ===== REMEDIES SECTION =====
-                    st.markdown("---")
-                    st.markdown(f"## {ui['remedies_title']}")
-                    
-                    with st.spinner(ui["remedies_spinner"]):
-                        try:
-                            remedies = get_remedies_advice(raw_text, language, client)
-                            
-                            if remedies.get("what_happened"):
-                                st.subheader(ui["what_happened"])
-                                st.write(remedies["what_happened"])
-                            
-                            if remedies.get("can_appeal"):
-                                st.subheader(ui["can_appeal"])
-                                can_appeal_value = remedies["can_appeal"]
-                                st.write(core.localize_yes_no(can_appeal_value, ui))
-                                
-                                if can_appeal_value.strip().lower() == "yes":
-                                    st.subheader(ui["appeal_details"])
-                                    col1, col2 = st.columns(2)
-                                    with col1:
-                                        if remedies.get("appeal_days"):
-                                            st.metric(ui["days_to_file_appeal"], remedies["appeal_days"])
-                                        if remedies.get("appeal_court"):
-                                            st.write(f"**{ui['appeal_to']}:** {remedies['appeal_court']}")
-                                    with col2:
-                                        if remedies.get("cost"):
-                                            st.write(f"**{ui['estimated_cost']}:** {remedies['cost']}")
-                            
-                            if remedies.get("first_action"):
-                                st.subheader(ui["first_action"])
-                                st.write(f"✅ {remedies['first_action']}")
-                            
-                            if remedies.get("deadline"):
-                                st.subheader(ui["important_deadline"])
-                                st.write(remedies["deadline"])
-                            
-                        except Exception as e:
-                            st.error(f"{ui['remedies_error']}: {str(e)}")
-                    
-                    # ===== FREE LEGAL HELP SECTION =====
-                    st.markdown("---")
-                    st.markdown(f"## {ui['free_legal_help']}")
-                    st.info(ui["legal_help_resources"])
+                    summary = response.choices[0].message.content.strip()
 
-                    result_text = core.build_judgment_result_text(summary, remedies, ui)
-                    core.render_shareable_result_box(result_text, ui)
-                    st.success(ui["summary_success"])
+                    # Retry if output is not in the selected language
+                    if language.lower() != "english" and core.output_language_mismatch_detected(summary, language):
+                        retry_prompt = core.build_retry_prompt(safe_text, language)
+                        response2 = client.chat.completions.create(
+                            model=get_default_model(),
+                            messages=[
+                                {"role": "system", "content": f"Strict multilingual rewriting engine. Output only in {language}."},
+                                {"role": "user", "content": retry_prompt}
+                            ],
+                            max_tokens=260,
+                            temperature=0.03,
+                        )
+                        retry_summary = response2.choices[0].message.content.strip()
+                        if len(retry_summary) > 0 and not core.output_language_mismatch_detected(retry_summary, language):
+                            summary = retry_summary
+
+                    if not summary:
+                        st.error(ui["empty_summary"])
+                    else:
+                        remedies = {}
                     
-            except Exception as e:
-                err = str(e)
-                logger.error(f"Full error in judgment analysis: {err}", exc_info=True)
-                if "402" in err or "credits" in err.lower():
-                    st.error(ui["not_enough_credits"])
-                elif "Connection" in err or "timeout" in err.lower():
-                    st.error(ui["connection_error"].format(error=err))
-                else:
-                    st.error(ui["generic_error"].format(error=err))
+                        with st.spinner(ui["remedies_spinner"]):
+                            try:
+                                remedies = get_remedies_advice(raw_text, language, client) or {}
+                            except Exception as e:
+                                st.error(f"{ui['remedies_error']}: {str(e)}")
+
+                        result_text = core.build_judgment_result_text(summary, remedies, ui)
+                        core.render_shareable_result_box(result_text, ui)
+                        st.success(ui["summary_success"])
+                    
+                except Exception as e:
+                    err = str(e)
+                    logger.error(f"Full error in judgment analysis: {err}", exc_info=True)
+                    if "402" in err or "credits" in err.lower():
+                        st.error(ui["not_enough_credits"])
+                    elif "Connection" in err or "timeout" in err.lower():
+                        st.error(ui["connection_error"].format(error=err))
+                    else:
+                        st.error(ui["generic_error"].format(error=err))
 
 
 if __name__ == "__main__":
