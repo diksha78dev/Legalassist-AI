@@ -336,15 +336,27 @@ def _auto_create_deadlines_from_remedies(
                 days = int(match.group())
                 deadline_date = datetime.now(timezone.utc) + timedelta(days=days)
 
-                deadline = CaseDeadline(
-                    user_id=str(user_id),
-                    case_id=case_id,
-                    case_title=case_title,
-                    deadline_date=deadline_date,
-                    deadline_type="appeal",
-                    description=f"Appeal deadline - {remedies.get('appeal_court', 'Unknown court')}",
-                )
-                db.add(deadline)
+                # Check for existing pending deadline of same type/date (±1 day tolerance)
+                existing_deadline = db.query(CaseDeadline).filter(
+                    CaseDeadline.case_id == case_id,
+                    CaseDeadline.deadline_type == "appeal",
+                    CaseDeadline.is_completed == False,
+                    CaseDeadline.deadline_date >= deadline_date - timedelta(days=1),
+                    CaseDeadline.deadline_date <= deadline_date + timedelta(days=1)
+                ).first()
+
+                if existing_deadline:
+                    logger.info(f"Skipped duplicate appeal deadline for case {case_id} (existing: {existing_deadline.id})")
+                else:
+                    deadline = CaseDeadline(
+                        user_id=str(user_id),
+                        case_id=case_id,
+                        case_title=case_title,
+                        deadline_date=deadline_date,
+                        deadline_type="appeal",
+                        description=f"Appeal deadline - {remedies.get('appeal_court', 'Unknown court')}",
+                    )
+                    db.add(deadline)
                 db.flush()  # Flush to generate deadline.id before using it
 
                 # Create timeline event
