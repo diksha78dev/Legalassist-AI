@@ -170,6 +170,7 @@ def parse_remedies_response(response_text):
     Extract structured info from LLM response using flexible numbered-line parsing.
     Supports multiple separators: . ) : - 
     Handles both 5-section (old) and 7-section (new) formats.
+    Returns None if no valid numbered sections are found.
     """
     remedies = {
         "what_happened": "",
@@ -185,7 +186,7 @@ def parse_remedies_response(response_text):
 
     text = response_text.strip()
     if not text:
-        return remedies
+        return None
 
     # Detect all numbered sections (flexible separators: . ) : -)
     # Only match 1-2 digit numbers to avoid matching content like "5000-10000"
@@ -198,6 +199,10 @@ def parse_remedies_response(response_text):
             num = int(match.group(1))
             header = match.group(2).strip()
             sections[num] = {"header": header, "content": ""}
+    
+    # Return None if no numbered sections found
+    if not sections:
+        return None
     
     # Extract content for each section
     lines = text.split('\n')
@@ -214,6 +219,11 @@ def parse_remedies_response(response_text):
     # Clean up content
     for num in sections:
         sections[num]["content"] = sections[num]["content"].strip()
+    
+    # Check if we have any mapped sections (1-7)
+    has_mapped_sections = any(num in sections for num in range(1, 8))
+    if not has_mapped_sections:
+        return None
     
     # Map sections to keys based on count
     is_7section = len(sections) >= 7
@@ -328,7 +338,7 @@ def get_remedies_advice(judgment_text, language, client=None):
         return remedies
     except Exception as e:
         logging.error(f"Failed to get remedies advice: {str(e)}")
-        return None
+        raise
 
 
 # ==================== UI STYLING & CONSTANTS ====================

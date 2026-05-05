@@ -37,6 +37,10 @@ def check_and_send_reminders():
     logger.info("Starting deadline reminder check job")
     logger.info(f"Check time: {datetime.now(timezone.utc)}")
 
+    # Ensure tables exist when running from a fresh DB.
+    from database import init_db
+    init_db()
+
     db = SessionLocal()
     try:
         # Import here to avoid circular imports
@@ -164,7 +168,10 @@ def check_reminders_sync(target_days: Optional[int] = None):
     Args:
         target_days: If specified, only check this day threshold (e.g., 30, 10, 3, 1)
     """
-    from database import has_notification_been_sent
+    from database import has_notification_been_sent, init_db
+
+    # Ensure tables exist when running from a fresh DB.
+    init_db()
     
     db = SessionLocal()
     try:
