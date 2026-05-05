@@ -16,22 +16,50 @@ from typing import Dict, List, Optional, Tuple
 
 from pypdf import PdfReader
 from langdetect import DetectorFactory, LangDetectException, detect
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 from tqdm import tqdm
-from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
+try:
+    from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
+except ModuleNotFoundError:
+    class _ProgressColumn:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    SpinnerColumn = BarColumn = TextColumn = TimeElapsedColumn = _ProgressColumn
+
+    class Progress:
+        """Small tqdm-backed fallback when rich is not installed."""
+
+        def __init__(self, *args, **kwargs):
+            self._bar = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            if self._bar:
+                self._bar.close()
+
+        def add_task(self, description, total):
+            self._bar = tqdm(total=total, desc=description)
+            return 0
+
+        def advance(self, task_id, advance=1):
+            if self._bar:
+                self._bar.update(advance)
+
+        def update(self, task_id, description=None, **kwargs):
+            if self._bar and description:
+                self._bar.set_description_str(description)
 from logging_config import configure_logging
 import core
 
 # Make language detection deterministic.
 DetectorFactory.seed = 0
 
-SUPPORTED_LANGUAGES = {"english", "hindi", "bengali", "urdu"}
-LANG_CODE_TO_NAME = {
-    "en": "English",
-    "hi": "Hindi",
-    "bn": "Bengali",
-    "ur": "Urdu",
-}
+SUPPORTED_LANGUAGES = set(core.LANGUAGE_ALIASES)
+LANG_CODE_TO_NAME = core.LANGUAGE_CODE_TO_NAME
+SUPPORTED_LANGUAGE_HELP = ", ".join(["auto", *core.LANGUAGES])
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", core.DEFAULT_MODEL)
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 LOGGER = structlog.get_logger(__name__)
@@ -47,6 +75,10 @@ KNOWN_COURTS = {
     "consumer court",
     "tribunal",
 }
+
+# Global semaphore for API concurrency control
+API_SEMAPHORE = threading.Semaphore(5)
+
 
 
 class CLIError(Exception):
@@ -98,7 +130,20 @@ def get_client() -> OpenAI:
 def detect_language_name(text: str) -> str:
     if not text.strip():
         return "English"
-    sample = text[:3000]
+
+    length = len(text)
+    if length <= 3000:
+        sample = text
+    else:
+        # Sample beginning, middle, and end to avoid bias from English cover pages
+        # or administrative footers in local language documents.
+        parts = [
+            text[:1000],
+            text[length // 2 - 500 : length // 2 + 500],
+            text[-1000:]
+        ]
+        sample = " ".join(parts)
+
     try:
         code = detect(sample)
     except LangDetectException:
@@ -113,7 +158,7 @@ def normalize_language(language: str, text_for_auto: str = "") -> str:
     if lower == "auto":
         return detect_language_name(text_for_auto)
     if lower in SUPPORTED_LANGUAGES:
-        return lower.capitalize()
+        return core.LANGUAGE_ALIASES[lower]
     return "English"
 
 
@@ -143,16 +188,43 @@ def _chat_completion(
     user_prompt: str,
     max_tokens: int,
     temperature: float,
+    max_retries: int = 5,
 ):
-    return client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        max_tokens=max_tokens,
-        temperature=temperature,
-    )
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            with API_SEMAPHORE:
+                return client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+        except RateLimitError as e:
+            last_err = e
+            if attempt == max_retries - 1:
+                LOGGER.error("api_rate_limit_exhausted", attempts=max_retries, error=str(e))
+                raise
+            
+            # Exponential backoff: 2, 4, 8, 16, 32 seconds
+            wait_time = 2 ** (attempt + 1)
+            LOGGER.warning(
+                "api_rate_limited",
+                attempt=attempt + 1,
+                wait_seconds=wait_time,
+                error=str(e)
+            )
+            time.sleep(wait_time)
+        except Exception as e:
+            # We don't retry on other errors here to avoid infinite loops on valid failures
+            raise e
+    
+    if last_err:
+        raise last_err
+
 
 
 def generate_summary(
@@ -178,7 +250,7 @@ def generate_summary(
     summary = (resp_summary.choices[0].message.content or "").strip()
     p_sum, c_sum, t_sum = _usage_tokens(resp_summary)
 
-    if language.lower() != "english" and core.english_leakage_detected(summary):
+    if language.lower() != "english" and core.output_language_mismatch_detected(summary, language):
         retry_prompt = core.build_retry_prompt(safe_text, language)
         resp_retry = _chat_completion(
             client=client,
@@ -193,7 +265,7 @@ def generate_summary(
         p_sum += p_ret
         c_sum += c_ret
         t_sum += t_ret
-        if retry_summary and not core.english_leakage_detected(retry_summary):
+        if retry_summary and not core.output_language_mismatch_detected(retry_summary, language):
             summary = retry_summary
 
     if not summary:
@@ -250,6 +322,9 @@ def process_one_pdf(
     max_chars: int,
     prompt_cost_per_1k: float,
     completion_cost_per_1k: float,
+    enable_ocr: bool = False,
+    ocr_languages: str = "eng+hin",
+    ocr_dpi: int = 300,
 ) -> Dict[str, object]:
     started = time.time()
     processed_at = datetime.now(timezone.utc).isoformat()
@@ -274,12 +349,46 @@ def process_one_pdf(
         "api_cost_usd": 0.0,
         "duration_seconds": 0.0,
         "processed_at": processed_at,
+        "extraction_method": "",
+        "ocr_enabled": enable_ocr,
+        "ocr_used": False,
+        "extraction_confidence": "",
     }
 
     try:
-        raw_text = core.extract_text_from_pdf(pdf_path)
+        raw_text = ""
+        extraction_method = "unknown"
+        extraction_confidence = ""
+        ocr_used = False
+
+        if hasattr(core, "extract_text_with_diagnostics"):
+            diagnostics = core.extract_text_with_diagnostics(
+                pdf_input=pdf_path,
+                enable_ocr=enable_ocr,
+                ocr_languages=ocr_languages,
+                ocr_dpi=ocr_dpi,
+            )
+            raw_text = str(diagnostics.get("text", "") or "")
+            extraction_method = str(diagnostics.get("method", "") or "unknown")
+            ocr_used = bool(diagnostics.get("ocr_used", False))
+            conf = diagnostics.get("confidence")
+            extraction_confidence = "" if conf is None else str(conf)
+        else:
+            raw_text = core.extract_text_from_pdf(
+                pdf_path,
+                enable_ocr=enable_ocr,
+                ocr_languages=ocr_languages,
+                ocr_dpi=ocr_dpi,
+            )
+            extraction_method = "ocr_or_standard"
+
         if not raw_text:
             raise CLIError("No extractable text found in PDF.")
+        result["extraction_method"] = extraction_method
+        result["ocr_used"] = ocr_used
+        result["extraction_confidence"] = extraction_confidence
+        if client is None:
+            return result
 
         language = normalize_language(language_arg, text_for_auto=raw_text)
         result["language"] = language
@@ -401,12 +510,6 @@ def load_checkpoint(checkpoint_file: Path, corruption_threshold: float = 0.1) ->
     return records
 
 
-def append_checkpoint(checkpoint_file: Path, record: Dict[str, object]) -> None:
-    checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
-    with checkpoint_file.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-
 def dedupe_latest_by_file(records: List[Dict[str, object]]) -> List[Dict[str, object]]:
     latest: Dict[str, Dict[str, object]] = {}
     for rec in records:
@@ -487,6 +590,9 @@ def process_command(args: argparse.Namespace) -> int:
         max_chars=args.max_chars,
         prompt_cost_per_1k=args.prompt_cost_per_1k,
         completion_cost_per_1k=args.completion_cost_per_1k,
+        enable_ocr=args.enable_ocr,
+        ocr_languages=args.ocr_languages,
+        ocr_dpi=args.ocr_dpi,
     )
 
     LOGGER.info("process_result", result=result)
@@ -558,23 +664,34 @@ def batch_command(args: argparse.Namespace) -> int:
                 max_chars=args.max_chars,
                 prompt_cost_per_1k=args.prompt_cost_per_1k,
                 completion_cost_per_1k=args.completion_cost_per_1k,
+                enable_ocr=args.enable_ocr,
+                ocr_languages=args.ocr_languages,
+                ocr_dpi=args.ocr_dpi,
             ): pdf_path
             for pdf_path in to_process
         }
 
+        checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
         with Progress(
             SpinnerColumn(),
             TextColumn("{task.description}"),
             BarColumn(),
             TextColumn("{task.completed}/{task.total}"),
             TimeElapsedColumn(),
-        ) as progress:
+        ) as progress, checkpoint_file.open("a", encoding="utf-8") as cp_file:
             task_id = progress.add_task("Processing PDFs", total=len(futures))
             try:
                 for future in as_completed(futures):
                     record = future.result()
                     run_records.append(record)
-                    append_checkpoint(checkpoint_file, record)
+
+                    # Write to checkpoint immediately and sync to disk to prevent data loss
+                    cp_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    cp_file.flush()
+                    try:
+                        os.fsync(cp_file.fileno())
+                    except OSError:
+                        pass
 
                     tracker.add(
                         int(record.get("prompt_tokens", 0) or 0),
@@ -617,7 +734,7 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument(
         "--language",
         default="auto",
-        help="Output language: auto, English, Hindi, Bengali, Urdu. Default: auto",
+        help=f"Output language: {SUPPORTED_LANGUAGE_HELP}. Default: auto",
     )
     common.add_argument(
         "--max-chars",
@@ -637,6 +754,29 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="Estimated USD cost per 1K completion tokens (for cost reporting).",
     )
+    common.add_argument(
+        "--concurrency",
+        type=int,
+        default=5,
+        help="Maximum concurrent API calls. Default: 5",
+    )
+    common.add_argument(
+        "--enable-ocr",
+        action="store_true",
+        help="Enable OCR fallback for scanned/image-only PDFs.",
+    )
+    common.add_argument(
+        "--ocr-languages",
+        default="eng+hin",
+        help="Tesseract OCR languages, e.g. eng+hin (supports Hindi and local script packs).",
+    )
+    common.add_argument(
+        "--ocr-dpi",
+        type=int,
+        default=300,
+        help="DPI for PDF-to-image OCR conversion. Default: 300",
+    )
+
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -698,13 +838,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     except Exception:
         logging.basicConfig(level=logging.INFO)
 
-    if not os.getenv("OPENROUTER_API_KEY") and not os.getenv("OPENAI_API_KEY"):
-        LOGGER.warning(
-            "No API key found. Set OPENROUTER_API_KEY or OPENAI_API_KEY environment variable."
-        )
-
-    parser = build_parser()
-    args = parser.parse_args(argv)
+    # Initialize global semaphore with user-specified concurrency
+    global API_SEMAPHORE
+    API_SEMAPHORE = threading.Semaphore(args.concurrency)
 
     if getattr(args, "workers", 1) < 1:
         raise CLIError("--workers must be >= 1")
