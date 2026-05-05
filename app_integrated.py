@@ -14,11 +14,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ==================== CONFIGURATION ====================
+# FIX: layout="centered" for mobile-first users; sidebar collapsed so it
+#      doesn't cover the screen on first load on narrow viewports.
 st.set_page_config(
     page_title="LegalEase AI",
     page_icon="⚖",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="centered",                 # was "wide" — broke mobile layouts
+    initial_sidebar_state="collapsed", # was "expanded" — blocked mobile screen
 )
 
 # ==================== LOGGING SETUP ====================
@@ -30,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 # ==================== DATABASE & SCHEDULER SETUP ====================
 from database import init_db
-from scheduler import start_scheduler, stop_scheduler
+from scheduler import start_scheduler
 
 # Initialize database
 try:
@@ -38,16 +40,6 @@ try:
     logger.info("Database initialized successfully")
 except Exception as e:
     logger.error(f"Failed to initialize database: {str(e)}")
-
-# Start background scheduler on app startup
-if "scheduler_started" not in st.session_state:
-    try:
-        start_scheduler()
-        st.session_state.scheduler_started = True
-        logger.info("Background scheduler started")
-    except Exception as e:
-        logger.error(f"Failed to start scheduler: {str(e)}")
-        st.session_state.scheduler_started = False
 
 # ==================== Logging Setup ====================
 logging.basicConfig(
@@ -63,10 +55,10 @@ try:
         page_notification_history,
     )
     # Import original app components
-    from app import (
         get_client,
         get_remedies_advice,
         get_default_model,
+        validate_pdf_metadata,
     )
     import core
     client = None
@@ -83,12 +75,6 @@ def main():
     st.sidebar.markdown("# ⚖️ LegalEase AI")
     st.sidebar.markdown("**Convert Judgments to Simple Language**")
     st.sidebar.divider()
-    
-    # Display scheduler status
-    if st.session_state.get("scheduler_started"):
-        st.sidebar.success("✅ Notifications: Active")
-    else:
-        st.sidebar.warning("⚠️ Notifications: Offline")
     
     st.sidebar.markdown("---")
     st.sidebar.markdown(
@@ -126,7 +112,6 @@ def main():
 def show_judgment_analysis():
     """Original app UI for judgment analysis"""
     
-    # Retro Styling (from original app)
     st.markdown("""
     <style>
         .main {

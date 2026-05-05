@@ -20,11 +20,12 @@ import re
 import logging
 import os
 import json
-import html as html_lib
 from pathlib import Path
 from openai import OpenAI
 from pypdf import PdfReader
 from langdetect import detect, DetectorFactory, detect_langs
+import pdfplumber
+from typing import Any, Dict, List
 
 try:
     from dotenv import dotenv_values, load_dotenv
@@ -37,6 +38,7 @@ PROJECT_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 if load_dotenv:
     load_dotenv(dotenv_path=PROJECT_ENV_PATH)
 
+# For consistent language detection results
 DetectorFactory.seed = 0
 _LOCALIZED_UI_TEXT_CACHE = {}
 
@@ -56,12 +58,21 @@ def get_default_model():
 # ==================== API CLIENT ====================
 
 PLACEHOLDER_CONFIG_VALUES = {
-    "", "change_me", "changeme", "dummy", "none", "null",
-    "test", "test_key", "test_url", "your_key_here",
+    "",
+    "change_me",
+    "changeme",
+    "dummy",
+    "none",
+    "null",
+    "test",
+    "test_key",
+    "test_url",
+    "your_key_here",
 }
 
 
 def _clean_config_value(value):
+    """Normalize config values from env vars or Streamlit secrets."""
     if value is None:
         return ""
     return str(value).strip().strip('"').strip("'")
@@ -86,19 +97,23 @@ def _is_usable_base_url(value):
 
 
 def _select_openrouter_config(candidates):
+    """Return the first complete, non-placeholder OpenRouter config pair."""
     for api_key, base_url in candidates:
         api_key = _clean_config_value(api_key)
         base_url = _clean_config_value(base_url)
         if _is_usable_api_key(api_key) and _is_usable_base_url(base_url):
             return api_key, base_url
+
     raise ValueError(
-        "OPENROUTER_API_KEY and OPENROUTER_BASE_URL must be set to real values."
+        "OPENROUTER_API_KEY and OPENROUTER_BASE_URL must be set to real values. "
+        "Placeholder values like dummy/test_url are ignored."
     )
 
 
 def _read_streamlit_openrouter_secrets():
     try:
         import streamlit as st
+
         return (
             st.secrets.get("OPENROUTER_API_KEY"),
             st.secrets.get("OPENROUTER_BASE_URL"),
@@ -110,6 +125,7 @@ def _read_streamlit_openrouter_secrets():
 def _read_dotenv_openrouter_config():
     if not dotenv_values or not PROJECT_ENV_PATH.exists():
         return "", ""
+
     values = dotenv_values(PROJECT_ENV_PATH)
     return (
         values.get("OPENROUTER_API_KEY"),
@@ -118,6 +134,10 @@ def _read_dotenv_openrouter_config():
 
 
 def _initialize_openai_client():
+    """
+    Internal function to initialize the OpenAI client using Streamlit secrets or environment variables.
+    Uses Streamlit caching to avoid recreating the client.
+    """
     secrets_api_key, secrets_base_url = _read_streamlit_openrouter_secrets()
     dotenv_api_key, dotenv_base_url = _read_dotenv_openrouter_config()
     api_key, base_url = _select_openrouter_config(
@@ -129,6 +149,8 @@ def _initialize_openai_client():
     )
     return OpenAI(api_key=api_key, base_url=base_url)
 
+    return OpenAI(api_key=api_key, base_url=base_url)
+
 
 def get_client():
     import streamlit as st
@@ -138,6 +160,7 @@ def get_client():
         try:
             return _initialize_openai_client()
         except (ValueError, KeyError, FileNotFoundError, RuntimeError, AttributeError) as e:
+            # Graceful fallback for environments where secrets are not available (e.g., tests)
             logging.error(f"Failed to initialize OpenAI client: {e}")
             return None
 
@@ -146,16 +169,157 @@ def get_client():
 
 # ==================== TEXT PROCESSING ====================
 
-def extract_text_from_pdf(uploaded_pdf):
-    reader = PdfReader(uploaded_pdf)
+def _extract_pages_pypdf(reader: PdfReader) -> str:
     text = ""
     for page in reader.pages:
         page_text = page.extract_text()
         if page_text:
             text += page_text + "\n"
-    if not text.strip():
-        raise ValueError("No extractable text found. The PDF may be image-only or empty.")
+    return text.strip()
+
+
+def _extract_layout_text_from_tesseract_data(data: Dict[str, List[Any]]) -> str:
+    lines: Dict[tuple, Dict[str, Any]] = {}
+    for i, token in enumerate(data.get("text", [])):
+        token = (token or "").strip()
+        if not token:
+            continue
+        try:
+            conf = float(data["conf"][i])
+        except Exception:
+            conf = -1.0
+        if conf < 0:
+            continue
+        key = (data["page_num"][i], data["block_num"][i], data["par_num"][i], data["line_num"][i])
+        if key not in lines:
+            lines[key] = {"tokens": [], "left": data["left"][i], "top": data["top"][i], "right": data["left"][i] + data["width"][i]}
+        lines[key]["tokens"].append(token)
+        lines[key]["left"] = min(lines[key]["left"], data["left"][i])
+        lines[key]["right"] = max(lines[key]["right"], data["left"][i] + data["width"][i])
+        lines[key]["top"] = min(lines[key]["top"], data["top"][i])
+
+    grouped: Dict[int, List[Dict[str, Any]]] = {}
+    for key, value in lines.items():
+        page_num = int(key[0])
+        value["text"] = " ".join(value["tokens"]).strip()
+        grouped.setdefault(page_num, []).append(value)
+
+    pages_out: List[str] = []
+    for page_num in sorted(grouped.keys()):
+        page_lines = [ln for ln in grouped[page_num] if ln["text"]]
+        if not page_lines:
+            continue
+        min_left = min(ln["left"] for ln in page_lines)
+        max_right = max(ln["right"] for ln in page_lines)
+        width = max(1, max_right - min_left)
+        threshold = min_left + (width // 2)
+        left_col = [ln for ln in page_lines if ln["left"] <= threshold]
+        right_col = [ln for ln in page_lines if ln["left"] > threshold]
+        use_two_cols = len(left_col) > 4 and len(right_col) > 4 and (min(ln["left"] for ln in right_col) - max(ln["right"] for ln in left_col)) > 10
+        if use_two_cols:
+            ordered = sorted(left_col, key=lambda x: (x["top"], x["left"])) + sorted(right_col, key=lambda x: (x["top"], x["left"]))
+        else:
+            ordered = sorted(page_lines, key=lambda x: (x["top"], x["left"]))
+        pages_out.append("\n".join(ln["text"] for ln in ordered))
+    return "\n\n".join(pages_out).strip()
+
+
+def extract_text_from_pdf(uploaded_pdf, enable_ocr: bool = False, ocr_languages: str = "eng+hin", ocr_dpi: int = 300):
+    """Extract text from PDF. Uses parser extraction first, then optional OCR fallback."""
+    text = ""
+    try:
+        with pdfplumber.open(uploaded_pdf) as pdf:
+            pages = []
+            for page in pdf.pages:
+                page_text = page.extract_text(x_tolerance=3, y_tolerance=3)
+                if page_text:
+                    pages.append(page_text)
+            text = "\n".join(pages).strip()
+            if text:
+                return text
+    except Exception:
+        pass
+
+    try:
+        if hasattr(uploaded_pdf, "seek"):
+            uploaded_pdf.seek(0)
+        reader = PdfReader(uploaded_pdf)
+        text = _extract_pages_pypdf(reader)
+        if text:
+            return text
+    except Exception:
+        pass
+
+    if not enable_ocr:
+        raise ValueError("No extractable text found. The PDF may be image-only or empty. Re-run with OCR enabled.")
+
+    try:
+        from pdf2image import convert_from_bytes
+        import pytesseract
+        from pytesseract import Output
+    except Exception as e:
+        raise RuntimeError(
+            f"OCR dependencies are missing ({e}). Install pytesseract, pdf2image, Pillow and Tesseract binaries."
+        ) from e
+
+    if hasattr(uploaded_pdf, "seek"):
+        uploaded_pdf.seek(0)
+    data = uploaded_pdf.read() if hasattr(uploaded_pdf, "read") else None
+    if hasattr(uploaded_pdf, "seek"):
+        uploaded_pdf.seek(0)
+    if not data:
+        raise ValueError("Unable to read PDF bytes for OCR.")
+
+    images = convert_from_bytes(data, dpi=ocr_dpi)
+    pages_out: List[str] = []
+    conf_scores: List[float] = []
+    for image in images:
+        ocr_data = pytesseract.image_to_data(image, lang=ocr_languages, output_type=Output.DICT)
+        page_text = _extract_layout_text_from_tesseract_data(ocr_data)
+        if page_text:
+            pages_out.append(page_text)
+        vals = []
+        for c in ocr_data.get("conf", []):
+            try:
+                cv = float(c)
+                if cv >= 0:
+                    vals.append(cv)
+            except Exception:
+                continue
+        if vals:
+            conf_scores.append(sum(vals) / len(vals))
+    text = "\n\n".join(pages_out).strip()
+    if not text:
+        raise ValueError("OCR completed but no readable text was extracted.")
+    if conf_scores:
+        logging.info("ocr_confidence_avg=%.2f", sum(conf_scores) / len(conf_scores))
     return text
+
+
+def validate_pdf_metadata(uploaded_file):
+    """
+    Check PDF size and page count to warn user if it's too large.
+    Returns (is_valid, message, level) where level is 'warning' or 'error'.
+    """
+    if not uploaded_file:
+        return True, None, None
+    
+    # Size check (25MB)
+    if uploaded_file.size > 25 * 1024 * 1024:
+        return True, "⚠️ This file is quite large. Processing may take longer than usual.", "warning"
+        
+    try:
+        reader = PdfReader(uploaded_file)
+        num_pages = len(reader.pages)
+        if num_pages > 1000:
+            return False, "🛑 Extremely large PDF (1000+ pages) detected. Character limits will be exceeded, leading to a very poor summary. Please upload a shorter excerpt.", "error"
+        if num_pages > 100:
+            return True, f"⚠️ This document has {num_pages} pages. Summaries of long judgments may be less precise.", "warning"
+    except Exception as e:
+        logging.error(f"Validation PDF reader failed: {str(e)}")
+        return False, "Could not read PDF metadata. The file might be corrupted.", "error"
+        
+    return True, None, None
 
 
 def compress_text(text, limit=6000):
@@ -189,8 +353,8 @@ def english_leakage_detected(output_text, threshold=8):
 
 
 LANGUAGE_OUTPUT_RULES = {
-    "Assamese": "Use Assamese language in the Assamese form of the Bengali-Assamese script.",
-    "Bengali": "Use Bengali language in Bengali script.",
+    "Assamese": "Use Assamese language in the Assamese form of the Bengali-Assamese script. Do not write Bengali, Tamil, Hindi, English, or the PDF's original language.",
+    "Bengali": "Use Bengali language in Bengali script. Do not write Assamese, Tamil, Hindi, English, or the PDF's original language.",
     "Bodo": "Use Bodo language in Devanagari script.",
     "Dogri": "Use Dogri language in Devanagari script.",
     "Gujarati": "Use Gujarati language in Gujarati script.",
@@ -200,7 +364,7 @@ LANGUAGE_OUTPUT_RULES = {
     "Konkani": "Use Konkani language in Devanagari script.",
     "Maithili": "Use Maithili language in Devanagari script.",
     "Malayalam": "Use Malayalam language in Malayalam script.",
-    "Manipuri": "Use Manipuri language in Meetei Mayek or Bengali script.",
+    "Manipuri": "Use Manipuri language in Meetei Mayek or Bengali script, but keep the vocabulary and grammar Manipuri.",
     "Marathi": "Use Marathi language in Devanagari script.",
     "Nepali": "Use Nepali language in Devanagari script.",
     "Odia": "Use Odia language in Odia script.",
@@ -277,16 +441,25 @@ def _count_script_chars(text, script_names):
 
 
 def output_language_mismatch_detected(output_text, language, min_wrong_chars=6):
+    """
+    Detect obvious wrong-language output for retry decisions.
+    This is intentionally conservative because names, courts, and citations may
+    contain Latin text even in a localized summary.
+    """
     if not output_text or not language or language == "English":
         return False
+
     if english_leakage_detected(output_text, threshold=4):
         return True
+
     allowed_scripts = LANGUAGE_ALLOWED_SCRIPTS.get(language)
     if not allowed_scripts:
         return False
+
     wrong_scripts = set(INDIC_SCRIPT_RANGES) - allowed_scripts
     allowed_count = _count_script_chars(output_text, allowed_scripts)
     wrong_count = _count_script_chars(output_text, wrong_scripts)
+
     return wrong_count >= min_wrong_chars and (
         allowed_count == 0 or wrong_count / max(allowed_count, 1) > 0.15
     )
@@ -295,6 +468,7 @@ def output_language_mismatch_detected(output_text, language, min_wrong_chars=6):
 # ==================== LLM PROMPTS ====================
 
 def build_prompt(safe_text, language):
+    """Build prompt for judgment simplification"""
     language_rule = _language_output_rule(language)
     return f"""
 You are LegalEase AI — an expert judicial-simplification and translation engine.
@@ -326,6 +500,7 @@ OUTPUT REQUIRED:
 
 
 def build_retry_prompt(safe_text, language):
+    """Build retry prompt when output language mismatch is detected"""
     language_rule = _language_output_rule(language)
     return f"""
 Your previous answer used the wrong language or mixed languages.
@@ -340,7 +515,6 @@ REQUIREMENTS:
 - Minimum 5 bullet points
 - VERY simple {language}
 - No non-target language text at all
-- Put every bullet point on its own new line
 - No introductions, headings, or explanations
 
 TEXT:
@@ -356,7 +530,7 @@ Minimum 5 bullet points in {language} only.
 # FIX: system message now explicitly enforces the target language and its script rule.
 
 def build_remedies_prompt(judgment_text, language):
-    """Build prompt for remedies advisor — answers must be in the selected language."""
+    """Build prompt for remedies advisor to analyze legal options"""
     language_rule = _language_output_rule(language)
     return f"""
 You are a Legal Rights Advisor. Read this judgment and answer the questions below.
@@ -364,32 +538,25 @@ You are a Legal Rights Advisor. Read this judgment and answer the questions belo
 JUDGMENT:
 {judgment_text}
 
-CRITICAL LANGUAGE RULE:
-- You MUST answer ONLY in {language}.
-- {language_rule}
-- The source document may be in a different language — ignore it, answer in {language}.
-- Do NOT write English words, sentences, or labels if {language} is not English.
-- Court names, legal terms, and amounts must all be written in {language} script/words.
+Answer ONLY these questions in {language}. Be practical and direct.
 
-FORMAT — answer ONLY these 7 questions. Write just the answer after each number.
-Do NOT repeat the question text. Do NOT add extra commentary.
+TARGET LANGUAGE:
+- Language: {language}
+- Rule: {language_rule}
+- The source PDF may be in another language. Ignore the source language for output.
+- Never mix languages. If a sentence is not in {language}, rewrite it before answering.
+- Do not repeat the question labels; write only the answer after each number.
 
-1. What happened? (Who won and who lost — 2 to 3 sentences in {language})
-2. Can the losing party appeal? (Answer yes/no equivalent in {language}, then give 2–3 sentences explaining why)
-3. How many days does the loser have to file an appeal? (Just the number)
-4. Which court should they appeal to? (Court name in {language})
-5. Approximate cost in rupees for the appeal? (e.g., ₹5,000–₹15,000)
-6. What is the single most important first step the loser should take? (2–3 sentences in {language})
-7. What is the most important deadline they must not miss? (1–2 sentences in {language})
+1. What happened? (Who won and who lost; 1 sentence)
+2. Can the loser appeal? (yes/no equivalent in {language} + reason; 1-2 sentences)
+3. Appeal timeline: How many days? (Just number)
+4. Appeal court: Which court should they go to? (Court name only)
+5. Cost estimate: Rough cost in rupees? (e.g., 5000-15000)
+6. First action: What should they do first? (1 sentence)
+7. Important deadline: What key deadline should they remember? (1 sentence)
 
-Output format (numbered, one per line):
-1. ...
-2. ...
-3. ...
-4. ...
-5. ...
-6. ...
-7. ...
+Output in numbered form like:
+1. ...\n2. ...\n3. ... etc.
 """
 
 
@@ -410,13 +577,13 @@ def _strip_question_label(key: str, value: str) -> str:
     if not value:
         return ""
     patterns = {
-        "what_happened": r"^(what happened\??)\s*",
-        "can_appeal": r"^(can the loser appeal\??)\s*",
-        "appeal_days": r"^(appeal timeline\??|how many days\??)\s*",
-        "appeal_court": r"^(appeal court\??|which court(?: should they go to)?\??)\s*",
-        "cost_estimate": r"^(cost estimate\??|rough cost(?: in rupees)?\??)\s*",
-        "first_action": r"^(first action\??|what should they do first\??)\s*",
-        "deadline": r"^(important deadline\??|important dates?\??)\s*",
+        "what_happened": r"^(?:\*\*)?(what happened\??)(?:\*\*)?\s*",
+        "can_appeal": r"^(?:\*\*)?(can the loser appeal\??)(?:\*\*)?\s*",
+        "appeal_days": r"^(?:\*\*)?(appeal timeline\??|how many days\??)(?:\*\*)?\s*",
+        "appeal_court": r"^(?:\*\*)?(appeal court\??|which court(?: should they go to)?\??)(?:\*\*)?\s*",
+        "cost_estimate": r"^(?:\*\*)?(cost estimate\??|rough cost(?: in rupees)?\??)(?:\*\*)?\s*",
+        "first_action": r"^(?:\*\*)?(first action\??|what should they do first\??)(?:\*\*)?\s*",
+        "deadline": r"^(?:\*\*)?(important deadline\??|important dates?\??)(?:\*\*)?\s*",
     }
     pattern = patterns.get(key)
     if pattern:
@@ -425,30 +592,45 @@ def _strip_question_label(key: str, value: str) -> str:
 
 
 YES_ALIASES = {
-    "haan", "\u0907\u092f\u0938", "\u0939\u093e\u0901", "\u0939\u093e\u0902",
-    "\u09b9\u09af\u09bc", "\u09b9\u09cd\u09af\u09be\u0981", "\u0a39\u0a3e\u0a02",
-    "\u0ab9\u0abe", "\u0b39\u0b01", "\u0b86\u0bae\u0bcd", "\u0c05\u0c35\u0c41\u0c28\u0c41",
-    "\u0cb9\u0ccc\u0ca6\u0cc1", "\u0d05\u0d24\u0d46", "\u06c1\u0627\u06ba",
+    "haan",
+    "\u0907\u092f\u0938",
+    "\u0939\u093e\u0901",
+    "\u0939\u093e\u0902",
+    "\u09b9\u09af\u09bc",
+    "\u09b9\u09cd\u09af\u09be\u0981",
+    "\u0a39\u0a3e\u0a02",
+    "\u0ab9\u0abe",
+    "\u0b39\u0b01",
+    "\u0b86\u0bae\u0bcd",
+    "\u0c05\u0c35\u0c41\u0c28\u0c41",
+    "\u0cb9\u0ccc\u0ca6\u0cc1",
+    "\u0d05\u0d24\u0d46",
+    "\u06c1\u0627\u06ba",
 }
 
 NO_ALIASES = {
-    "nahin", "nahi", "\u0928\u0939\u0940\u0902", "\u0928\u0939\u0940",
-    "\u09a8\u09b9\u09af\u09bc", "\u09a8\u09be\u0987", "\u09a8\u09be", "\u0a28\u0abe",
-    "\u0aa8\u0abe", "\u0b28\u0b3e", "\u0b87\u0bb2\u0bcd\u0bb2\u0bc8",
-    "\u0c15\u0c3e\u0c26\u0c41", "\u0c87\u0cb2\u0ccd\u0cb2", "\u0d07\u0d32\u0d4d\u0d32",
-    "\u0646\u06c1\u06cc\u06ba", "\u0646\u0627",
+    "nahin",
+    "nahi",
+    "\u0928\u0939\u0940\u0902",
+    "\u0928\u0939\u0940",
+    "\u09a8\u09b9\u09af\u09bc",
+    "\u09a8\u09be\u0987",
+    "\u09a8\u09be",
+    "\u0a28\u0abe",
+    "\u0aa8\u0abe",
+    "\u0b28\u0b3e",
+    "\u0b87\u0bb2\u0bcd\u0bb2\u0bc8",
+    "\u0c15\u0c3e\u0c26\u0c41",
+    "\u0c87\u0cb2\u0ccd\u0cb2",
+    "\u0d07\u0d32\u0d4d\u0d32",
+    "\u0646\u06c1\u06cc\u06ba",
+    "\u0646\u0627",
 }
 
 
 def _contains_alias(value, aliases):
     return any(alias in value for alias in aliases if alias)
 
-
-# ==================== FIX-1: _normalize_yes_no now returns localized value ====================
-# OLD: always returned English "yes" / "no" string literals.
-# FIX: returns the raw value unchanged so the localized text from the LLM is preserved.
-#      The UI layer (localize_yes_no) will translate "yes"/"no" only when the LLM returned
-#      the English form — for Indic scripts the LLM now returns the native form directly.
 
 def _normalize_yes_no(value: str) -> str:
     """
@@ -458,20 +640,11 @@ def _normalize_yes_no(value: str) -> str:
     if not value:
         return ""
     lower = value.lower()
-    # Detect English no variants
-    if re.search(r"\bno\b", lower) or any(
-        x in lower for x in ["cannot appeal", "not available", "no right", "no appeal"]
-    ) or _contains_alias(lower, NO_ALIASES):
+    if re.search(r"\bno\b", lower) or any(x in lower for x in ["cannot appeal", "not available", "no right", "no appeal"]) or _contains_alias(lower, NO_ALIASES):
         return "no"
-    # Detect English yes variants
-    if re.search(r"\byes\b", lower) or any(
-        x in lower for x in ["can appeal", "available", "allowed", "has right"]
-    ) or _contains_alias(lower, YES_ALIASES):
+    if re.search(r"\byes\b", lower) or any(x in lower for x in ["can appeal", "available", "allowed", "has right"]) or _contains_alias(lower, YES_ALIASES):
         return "yes"
-    # FIX: for non-English responses where we couldn't detect yes/no,
-    # return the value as-is so the Indic text is preserved in the UI.
-    return value
-
+    return ""
 
 def _extract_number(value: str) -> str:
     if not value:
@@ -530,7 +703,8 @@ def parse_remedies_response(response_text):
     if not text:
         return remedies
 
-    marker_pattern = re.compile(r"(?m)^\s*(\d{1,2})\s*[\.|\)|:|-]\s*(.*)$")
+    # Use robust marker-based parsing
+    marker_pattern = re.compile(r"(?m)^\s*(?:\*\*)?(\d{1,2})(?:\*\*)?\s*[\.|\)|:|-]\s*(.*)$")
     matches = list(marker_pattern.finditer(text))
 
     if not matches:
@@ -767,8 +941,8 @@ STATIC_UI_TEXT_TRANSLATIONS = {
         "generate_summary": "🚀 সাৰাংশ সৃষ্টি কৰক",
         "processing": "ৰায় প্ৰক্ৰিয়াকৰণ হৈ আছে...",
         "api_client_failed": "এপিআই ক্লায়েণ্ট আৰম্ভ কৰাত ব্যৰ্থ",
-        "openrouter_not_configured": "OpenRouter ক্লায়েণ্ট কনফিগাৰ কৰা হোৱা নাই।",
-        "empty_summary": "মডেলে খালী সাৰাংশ ঘূৰাইছে।",
+        "openrouter_not_configured": "OpenRouter ক্লায়েণ্ট কনফিগাৰ কৰা হোৱা নাই। আপোনাৰ এপিআই কী পৰীক্ষা কৰক।",
+        "empty_summary": "মডেলে খালী সাৰাংশ ঘূৰাইছে। সৰু ফাইল চেষ্টা কৰক বা ইংৰাজীলৈ সলনি কৰক।",
         "simplified_judgment": "✅ সৰলীকৃত ৰায়",
         "summary_success": "ৰায়টো সফলতাৰে সৰল কৰা হৈছে।",
         "remedies_title": "⚖️ এতিয়া আপুনি কি কৰিব পাৰে?",
@@ -783,10 +957,11 @@ STATIC_UI_TEXT_TRANSLATIONS = {
         "important_deadline": "⏰ গুৰুত্বপূর্ণ সময়সীমা",
         "remedies_error": "আইনী পৰামৰ্শ আনিব পৰা নগ'ল",
         "partial_warning": "টোকা: কিছু তথ্য অসম্পূৰ্ণ হ'ব পাৰে।",
-        "track_title": "📊 আপোনাৰ গোচৰ অনুসৰণ কৰক",
+        "track_title": "📊 আপোনাৰ গোচৰ অনুসৰণ কৰক আৰু পৰিসংখ্যা চাওক",
         "track_info": (
             "**উন্নত অনুমান তৈয়াৰ কৰাত আমাক সহায় কৰক!**\n\n"
-            "আপোনাৰ গোচৰ অনুসৰণ কৰিলে আমাক সহায় হয়।"
+            "আপোনাৰ গোচৰ অনুসৰণ কৰিলে, আপোনাৰ অঞ্চলত আপীল সফলতাৰ হাৰ বুজিবলৈ আমাক সহায় হয়। "
+            "পিছত আপীলৰ ফলাফল জানিলে আপুনি আমাক জনাব পাৰে।"
         ),
         "view_analytics": "📈 বিশ্লেষণ চাওক",
         "estimate_chances": "🎯 আপীলৰ সম্ভাৱনা অনুমান কৰক",
@@ -800,13 +975,24 @@ STATIC_UI_TEXT_TRANSLATIONS = {
         "analytics_not_ready": "বিশ্লেষণ মডিউল এতিয়াও সাজু নহয়।",
         "free_legal_help": "📞 বিনামূলীয়া আইনী সহায়",
         "legal_help_resources": (
-            "**এইটো আপুনি অকলে সামলাব লাগিব নালাগে।**\n\n"
-            "🔗 ৰাষ্ট্ৰীয় আইনী সেৱা: 1800-180-8111 (nalsa.gov.in)\n"
-            "🔗 বাৰ কাউন্সিল অৱ ইণ্ডিয়া: bci.org.in"
+            "**এইটো আপুনি অকলে সামলাব লাগিব নালাগে। ইয়াত বিনামূলীয়া সহায়ৰ পথ আছে:**\n\n"
+            "🔗 **ৰাষ্ট্ৰীয় আইনী সেৱা (বিনামূলীয়া অধিবক্তা)**\n"
+            "- ফোন: 1800-180-8111\n"
+            "- ৱেবছাইট: nalsa.gov.in\n"
+            "- সকলোৰে বাবে, বিশেষকৈ আৰ্থিকভাৱে দুৰ্বল নাগৰিকৰ বাবে\n\n"
+            "🔗 **বাৰ কাউন্সিল অৱ ইণ্ডিয়া (যাচাইকৃত অধিবক্তা বিচাৰক)**\n"
+            "- ৱেবছাইট: bci.org.in\n\n"
+            "🔗 **আইনী ক্লিনিক (আইন মহাবিদ্যালয়)**\n"
+            "- বহু আইন মহাবিদ্যালয়ে বিনামূলীয়া পৰামৰ্শ দিয়ে\n\n"
+            "**পৰামৰ্শ:** প্ৰথমে ৰাষ্ট্ৰীয় আইনী সেৱাৰ সৈতে যোগাযোগ কৰক।"
         ),
-        "not_enough_credits": "❌ পৰ্যাপ্ত OpenRouter ক্ৰেডিট নাই।",
-        "connection_error": "⚠️ সংযোগ ত্ৰুটি: {error}",
-        "generic_error": "❌ ত্ৰুটি: {error}",
+        "not_enough_credits": "❌ পৰ্যাপ্ত OpenRouter ক্ৰেডিট নাই। অনুগ্ৰহ কৰি টপ আপ কৰক।",
+        "connection_error": (
+            "⚠️ সংযোগ ত্ৰুটি: {error}\n\n"
+            "সমাধান:\n- ইণ্টাৰনেট সংযোগ পৰীক্ষা কৰক\n- .env-ত এপিআই কী পৰীক্ষা কৰক\n"
+            "- openrouter.ai-ত OpenRouter অৱস্থা চাওক"
+        ),
+        "generic_error": "❌ ত্ৰুটি: {error}\n\n📋 ডিবাগৰ বিৱৰণ: টাৰ্মিনেল লগ চাওক",
         "yes": "হয়",
         "no": "নহয়",
     }
@@ -816,10 +1002,12 @@ STATIC_UI_TEXT_TRANSLATIONS = {
 def _parse_json_object(text):
     if not text:
         return {}
+
     text = text.strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
+
     try:
         return json.loads(text)
     except json.JSONDecodeError:
@@ -835,6 +1023,7 @@ def _parse_json_object(text):
 def _translate_ui_text(language, text_map, client=None):
     if not client:
         return {}
+
     language_rule = _language_output_rule(language)
     prompt = f"""
 Translate this JSON object's values into {language}.
@@ -842,7 +1031,7 @@ Rules:
 - Return JSON only.
 - Keep the exact same keys.
 - Keep emoji, Markdown, placeholders like {{error}}, URLs, phone numbers, and product names unchanged.
-- IMPORTANT: The brand name "LegalEase AI" and "⚡ LegalEase AI" MUST NOT be translated.
+- IMPORTANT: The brand name "LegalEase AI" and "⚡ LegalEase AI" MUST NOT be translated. Keep it exactly as it is.
 - {language_rule}
 - Do not use English or any non-target language except unchanged brand names, URLs, phone numbers, and placeholders.
 - Do not add commentary.
@@ -876,14 +1065,17 @@ JSON:
 
 
 def _is_untranslated_ui_value(key, value):
+    """Treat copied English strings as missing translations."""
     if key not in UI_TEXT:
         return False
     return str(value).strip() == str(UI_TEXT[key]).strip()
 
 
 def get_localized_ui_text(language, client=None):
+    """Return user-facing UI text in the selected language when available."""
     if not language or language == "English":
         return dict(UI_TEXT)
+
     text = dict(UI_TEXT)
     stored_translation = {
         **UI_TEXT_TRANSLATIONS.get(language, {}),
@@ -895,6 +1087,7 @@ def get_localized_ui_text(language, client=None):
         if not _is_untranslated_ui_value(key, value)
     }
     text.update(usable_translation)
+
     missing_keys = [key for key in UI_TEXT if key not in usable_translation]
     if missing_keys and client:
         cached_translation = _LOCALIZED_UI_TEXT_CACHE.setdefault(language, {})
@@ -903,6 +1096,7 @@ def get_localized_ui_text(language, client=None):
             missing_text = {key: UI_TEXT[key] for key in uncached_keys}
             cached_translation.update(_translate_ui_text(language, missing_text, client))
         text.update(cached_translation)
+
     return text
 
 
@@ -912,7 +1106,6 @@ def localize_yes_no(value, ui_text):
         return ui_text.get("yes", "Yes")
     if normalized == "no":
         return ui_text.get("no", "No")
-    # FIX-1: value is already in the target language (Indic script), return as-is.
     return value
 
 
@@ -1530,10 +1723,28 @@ def render_shareable_result_box(
 
 
 SCHEDULED_INDIAN_LANGUAGES = [
-    "Assamese", "Bengali", "Bodo", "Dogri", "Gujarati", "Hindi", "Kannada",
-    "Kashmiri", "Konkani", "Maithili", "Malayalam", "Manipuri", "Marathi",
-    "Nepali", "Odia", "Punjabi", "Sanskrit", "Santhali", "Sindhi",
-    "Tamil", "Telugu", "Urdu",
+    "Assamese",
+    "Bengali",
+    "Bodo",
+    "Dogri",
+    "Gujarati",
+    "Hindi",
+    "Kannada",
+    "Kashmiri",
+    "Konkani",
+    "Maithili",
+    "Malayalam",
+    "Manipuri",
+    "Marathi",
+    "Nepali",
+    "Odia",
+    "Punjabi",
+    "Sanskrit",
+    "Santhali",
+    "Sindhi",
+    "Tamil",
+    "Telugu",
+    "Urdu",
 ]
 
 LANGUAGES = ["English", *SCHEDULED_INDIAN_LANGUAGES]
@@ -1547,13 +1758,85 @@ LANGUAGE_ALIASES = {
 }
 
 LANGUAGE_CODE_TO_NAME = {
-    "as": "Assamese", "bn": "Bengali", "brx": "Bodo", "doi": "Dogri",
-    "en": "English", "gu": "Gujarati", "hi": "Hindi", "kn": "Kannada",
-    "ks": "Kashmiri", "kok": "Konkani", "mai": "Maithili", "ml": "Malayalam",
-    "mni": "Manipuri", "mr": "Marathi", "ne": "Nepali", "or": "Odia",
-    "pa": "Punjabi", "sa": "Sanskrit", "sat": "Santhali", "sd": "Sindhi",
-    "ta": "Tamil", "te": "Telugu", "ur": "Urdu",
+    "as": "Assamese",
+    "bn": "Bengali",
+    "brx": "Bodo",
+    "doi": "Dogri",
+    "en": "English",
+    "gu": "Gujarati",
+    "hi": "Hindi",
+    "kn": "Kannada",
+    "ks": "Kashmiri",
+    "kok": "Konkani",
+    "mai": "Maithili",
+    "ml": "Malayalam",
+    "mni": "Manipuri",
+    "mr": "Marathi",
+    "ne": "Nepali",
+    "or": "Odia",
+    "pa": "Punjabi",
+    "sa": "Sanskrit",
+    "sat": "Santhali",
+    "sd": "Sindhi",
+    "ta": "Tamil",
+    "te": "Telugu",
+    "ur": "Urdu",
 }
 
 # Alias for backward compatibility
 build_summary_prompt = build_prompt
+
+def parse_summary_bullets(raw_text):
+    """
+    Structured parser to ensure exactly 3 bullet points are extracted from LLM output.
+    This eliminates introductory text (e.g., 'Here is your summary:') and 
+    excessive output beyond the requested 3 bullets.
+    """
+    if not raw_text:
+        return ""
+    
+    # Regex to identify lines starting with common bullet markers
+    # Covers: - *, •, and numbered bullets like 1. or 1)
+    # Added optional markdown bolding support
+    bullet_marker_regex = re.compile(r"^\s*([\-\*\u2022\u25cf]|(?:\*\*)?(\d+)(?:\*\*)?[\.\)])\s*(.*)$")
+    
+    lines = raw_text.split('\n')
+    bullets = []
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+            
+        match = bullet_marker_regex.match(line)
+        if match:
+            # We found a bullet! Extract the content after the marker
+            content = match.group(3).strip()
+            if content:
+                bullets.append(content)
+        elif len(bullets) < 3:
+            # If no marker is found, but we still need bullets, check if this line
+            # is a substantive sentence (longer than 20 chars) and doesn't look like a heading.
+            if len(line) > 20 and not line.endswith(':'):
+                # Filter out obvious intro/outro phrases that LLMs sometimes add
+                lower_line = line.lower()
+                intro_keywords = ["here is", "summary", "analysis", "judgment", "result"]
+                if not any(keyword in lower_line for keyword in intro_keywords):
+                    bullets.append(line)
+        
+        # Stop once we have 3 points
+        if len(bullets) >= 3:
+            break
+                    
+    # Re-format as a clean markdown list with consistent bullet markers
+    final_bullets = bullets[:3]
+    
+    if not final_bullets:
+        # Fallback for very unstructured output: take first 3 substantial non-intro lines
+        final_bullets = [l.strip() for l in lines if len(l.strip()) > 15 and not l.endswith(':')][:3]
+        
+    if not final_bullets:
+        # Final fallback: return the raw text if all parsing heuristics failed
+        return raw_text
+        
+    return "\n".join([f"- {b}" for b in final_bullets])

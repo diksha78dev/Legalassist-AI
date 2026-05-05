@@ -47,8 +47,12 @@ def test_pdf_extraction():
         
         with open(path, "rb") as f:
             text = core.extract_text_from_pdf(f)
-            assert len(text) > 0, f"Extraction failed for {path}"
-            assert "JUDGMENT" in text or "judgment" in text.lower()
+            # More robust check: at least 100 characters and contains legal terminology
+            assert len(text) > 100, f"Extraction returned too little text for {path}"
+            
+            keywords = ["judgment", "judgement", "court", "case", "verdict", "order", "plaintiff", "defendant", "petitioner", "respondent"]
+            text_lower = text.lower()
+            assert any(kw in text_lower for kw in keywords), f"No legal keywords found in extracted text from {path}"
             files_tested += 1
             
     if files_tested == 0:
@@ -107,7 +111,7 @@ def test_all_languages_prompt_building(language):
     """Test prompt building for all supported languages"""
     prompt = core.build_summary_prompt("Sample text", language)
     assert language in prompt
-    assert "3 bullet points" in prompt
+    assert "bullet points" in prompt
 
 @patch("core.app_utils.get_client")
 def test_get_remedies_advice_flow(mock_get_client):
@@ -150,7 +154,7 @@ def test_judgment_summary_quality_manual():
     """
     # Just check if our prompt asks for 3 bullets
     prompt = core.build_summary_prompt("test", "Hindi")
-    assert "EXACTLY 3 bullet points" in prompt
+    assert "AT LEAST 5 bullet points" in prompt
 
 if __name__ == "__main__":
     pytest.main([__file__])

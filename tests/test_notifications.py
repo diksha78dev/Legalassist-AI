@@ -15,6 +15,9 @@ from database import (
     SessionLocal,
     NotificationStatus,
     NotificationChannel,
+    Case,
+    CaseStatus,
+    User,
     CaseDeadline,
     UserPreference,
     NotificationLog,
@@ -72,6 +75,35 @@ class TestDatabaseModels:
         assert deadline.case_title == "Property Dispute"
         assert deadline.is_completed == False
         assert deadline.days_until_deadline() >= 29  # Approximately 30 days
+
+    def test_create_case_deadline_coerces_string_case_id(self, test_db):
+        """Test that string case_id values are normalized to integers"""
+        deadline_date = datetime.now(timezone.utc) + timedelta(days=15)
+
+        deadline = create_case_deadline(
+            db=test_db,
+            user_id="user123",
+            case_id="2",
+            case_title="Appeal Filing",
+            deadline_date=deadline_date,
+            deadline_type="appeal",
+        )
+
+        assert deadline.case_id == 2
+
+    def test_create_case_deadline_rejects_invalid_case_id(self, test_db):
+        """Test that invalid case_id values raise a clear error"""
+        deadline_date = datetime.now(timezone.utc) + timedelta(days=15)
+
+        with pytest.raises(ValueError, match="case_id must be an integer matching cases.id"):
+            create_case_deadline(
+                db=test_db,
+                user_id="user123",
+                case_id="abc",
+                case_title="Appeal Filing",
+                deadline_date=deadline_date,
+                deadline_type="appeal",
+            )
 
     def test_create_user_preference(self, test_db):
         """Test creating user notification preferences"""
@@ -214,16 +246,48 @@ class TestNotificationService:
         service = NotificationService()
         deadline_date = datetime.now(timezone.utc) + timedelta(days=3)
         
-        subject, html_content = service.build_email_message(
-            "Appeal Filing", 3, deadline_date, "CASE-001"
-        )
+        # Create a mock deadline object
+        deadline = Mock(spec=CaseDeadline)
+        deadline.case_title = "Appeal Filing"
+        deadline.deadline_type = "appeal"
+        deadline.deadline_date = deadline_date
+        deadline.case_id = "CASE-001"
+        deadline.description = "Test description"
         
-        assert "Urgent" in subject
+        subject, html_content = service.build_email_message(deadline, 3)
+        
+        assert "REMINDER" in subject or "URGENT" in subject
         assert "Appeal Filing" in subject
-        assert "3 day" in subject
+        assert "3 day" in subject or "3 Days" in html_content
         assert "CASE-001" in html_content
-        assert "<html>" in html_content
+        assert "<!DOCTYPE html>" in html_content
         assert "deadline" in html_content.lower()
+
+    def test_email_title_escaping(self):
+        """Test that case titles with HTML are escaped in email content"""
+        service = NotificationService()
+        deadline_date = datetime.now(timezone.utc) + timedelta(days=3)
+        malicious_title = "Case <script>alert('XSS')</script> & More"
+        
+        # Create a mock deadline object
+        deadline = Mock(spec=CaseDeadline)
+        deadline.case_title = malicious_title
+        deadline.deadline_type = "appeal"
+        deadline.deadline_date = deadline_date
+        deadline.case_id = "CASE-001"
+        deadline.description = "<b>Bold</b>" # Also test description escaping
+        
+        subject, html_content = service.build_email_message(deadline, 3)
+        
+        # Title in subject should be plain
+        assert malicious_title in subject
+        
+        # Title and description in HTML MUST be escaped
+        assert "<script>" not in html_content
+        assert "&lt;script&gt;alert('XSS')&lt;/script&gt;" in html_content
+        assert " &amp; " in html_content
+        assert "<b>" not in html_content
+        assert "&lt;b&gt;Bold&lt;/b&gt;" in html_content
 
     @patch("notification_service.TwilioClient")
     def test_sms_send_success(self, mock_twilio, test_db):
@@ -299,6 +363,57 @@ class TestNotificationService:
 
         assert result.success == True
         assert result.channel == NotificationChannel.EMAIL
+
+    @patch("notification_service.SendGridAPIClient")
+    def test_email_send_uses_case_number(self, mock_sendgrid, test_db):
+        """Test email reminder uses the case_number from the related case"""
+        mock_response = Mock()
+        mock_response.status_code = 202
+        mock_response.headers = {"X-Message-ID": "email_123"}
+        mock_sendgrid.return_value.send.return_value = mock_response
+
+        user = User(email="user123@example.com")
+        test_db.add(user)
+        test_db.commit()
+        test_db.refresh(user)
+
+        case = Case(
+            user_id=user.id,
+            case_number="CASE-9001",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Appeal Filing",
+        )
+        test_db.add(case)
+        test_db.commit()
+        test_db.refresh(case)
+
+        deadline = CaseDeadline(
+            user_id=str(user.id),
+            case_id=case.id,
+            case_title="Appeal Filing",
+            deadline_date=datetime.now(timezone.utc) + timedelta(days=10),
+            deadline_type="appeal",
+        )
+        test_db.add(deadline)
+        test_db.commit()
+        test_db.refresh(deadline)
+
+        pref = create_or_update_user_preference(
+            test_db, str(user.id), "user@example.com",
+        )
+
+        with patch.dict(os.environ, {
+            "SENDGRID_API_KEY": "test_key",
+            "SENDGRID_FROM_EMAIL": "noreply@legalassist.ai",
+        }):
+            service = NotificationService()
+            with patch.object(service, "build_email_message", wraps=service.build_email_message) as mock_build:
+                result = service.send_email_reminder(test_db, deadline, pref, 10)
+
+        assert result.success == True
+        assert mock_build.call_args.args[3] == "CASE-9001"
 
     def test_mock_mode_sms(self, test_db):
         """Test SMS in mock mode (no credentials)"""

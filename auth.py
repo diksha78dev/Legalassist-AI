@@ -25,7 +25,10 @@ from database import (
     mark_otp_as_used,
     cleanup_expired_otps,
     update_user_last_login,
+    record_otp_failed_attempt,
+    reset_otp_failed_attempts,
     User,
+    OTPVerification,  # Added to fix NameError in request_otp rate limiting
 )
 
 logger = logging.getLogger(__name__)
@@ -98,6 +101,10 @@ OTP_EXPIRY_MINUTES = int(os.getenv("OTP_EXPIRY_MINUTES", "10"))
 OTP_RATE_LIMIT_HOURS = 1
 OTP_RATE_LIMIT_MAX = 3  # Max OTP requests per email per hour
 
+# OTP Verification Security - Failed Attempt Lockout
+OTP_MAX_FAILED_ATTEMPTS = int(os.getenv("OTP_MAX_FAILED_ATTEMPTS", "5"))  # Max failed verification attempts
+OTP_LOCKOUT_MINUTES = int(os.getenv("OTP_LOCKOUT_MINUTES", "15"))  # Lockout duration after max attempts
+
 
 def _hash_otp(otp: str) -> str:
     """Hash OTP code before storing"""
@@ -167,6 +174,77 @@ def send_otp_email(email: str, otp: str) -> bool:
         return False
 
 
+def _handle_test_account_bypass(db: SessionLocal, email: str, now: datetime) -> Tuple[bool, str]:
+    """
+    Handles automated OTP bypass for designated test accounts in non-production environments.
+    
+    CRITICAL SECURITY DESIGN:
+    The previous implementation allowed a bypass for 'test@example.com' based solely 
+    on the 'DEBUG' flag. This was dangerous because 'DEBUG' is often accidentally 
+    left enabled in staging or even production misconfigurations.
+    
+    This new implementation implements 'Defense in Depth' by requiring:
+    1. ACCOUNT MATCH: The email must exactly match the hardcoded test account.
+    2. ENVIRONMENT LOCK: The APP_ENV must NOT be 'production'.
+    3. EXPLICIT OPT-IN: A specific 'ALLOW_UNSAFE_TEST_BYPASS' variable must be 'true'.
+    4. MODE VERIFICATION: Standard 'DEBUG' or 'TESTING' flags must still be active.
+    
+    If any of these conditions are missing, the bypass is skipped entirely and 
+    the system falls back to the secure, real OTP flow.
+    """
+    # Step 1: Identity Verification
+    # We only ever allow a bypass for this specific, low-privilege test account.
+    if email.lower() != "test@example.com":
+        return False, "Not a designated test account"
+
+    # Step 2: Production Safeguard
+    # Explicitly block this logic if we detect we are in a production environment.
+    # We default to 'production' if the variable is missing to fail-safe.
+    app_env = os.getenv("APP_ENV", "production").strip().lower()
+    if app_env == "production":
+        logger.error(
+            "SECURITY WARNING: Bypass attempt for %s blocked because APP_ENV is 'production'.",
+            email
+        )
+        return False, "Bypass strictly forbidden in production"
+
+    # Step 3: Explicit Opt-In Flag
+    # This requires the administrator to set a very specific, scary-sounding 
+    # environment variable, making it harder to enable by mistake.
+    truthy = {"1", "true", "yes", "on"}
+    allow_bypass = os.getenv("ALLOW_UNSAFE_TEST_BYPASS", "").strip().lower() in truthy
+    if not allow_bypass:
+        return False, "Explicit bypass flag (ALLOW_UNSAFE_TEST_BYPASS) is not enabled"
+
+    # Step 4: Mode Verification
+    # Ensure we are actually in a debug/testing context as defined by the app.
+    if not _is_debug_or_testing_mode():
+        return False, "Standard debug or testing flags are not active"
+
+    # --- ALL SECURITY CHECKS PASSED ---
+    # We proceed with generating a deterministic 'test' OTP for CI/CD or local dev.
+    test_otp = "123456"
+    test_otp_hash = _hash_otp(test_otp)
+    expires_at = now + timedelta(minutes=OTP_EXPIRY_MINUTES)
+    
+    # Register the bypass in the database so the verification step works correctly.
+    create_otp_verification(db, email, test_otp_hash, expires_at)
+    
+    # Ensure the test user exists in the system.
+    user = get_user_by_email(db, email)
+    if not user:
+        create_user(db, email)
+        logger.info("Created new test user for bypass: %s", email)
+        
+    logger.warning(
+        "SECURITY ALERT: Active OTP bypass for %s (Env: %s). "
+        "Remove ALLOW_UNSAFE_TEST_BYPASS in non-test environments.", 
+        email, app_env
+    )
+    
+    return True, "Test bypass activated successfully"
+
+
 def request_otp(email: str) -> Tuple[bool, str]:
     """
     Request OTP for email authentication.
@@ -181,17 +259,15 @@ def request_otp(email: str) -> Tuple[bool, str]:
         # Check rate limiting
         now = datetime.now(timezone.utc)
         
-        # Test OTP bypass is only allowed with explicit debug/testing flags.
-        if _is_debug_or_testing_mode() and email.lower() == "test@example.com":
-            otp = "123456"
-            otp_hash = _hash_otp(otp)
-            expires_at = now + timedelta(minutes=OTP_EXPIRY_MINUTES)
-            create_otp_verification(db, email, otp_hash, expires_at)
-            user = get_user_by_email(db, email)
-            if not user:
-                create_user(db, email)
-            logger.warning("Using test OTP bypass for test@example.com in debug/testing mode")
-            return True, "Test OTP sent"
+        # SECURITY: Check for isolated test account bypass.
+        # This replaces the previous vulnerable inline check.
+        # It uses multiple layers of environment validation to prevent 
+        # accidental backdoors in production builds.
+        bypass_success, bypass_msg = _handle_test_account_bypass(db, email, now)
+        if bypass_success:
+            # We return a generic 'success' message to the frontend to maintain 
+            # consistent UI behavior and avoid leaking bypass status.
+            return True, "OTP sent to your email"
 
         rate_limit_start = now - timedelta(hours=OTP_RATE_LIMIT_HOURS)
 
@@ -234,8 +310,13 @@ def request_otp(email: str) -> Tuple[bool, str]:
 
 def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Optional[str]]:
     """
-    Verify OTP and create JWT token.
+    Verify OTP and create JWT token with brute-force protection.
     Returns (success, message, token).
+    
+    Security features:
+    - Track failed verification attempts per OTP
+    - Lock OTP after max failed attempts
+    - Require user to request a new OTP after lockout
     """
     db = SessionLocal()
     try:
@@ -245,11 +326,36 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
         if not otp_record:
             return False, "OTP expired or not found. Please request a new one.", None
 
+        # Check if OTP is locked due to too many failed attempts
+        if otp_record.is_locked():
+            remaining_time = (otp_record.locked_until - datetime.now(timezone.utc)).total_seconds() / 60
+            logger.warning(f"OTP verification attempt for {email} blocked - OTP is locked (remaining time: {remaining_time:.1f} minutes)")
+            return False, f"Too many failed attempts. Please request a new OTP after {int(remaining_time)} minutes.", None
+
         # Verify OTP
         if not _verify_otp_hash(otp, otp_record.otp_hash):
-            return False, "Invalid OTP code. Please try again.", None
+            # Record failed attempt and check if lockout is needed
+            record_otp_failed_attempt(
+                db, 
+                otp_record.id, 
+                lockout_duration_minutes=OTP_LOCKOUT_MINUTES,
+                max_failed_attempts=OTP_MAX_FAILED_ATTEMPTS
+            )
+            
+            # Check if OTP is now locked after this attempt
+            db.refresh(otp_record)
+            if otp_record.is_locked():
+                logger.warning(
+                    f"OTP for {email} locked after {otp_record.failed_attempts} failed verification attempts"
+                )
+                return False, f"Too many failed attempts (limit: {OTP_MAX_FAILED_ATTEMPTS}). OTP is now locked. Please request a new OTP.", None
+            
+            attempts_remaining = OTP_MAX_FAILED_ATTEMPTS - otp_record.failed_attempts
+            logger.info(f"Failed OTP verification for {email}. Attempts remaining: {attempts_remaining}")
+            return False, f"Invalid OTP code. {attempts_remaining} attempts remaining before lockout.", None
 
-        # Mark OTP as used
+        # OTP is valid - reset failed attempts and mark as used
+        reset_otp_failed_attempts(db, otp_record.id)
         mark_otp_as_used(db, otp_record.id)
 
         # Get or create user
@@ -263,7 +369,7 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
         # Create JWT token
         token = create_jwt_token(user.id, user.email)
 
-        logger.info(f"User logged in: {email} (user_id={user.id})")
+        logger.info(f"User logged in successfully: {email} (user_id={user.id})")
         return True, "Login successful", token
 
     except Exception as e:
