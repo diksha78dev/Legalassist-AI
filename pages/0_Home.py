@@ -113,6 +113,13 @@ def render_page():
                     return
 
                 raw_text = extract_text_from_pdf(uploaded_file)
+                
+                # --- NEW RAG STATE ---
+                st.session_state["judgment_raw_text"] = raw_text
+                st.session_state["chat_history"] = []
+                st.session_state["rag_initialized"] = False
+                # ---------------------
+
                 safe_text = compress_text(raw_text)
 
                 prompt = build_prompt(safe_text, language)
@@ -249,6 +256,13 @@ def render_page():
                     st.markdown("---")
                     st.markdown(f"## {ui['free_legal_help']}")
                     st.info(ui["legal_help_resources"])
+
+                    # ===== RAG CHAT REDIRECT =====
+                    st.markdown("---")
+                    st.markdown("## 💬 Chat with Judgment")
+                    st.info("Have specific questions about this document? You can ask our AI assistant.")
+                    if st.button("💬 Open Interactive Chat", use_container_width=True):
+                        st.switch_page("pages/4_Chat.py")
 
             except Exception as e:
                 err = str(e)
