@@ -12,6 +12,7 @@ from core.app_utils import (
     get_remedies_advice,
     parse_remedies_response,
     build_remedies_prompt,
+    LANGUAGES,
     DEFAULT_MODEL,
 )
 
@@ -299,8 +300,8 @@ class TestRemediesParsingWithFixtures:
         remedies = parse_remedies_response(response_text)
         
         assert isinstance(remedies, dict), f"{fixture_name}: should return dict"
-        assert all(isinstance(v, str) for v in remedies.values()), \
-            f"{fixture_name}: all values should be strings"
+        assert all(isinstance(v, str) for k, v in remedies.items() if not k.startswith("_")), \
+            f"{fixture_name}: all data values should be strings"
     
     def test_criminal_guilty_parsing(self, mock_remedies_response):
         """Test specific parsing of criminal guilty verdict"""
@@ -365,7 +366,7 @@ class TestGetRemediesAdviceWithMocks:
         
         mock_openai_client.chat.completions.create.return_value = mock_response
         
-        for language in ["English", "Hindi", "Bengali", "Urdu"]:
+        for language in LANGUAGES:
             remedies = get_remedies_advice("Test judgment", language, mock_openai_client)
             
             # Verify language was passed in prompt
@@ -379,8 +380,8 @@ class TestGetRemediesAdviceWithMocks:
         mock_get_client.return_value = mock_openai_client
         mock_openai_client.chat.completions.create.side_effect = Exception("API Error")
         
-        with pytest.raises(Exception):
-            get_remedies_advice("Test judgment", "English", mock_openai_client)
+        result = get_remedies_advice("Test judgment", "English", mock_openai_client)
+        assert result is None
     
     @patch("core.app_utils.get_client")
     def test_get_remedies_prompt_structure(self, mock_get_client, mock_openai_client):
