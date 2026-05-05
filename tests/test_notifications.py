@@ -284,7 +284,7 @@ class TestNotificationService:
         
         # Title and description in HTML MUST be escaped
         assert "<script>" not in html_content
-        assert "&lt;script&gt;alert('XSS')&lt;/script&gt;" in html_content
+        assert "&lt;script&gt;alert(&#x27;XSS&#x27;)&lt;/script&gt;" in html_content
         assert " &amp; " in html_content
         assert "<b>" not in html_content
         assert "&lt;b&gt;Bold&lt;/b&gt;" in html_content
@@ -413,7 +413,7 @@ class TestNotificationService:
                 result = service.send_email_reminder(test_db, deadline, pref, 10)
 
         assert result.success == True
-        assert mock_build.call_args.args[3] == "CASE-9001"
+        assert mock_build.call_args.args[0] == deadline
 
     def test_mock_mode_sms(self, test_db):
         """Test SMS in mock mode (no credentials)"""
@@ -426,8 +426,8 @@ class TestNotificationService:
             phone_number="+91-9876543210",
         )
 
-        # Clear environment variables to trigger mock mode
-        with patch.dict(os.environ, {}, clear=True):
+        # Clear credentials but set TESTING to trigger mock mode
+        with patch.dict(os.environ, {"TESTING": "1"}, clear=True):
             service = NotificationService()
             result = service.send_sms_reminder(test_db, deadline, pref, 30)
 
@@ -445,7 +445,7 @@ class TestNotificationService:
             test_db, "user123", "user@example.com",
         )
 
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {"TESTING": "1"}, clear=True):
             service = NotificationService()
             result = service.send_email_reminder(test_db, deadline, pref, 10)
 
@@ -525,7 +525,7 @@ class TestIntegration:
         )
 
         # 3. Mock notification sending
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {"TESTING": "1"}, clear=True):
             service = NotificationService()
             
             # Send SMS

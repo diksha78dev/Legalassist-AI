@@ -328,7 +328,10 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
 
         # Check if OTP is locked due to too many failed attempts
         if otp_record.is_locked():
-            remaining_time = (otp_record.locked_until - datetime.now(timezone.utc)).total_seconds() / 60
+            locked_until = otp_record.locked_until
+            if locked_until.tzinfo is None:
+                locked_until = locked_until.replace(tzinfo=timezone.utc)
+            remaining_time = (locked_until - datetime.now(timezone.utc)).total_seconds() / 60
             logger.warning(f"OTP verification attempt for {email} blocked - OTP is locked (remaining time: {remaining_time:.1f} minutes)")
             return False, f"Too many failed attempts. Please request a new OTP after {int(remaining_time)} minutes.", None
 
