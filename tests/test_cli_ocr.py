@@ -43,6 +43,11 @@ def test_process_one_pdf_uses_diagnostics(monkeypatch):
         "ocr_used": True,
         "confidence": 88.2,
     }
+    # Mock other core functions that are called
+    mock_core.compress_text.return_value = "Sample judgment text"
+    mock_core.build_summary_prompt.return_value = "Summarize: Sample judgment text"
+    mock_core.output_language_mismatch_detected.return_value = False
+    mock_core.build_remedies_prompt.return_value = "Analyze remedies: Sample judgment text"
     monkeypatch.setattr(cli, "core", mock_core)
 
     result = cli.process_one_pdf(

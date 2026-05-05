@@ -52,6 +52,7 @@ def get_default_model():
         import streamlit as st
         return st.secrets.get("DEFAULT_MODEL", DEFAULT_MODEL)
     except (KeyError, FileNotFoundError, RuntimeError, AttributeError):
+        # Fallback to module DEFAULT_MODEL if secrets are unavailable
         return DEFAULT_MODEL
 
 
@@ -675,16 +676,10 @@ def _validate_court_name(value: str) -> str:
 def parse_remedies_response(response_text):
     """
     Extract structured info from LLM response using flexible numbered-line parsing.
+    Supports multiple separators: . ) : - 
+    Handles both 5-section (old) and 7-section (new) formats.
+    Returns dict with remedies and _is_partial flag set appropriately.
     """
-    mapping = {
-        1: "what_happened",
-        2: "can_appeal",
-        3: "appeal_days",
-        4: "appeal_court",
-        5: "cost_estimate",
-        6: "first_action",
-        7: "deadline",
-    }
     remedies = {
         "what_happened": "",
         "can_appeal": "",
@@ -703,48 +698,76 @@ def parse_remedies_response(response_text):
     if not text:
         return None
 
-    # Use robust marker-based parsing
-    marker_pattern = re.compile(r"(?m)^\s*(?:\*\*)?(\d{1,2})(?:\*\*)?\s*[\.|\)|:|-]\s*(.*)$")
-    matches = list(marker_pattern.finditer(text))
-
-    if not matches:
-        logging.warning("parse_remedies_response: no numbered sections found")
-        return remedies
-
-    for idx, match in enumerate(matches):
-        section_num = int(match.group(1))
-        key = mapping.get(section_num)
-        if not key:
-            continue
-        start = match.end()
-        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
-        inline_text = _clean_answer(match.group(2))
-        block_text = _clean_answer(text[start:end])
-        section_text = _clean_answer(
-            " ".join(part for part in [inline_text, block_text] if part)
-        )
-        cleaned = _strip_question_label(key, section_text)
-        if cleaned:
-            remedies[key] = cleaned
-
-    # Normalize
-    if remedies["can_appeal"]:
-        remedies["can_appeal"] = _normalize_yes_no(remedies["can_appeal"])
-
-    if remedies["appeal_days"]:
-        remedies["appeal_days"] = _extract_number(remedies["appeal_days"])
-
-    if remedies["appeal_court"]:
-        remedies["appeal_court"] = _validate_court_name(remedies["appeal_court"])
-
-    if remedies["cost_estimate"]:
-        remedies["cost"] = remedies["cost_estimate"]
-
-    required = ["what_happened", "can_appeal", "appeal_days", "appeal_court", "cost", "first_action", "deadline"]
-    missing = [f for f in required if not remedies[f]]
-    if missing:
+    # Detect all numbered sections (flexible separators: . ) : -)
+    # Only match 1-2 digit numbers to avoid matching content like "5000-10000"
+    pattern = r'^([1-9]\d?)\s*[.):‐-]\s*(.*?)$'
+    sections = {}
+    
+    for line in text.split('\n'):
+        match = re.match(pattern, line.strip())
+        if match:
+            num = int(match.group(1))
+            header = match.group(2).strip()
+            sections[num] = {"header": header, "content": ""}
+    
+    # If no numbered sections found, return empty dict with partial flag
+    if not sections:
         remedies["_is_partial"] = True
-        remedies["_warning"] = "Note: Some information may be incomplete."
+        return remedies
+    
+    # Extract content for each section
+    lines = text.split('\n')
+    current_section = None
+    
+    for line in lines:
+        match = re.match(pattern, line.strip())
+        if match:
+            current_section = int(match.group(1))
+        elif current_section is not None and current_section in sections:
+            if line.strip():  # Only add non-empty lines
+                sections[current_section]["content"] += line.strip() + " "
+    
+    # Clean up content
+    for num in sections:
+        sections[num]["content"] = sections[num]["content"].strip()
+    
+    # Map sections to keys based on count
+    is_7section = len(sections) >= 7
+    
+    if is_7section:
+        if 1 in sections:
+            remedies["what_happened"] = sections[1]["content"]
+        if 2 in sections:
+            can_appeal_text = sections[2]["content"].lower()
+            remedies["can_appeal"] = "yes" if "yes" in can_appeal_text else "no"
+        if 3 in sections:
+            # Extract just the number from "30 days"
+            appeal_days_text = sections[3]["content"]
+            match = re.search(r'\d+', appeal_days_text)
+            remedies["appeal_days"] = match.group() if match else appeal_days_text
+        if 4 in sections:
+            remedies["appeal_court"] = sections[4]["content"]
+        if 5 in sections:
+            remedies["cost_estimate"] = sections[5]["content"]
+            remedies["cost"] = sections[5]["content"]  # Support both keys
+        if 6 in sections:
+            remedies["first_action"] = sections[6]["content"]
+        if 7 in sections:
+            remedies["deadline"] = sections[7]["content"]
+        remedies["_is_partial"] = False  # Full 7-section response
+    else:
+        # 5-section format (old) - mark as partial
+        remedies["_is_partial"] = True
+        if 1 in sections:
+            remedies["what_happened"] = sections[1]["content"]
+        if 2 in sections:
+            remedies["can_appeal"] = sections[2]["content"].lower()
+        if 3 in sections:
+            remedies["appeal_details"] = sections[3]["content"]
+        if 4 in sections:
+            remedies["first_action"] = sections[4]["content"]
+        if 5 in sections:
+            remedies["deadline"] = sections[5]["content"]
 
     return remedies
 
@@ -788,7 +811,7 @@ def get_remedies_advice(judgment_text, language, client=None):
                     "role": "system",
                     # FIX-1: was generic English; now strictly enforces the target language.
                     "content": (
-                        f"You are a legal rights advisor for Indian citizens. "
+                        f"You are a legal advisor for Indian citizens. "
                         f"You MUST answer ONLY in {language}. {language_rule} "
                         f"Never use English words or sentences unless {language} is English. "
                         f"Never mix languages. Be thorough and write 2-3 sentences per answer."
