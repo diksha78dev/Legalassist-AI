@@ -131,8 +131,11 @@ def send_otp_email(email: str, otp: str) -> bool:
         from_email = os.getenv("SENDGRID_FROM_EMAIL", "noreply@legalassist.ai")
 
         if not api_key:
-            logger.warning("SendGrid API key not configured, logging OTP instead")
-            logger.info(f"OTP for {email}: {otp}")
+            logger.warning("SendGrid API key not configured - using masked OTP logging")
+            if _is_debug_or_testing_mode():
+                logger.debug(f"OTP for {email}: [MASKED-{otp[:2]}***{otp[-1]}]")
+            else:
+                logger.warning(f"OTP requested for {email} (email delivery skipped - missing config)")
             return True  # Return True in development mode
 
         sg = sendgrid.SendGridAPIClient(api_key=api_key)
@@ -169,8 +172,11 @@ def send_otp_email(email: str, otp: str) -> bool:
 
     except Exception as e:
         logger.error(f"Failed to send OTP email to {email}: {str(e)}")
-        # Fallback: log OTP for development
-        logger.info(f"OTP for {email}: {otp}")
+        # Fallback: masked OTP logging only in debug mode
+        if _is_debug_or_testing_mode():
+            logger.debug(f"OTP for {email}: [MASKED-{otp[:2]}***{otp[-1]}]")
+        else:
+            logger.warning(f"OTP delivery failed for {email} (check email service config)")
         return False
 
 
