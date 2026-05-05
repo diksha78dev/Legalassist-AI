@@ -63,14 +63,12 @@ class TestSchedulerComprehensive:
             mock_result = MagicMock()
             mock_result.success = True
             mock_result.recipient = "test"
-            mock_service.send_sms_reminder.return_value = mock_result
-            mock_service.send_email_reminder.return_value = mock_result
+            mock_service.send_reminders.return_value = [mock_result, mock_result]
             
             check_and_send_reminders()
             
             # Verify it processed all 4 thresholds
-            assert mock_service.send_sms_reminder.call_count == 4
-            assert mock_service.send_email_reminder.call_count == 4
+            assert mock_service.send_reminders.call_count == 4
 
     def test_check_and_send_reminders_no_preferences(self, test_db):
         """Test when user has no preferences"""
@@ -84,31 +82,31 @@ class TestSchedulerComprehensive:
         with patch("scheduler.SessionLocal", return_value=test_db), \
              patch("scheduler.notification_service") as mock_service:
             check_and_send_reminders()
-            assert mock_service.send_sms_reminder.call_count == 0
+            assert mock_service.send_reminders.call_count == 0
 
-    def test_get_scheduler_initialization(self):
-        """Test scheduler singleton initialization"""
+    def test_setup_scheduler_initialization(self):
+        """Test scheduler initialization"""
         with patch("scheduler.BackgroundScheduler") as mock_sched_class:
             mock_sched = mock_sched_class.return_value
-            # Reset global state
-            with patch("scheduler._scheduler", None):
-                s = get_scheduler()
-                assert s == mock_sched
-                assert mock_sched.add_job.called
+            from scheduler import setup_scheduler
+            s = setup_scheduler(mock_sched_class)
+            assert s == mock_sched
+            assert mock_sched.add_job.called
 
     def test_start_stop_scheduler(self):
         """Test starting and stopping the scheduler"""
-        with patch("scheduler.get_scheduler") as mock_get:
-            mock_sched = mock_get.return_value
+        with patch("scheduler.setup_scheduler") as mock_setup:
+            mock_sched = MagicMock()
             mock_sched.running = False
+            mock_setup.return_value = mock_sched
             
             start_scheduler()
             assert mock_sched.start.called
             
             mock_sched.running = True
-            with patch("scheduler._scheduler", mock_sched):
-                stop_scheduler()
-                assert mock_sched.shutdown.called
+            from scheduler import stop_scheduler
+            stop_scheduler()
+            assert mock_sched.shutdown.called
 
     def test_trigger_now(self):
         """Test manual trigger"""
