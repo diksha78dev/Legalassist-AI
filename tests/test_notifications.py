@@ -394,8 +394,8 @@ class TestNotificationService:
             phone_number="+91-9876543210",
         )
 
-        # Clear environment variables to trigger mock mode
-        with patch.dict(os.environ, {}, clear=True):
+        # Clear environment variables to trigger mock mode (but keep TESTING flag)
+        with patch.dict(os.environ, {"TESTING": "true"}, clear=True):
             service = NotificationService()
             result = service.send_sms_reminder(test_db, deadline, pref, 30)
 
@@ -413,7 +413,7 @@ class TestNotificationService:
             test_db, "user123", "user@example.com",
         )
 
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {"TESTING": "true"}, clear=True):
             service = NotificationService()
             result = service.send_email_reminder(test_db, deadline, pref, 10)
 
@@ -445,7 +445,7 @@ class TestScheduler:
         # Mock the notification service to count calls
         with patch("scheduler.notification_service") as mock_service:
             mock_service.send_reminders.return_value = []
-            check_reminders_sync(target_days=30)
+            check_reminders_sync(target_days=30, db=test_db)
 
     def test_sync_reminder_respects_preferences(self, test_db):
         """Test that reminders respect user preferences"""
@@ -492,7 +492,7 @@ class TestIntegration:
         )
 
         # 3. Mock notification sending
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {"TESTING": "true"}, clear=True):
             service = NotificationService()
             
             # Send SMS

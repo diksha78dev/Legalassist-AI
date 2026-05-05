@@ -22,7 +22,11 @@ def get_default_model():
     try:
         import streamlit as st
         return st.secrets.get("DEFAULT_MODEL", DEFAULT_MODEL)
-    except (KeyError, FileNotFoundError, RuntimeError, AttributeError):
+    except Exception:
+        # Fallback to module DEFAULT_MODEL if any error occurs reading secrets
+        # This handles FileNotFoundError, KeyError, RuntimeError, AttributeError,
+        # and any other errors from trying to read st.secrets
+        return DEFAULT_MODEL
         # Fallback to module DEFAULT_MODEL if secrets are unavailable
         return DEFAULT_MODEL
 
@@ -170,6 +174,7 @@ def parse_remedies_response(response_text):
     Extract structured info from LLM response using flexible numbered-line parsing.
     Supports multiple separators: . ) : - 
     Handles both 5-section (old) and 7-section (new) formats.
+    Returns None if no valid sections are found or response is empty.
     """
     remedies = {
         "what_happened": "",
@@ -185,7 +190,7 @@ def parse_remedies_response(response_text):
 
     text = response_text.strip()
     if not text:
-        return remedies
+        return None
 
     # Detect all numbered sections (flexible separators: . ) : -)
     # Only match 1-2 digit numbers to avoid matching content like "5000-10000"
@@ -198,6 +203,10 @@ def parse_remedies_response(response_text):
             num = int(match.group(1))
             header = match.group(2).strip()
             sections[num] = {"header": header, "content": ""}
+    
+    # Return None if no valid numbered sections found
+    if not sections:
+        return None
     
     # Extract content for each section
     lines = text.split('\n')
@@ -217,6 +226,17 @@ def parse_remedies_response(response_text):
     
     # Map sections to keys based on count
     is_7section = len(sections) >= 7
+    
+    # For non-7-section formats, only return if we have at least some content in key sections
+    if not is_7section:
+        # Check if we have any valid content in expected sections (1-5)
+        has_valid_content = any(
+            sections.get(i, {}).get("content") 
+            for i in range(1, 6) 
+            if i in sections
+        )
+        if not has_valid_content:
+            return None
     
     if is_7section:
         if 1 in sections:

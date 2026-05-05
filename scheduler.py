@@ -189,15 +189,20 @@ def trigger_reminder_check_now():
 
 
 # For development/testing: synchronous version
-def check_reminders_sync(target_days: Optional[int] = None):
+def check_reminders_sync(target_days: Optional[int] = None, db: Optional[object] = None):
     """
     Synchronous version for testing. Optionally check only specific day threshold.
     Args:
         target_days: If specified, only check this day threshold (e.g., 30, 10, 3, 1)
+        db: Optional database session. If not provided, uses SessionLocal()
     """
     from database import has_notification_been_sent
     
-    db = SessionLocal()
+    should_close = False
+    if db is None:
+        db = SessionLocal()
+        should_close = True
+    
     try:
         logger.info(f"Running synchronous reminder check (target_days={target_days})")
         upcoming_deadlines = get_upcoming_deadlines(db, days_before=30)
@@ -227,4 +232,5 @@ def check_reminders_sync(target_days: Optional[int] = None):
         return sent_count
 
     finally:
-        db.close()
+        if should_close:
+            db.close()
