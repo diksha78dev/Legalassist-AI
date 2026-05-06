@@ -1,6 +1,7 @@
 
 import pytest
 from datetime import datetime, timezone, timedelta
+from unittest.mock import MagicMock, patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -180,3 +181,77 @@ class TestDatabaseExtended:
         """Test database initialization (schema creation)"""
         # This just ensures metadata.create_all doesn't crash
         init_db()
+
+
+class TestAutoDeadlineDeduplication:
+    """Regression tests for duplicate deadline creation (PR #197 fix)."""
+
+    def test_skip_duplicate_does_not_raise_nameerror(self, test_db):
+        """
+        Regression: when an existing appeal deadline is found, _auto_create_deadlines_from_remedies
+        must NOT try to access `deadline.id` (NameError) — it should log and return cleanly.
+        """
+        from database import CaseDeadline
+        from case_manager import _auto_create_deadlines_from_remedies
+
+        # Pre-insert a deadline that will trigger the "existing deadline" branch
+        now = datetime.now(timezone.utc)
+        existing = CaseDeadline(
+            user_id="1",
+            case_id=99,
+            case_title="CASE-DUP",
+            deadline_date=now + timedelta(days=30),
+            deadline_type="appeal",
+            description="Pre-existing appeal deadline",
+        )
+        test_db.add(existing)
+        test_db.commit()
+        test_db.refresh(existing)
+
+        remedies = {"appeal_days": "30", "appeal_court": "High Court"}
+
+        # Must not raise NameError or any other exception
+        _auto_create_deadlines_from_remedies(
+            db=test_db,
+            user_id=1,
+            case_id=99,
+            case_title="CASE-DUP",
+            remedies=remedies,
+            document_id=42,
+        )
+
+        # Only the original deadline should exist — no duplicate created
+        deadlines = test_db.query(CaseDeadline).filter(
+            CaseDeadline.case_id == 99,
+            CaseDeadline.deadline_type == "appeal",
+        ).all()
+        assert len(deadlines) == 1, "Duplicate deadline must not be created"
+
+    def test_new_deadline_creates_timeline_event(self, test_db):
+        """When no existing deadline is found, a new one plus a timeline event must be created."""
+        from database import CaseDeadline, CaseTimeline
+        from case_manager import _auto_create_deadlines_from_remedies
+
+        remedies = {"appeal_days": "15", "appeal_court": "District Court"}
+
+        _auto_create_deadlines_from_remedies(
+            db=test_db,
+            user_id=2,
+            case_id=100,
+            case_title="CASE-NEW",
+            remedies=remedies,
+            document_id=7,
+        )
+
+        deadlines = test_db.query(CaseDeadline).filter(
+            CaseDeadline.case_id == 100,
+        ).all()
+        assert len(deadlines) == 1
+        assert deadlines[0].deadline_type == "appeal"
+
+        events = test_db.query(CaseTimeline).filter(
+            CaseTimeline.case_id == 100,
+            CaseTimeline.event_type == "deadline_created",
+        ).all()
+        assert len(events) == 1
+

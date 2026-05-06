@@ -357,18 +357,18 @@ def _auto_create_deadlines_from_remedies(
                         description=f"Appeal deadline - {remedies.get('appeal_court', 'Unknown court')}",
                     )
                     db.add(deadline)
-                db.flush()  # Flush to generate deadline.id before using it
+                    db.flush()  # Flush to generate deadline.id before using it
 
-                # Create timeline event
-                create_timeline_event(
-                    db=db,
-                    case_id=case_id,
-                    event_type="deadline_created",
-                    description=f"Appeal deadline set for {deadline_date.strftime('%d %B %Y')}",
-                    metadata={"deadline_id": deadline.id, "document_id": document_id},
-                )
+                    # Create timeline event
+                    create_timeline_event(
+                        db=db,
+                        case_id=case_id,
+                        event_type="deadline_created",
+                        description=f"Appeal deadline set for {deadline_date.strftime('%d %B %Y')}",
+                        metadata={"deadline_id": deadline.id, "document_id": document_id},
+                    )
 
-                logger.info(f"Auto-created appeal deadline for case {case_id}: {deadline_date}")
+                    logger.info(f"Auto-created appeal deadline for case {case_id}: {deadline_date}")
 
         db.commit()
 
