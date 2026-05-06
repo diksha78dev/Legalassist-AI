@@ -25,7 +25,7 @@ from openai import OpenAI
 from pypdf import PdfReader
 from langdetect import detect, DetectorFactory, detect_langs
 import pdfplumber
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import html as html_lib
 
 from config import Config
@@ -36,6 +36,8 @@ _LOCALIZED_UI_TEXT_CACHE = {}
 
 def get_default_model():
     return Config.DEFAULT_MODEL
+
+DEFAULT_MODEL = Config.DEFAULT_MODEL
 
 
 def _initialize_openai_client():
@@ -779,39 +781,89 @@ def get_remedies_advice(judgment_text, language, client=None):
     prompt = build_remedies_prompt(compress_text(judgment_text), language)
     language_rule = _language_output_rule(language)
 
-    try:
-        response = client.chat.completions.create(
-            model=get_default_model(),
-            messages=[
-                {
-                    "role": "system",
-                    # FIX-1: was generic English; now strictly enforces the target language.
-                    "content": (
-                        f"You are a legal advisor for Indian citizens. "
-                        f"You MUST answer ONLY in {language}. {language_rule} "
-                        f"Never use English words or sentences unless {language} is English. "
-                        f"Never mix languages. Be thorough and write 2-3 sentences per answer."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            # FIX-2: was 500 — too low for detailed multi-language answers; raised to 900.
-            max_tokens=900,
-            temperature=0.1,
-        )
+    # Use safe_llm_call for robust error handling and retries
+    response_text, error = safe_llm_call(
+        client=client,
+        model=get_default_model(),
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    f"You are a legal advisor for Indian citizens. "
+                    f"You MUST answer ONLY in {language}. {language_rule} "
+                    f"Never use English words or sentences unless {language} is English. "
+                    f"Never mix languages. Be thorough and write 2-3 sentences per answer."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        max_tokens=900,
+        temperature=0.1,
+    )
 
-        response_text = response.choices[0].message.content.strip()
-        remedies = parse_remedies_response(response_text)
+    if error:
+        logging.error(f"Failed to get remedies advice: {error}")
+        return {"_error": error, "_is_partial": True}
 
-        if remedies is None:
-            return {k: None for k in
-                    ["what_happened", "can_appeal", "appeal_days", "appeal_court",
-                     "cost_estimate", "cost", "first_action", "deadline"]}
-        return remedies
+    remedies = parse_remedies_response(response_text)
 
-    except Exception as e:
-        logging.error(f"Failed to get remedies advice: {str(e)}")
-        return None
+    if remedies is None:
+        return {k: None for k in
+                ["what_happened", "can_appeal", "appeal_days", "appeal_court",
+                 "cost_estimate", "cost", "first_action", "deadline"]}
+    return remedies
+
+
+def safe_llm_call(client, model, messages, max_tokens, temperature, timeout=60, retries=3):
+    """
+    Safely call the LLM API with retries and user-friendly error handling.
+    Returns (response_text, error_message).
+    """
+    import time
+    import openai
+    
+    last_error = None
+    for attempt in range(retries):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                timeout=timeout,
+            )
+            return response.choices[0].message.content.strip(), None
+        except openai.AuthenticationError:
+            return None, "Authentication failed. Please check your API key."
+        except openai.RateLimitError:
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)  # Exponential backoff
+                continue
+            return None, "Rate limit exceeded. Please try again in a few minutes."
+        except openai.APITimeoutError:
+            if attempt < retries - 1:
+                continue
+            return None, "The request timed out. The server might be busy."
+        except openai.APIConnectionError:
+            if attempt < retries - 1:
+                time.sleep(1)
+                continue
+            return None, "Could not connect to the AI server. Check your internet connection."
+        except openai.APIStatusError as e:
+            if e.status_code == 402:
+                return None, "Out of credits. Please top up your OpenRouter account."
+            if attempt < retries - 1:
+                time.sleep(1)
+                continue
+            return None, f"AI Service Error ({e.status_code}): {str(e)}"
+        except Exception as e:
+            logging.error(f"LLM API Error (Attempt {attempt+1}): {str(e)}", exc_info=True)
+            last_error = str(e)
+            if attempt < retries - 1:
+                time.sleep(0.5)
+                continue
+    
+    return None, f"An unexpected error occurred: {last_error}"
 
 
 # ==================== UI STYLING & CONSTANTS ====================

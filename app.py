@@ -27,6 +27,7 @@ from core.app_utils import (
     validate_pdf_metadata,
     get_localized_ui_text,
     localize_yes_no,
+    safe_llm_call,
 )
 
 # ==================== Notification System Setup ====================
@@ -417,10 +418,9 @@ def main():
                     # ⚡ Best multilingual model for Hindi/Bengali/Urdu
                     model_id = get_default_model()
                     
-                    # Added a 60-second timeout to prevent the Streamlit app
-                    # from spinning indefinitely in case the OpenAI API
-                    # hangs or becomes unresponsive.
-                    response = client.chat.completions.create(
+                    # Use safe_llm_call for robust error handling and retries
+                    summary_raw, error = safe_llm_call(
+                        client=client,
                         model=model_id,
                         messages=[
                             {"role": "system", "content": f"You are an expert legal simplification engine. Output only in {language}."},
@@ -431,7 +431,9 @@ def main():
                         timeout=Config.LLM_TIMEOUT,
                     )
 
-                    summary_raw = response.choices[0].message.content.strip()
+                    if error:
+                        st.error(f"❌ {error}")
+                        return
                     
                     # Use a structured parser to ensure exactly 3 bullet points 
                     # and remove any introductory text like "Here is your summary:"
@@ -443,20 +445,18 @@ def main():
                     if language.lower() != "english" and output_language_mismatch_detected(summary, language):
                         retry_prompt = build_retry_prompt(safe_text, language)
 
-                        # Added a 60-second timeout to prevent the Streamlit app
-                        # from spinning indefinitely in case the OpenAI API
-                        # hangs or becomes unresponsive.
-                        response2 = client.chat.completions.create(
+                        # Use safe_llm_call for retry as well
+                        retry_summary_raw, error2 = safe_llm_call(
+                            client=client,
                             model=model_id,
                             messages=[
                                 {"role": "system", "content": f"Strict multilingual rewriting engine. Output only in {language}."},
                                 {"role": "user", "content": retry_prompt}
                             ],
-                                max_tokens=Config.SUMMARY_MAX_TOKENS,
-                                temperature=Config.LLM_TEMPERATURE,
-                                timeout=Config.LLM_TIMEOUT,
-                            )
-                        retry_summary_raw = response2.choices[0].message.content.strip()
+                            max_tokens=Config.SUMMARY_MAX_TOKENS,
+                            temperature=Config.LLM_TEMPERATURE,
+                            timeout=Config.LLM_TIMEOUT,
+                        )
 
                         if len(retry_summary_raw) > 0 and not english_leakage_detected(retry_summary_raw):
                             # Apply structured parsing to retry summary as well

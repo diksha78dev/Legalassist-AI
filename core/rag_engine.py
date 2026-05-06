@@ -83,8 +83,10 @@ ANSWER IN {language}:
 """
             
             LOGGER.info("Generating response from LLM...")
-            # Call LLM
-            response = openai_client.chat.completions.create(
+            # Call LLM using safe_llm_call for robust error handling and retries
+            from core.app_utils import safe_llm_call
+            answer, error = safe_llm_call(
+                client=openai_client,
                 model="meta-llama/llama-3.1-8b-instruct",
                 messages=[
                     {"role": "system", "content": f"You are a helpful legal assistant. Output only in {language}."},
@@ -94,7 +96,9 @@ ANSWER IN {language}:
                 temperature=0.1,
             )
             
-            answer = response.choices[0].message.content.strip()
+            if error:
+                return f"AI Service Error: {error}"
+            
             return answer
             
         except Exception as e:
