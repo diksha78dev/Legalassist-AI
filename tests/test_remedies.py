@@ -403,7 +403,7 @@ class TestGetRemediesAdviceWithMocks:
         assert len(messages) == 2, "Should have system and user messages"
         assert messages[0]["role"] == "system"
         assert messages[1]["role"] == "user"
-        assert "legal rights advisor" in messages[0]["content"].lower()
+        assert "legal advisor for indian citizens" in messages[0]["content"].lower()
 
 
 # ==================== INTEGRATION TESTS ====================
