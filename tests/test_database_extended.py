@@ -200,7 +200,7 @@ class TestAutoDeadlineDeduplication:
             user_id="1",
             case_id=99,
             case_title="CASE-DUP",
-            deadline_date=now + timedelta(days=30),
+            deadline_date=(now + timedelta(days=30)).replace(tzinfo=None),
             deadline_type="appeal",
             description="Pre-existing appeal deadline",
         )

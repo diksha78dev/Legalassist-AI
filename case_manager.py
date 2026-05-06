@@ -3,6 +3,7 @@ Case Management Service for LegalAssist AI.
 CRUD operations for cases, documents, and timeline events.
 """
 
+import re
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
 import logging
@@ -330,19 +331,21 @@ def _auto_create_deadlines_from_remedies(
         appeal_days = remedies.get("appeal_days")
         if appeal_days:
             # Extract number from string like "30 days"
-            import re
             match = re.search(r'\d+', str(appeal_days))
             if match:
                 days = int(match.group())
                 deadline_date = datetime.now(timezone.utc) + timedelta(days=days)
+                
+                # Normalize to naive for database comparison (matches schema)
+                naive_deadline = deadline_date.replace(tzinfo=None)
 
                 # Check for existing pending deadline of same type/date (±1 day tolerance)
                 existing_deadline = db.query(CaseDeadline).filter(
                     CaseDeadline.case_id == case_id,
                     CaseDeadline.deadline_type == "appeal",
                     CaseDeadline.is_completed == False,
-                    CaseDeadline.deadline_date >= deadline_date - timedelta(days=1),
-                    CaseDeadline.deadline_date <= deadline_date + timedelta(days=1)
+                    CaseDeadline.deadline_date >= naive_deadline - timedelta(days=1),
+                    CaseDeadline.deadline_date <= naive_deadline + timedelta(days=1)
                 ).first()
 
                 if existing_deadline:
