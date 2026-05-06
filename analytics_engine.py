@@ -215,22 +215,32 @@ class AppealProbabilityEstimator:
         court_name: Optional[str] = None,
         judge_name: Optional[str] = None,
         outcome_magnitude: str = "moderate",
+        similar_cases_limit: int = 1000,
     ) -> Dict:
-        """Estimate appeal success probability using SQL aggregates"""
-        query = db.query(
-            func.count(CaseRecord.id).label('total'),
-            func.sum(sql_case(((CaseOutcome.appeal_filed == True) & (CaseOutcome.appeal_success == True), 1), else_=0)).label('appeal_wins'),
-            func.sum(sql_case((CaseOutcome.appeal_filed == True, 1), else_=0)).label('appeals')
-        ).join(CaseOutcome, CaseRecord.id == CaseOutcome.case_id, isouter=True).filter(
+        """Estimate appeal success probability using SQL aggregates on a limited dataset"""
+        # First, get the IDs of the most recent matching cases up to the limit
+        matching_ids_query = db.query(CaseRecord.id).filter(
             CaseRecord.case_type == case_type,
             CaseRecord.jurisdiction == jurisdiction,
         )
         
         if court_name:
-            query = query.filter(CaseRecord.court_name == court_name)
+            matching_ids_query = matching_ids_query.filter(CaseRecord.court_name == court_name)
         if judge_name:
-            query = query.filter(CaseRecord.judge_name == judge_name)
+            matching_ids_query = matching_ids_query.filter(CaseRecord.judge_name == judge_name)
             
+        # Apply the workload limit
+        subquery = matching_ids_query.order_by(CaseRecord.created_at.desc()).limit(similar_cases_limit).subquery()
+        
+        # Aggregate over this limited subset
+        query = db.query(
+            func.count(CaseRecord.id).label('total'),
+            func.sum(sql_case(((CaseOutcome.appeal_filed == True) & (CaseOutcome.appeal_success == True), 1), else_=0)).label('appeal_wins'),
+            func.sum(sql_case((CaseOutcome.appeal_filed == True, 1), else_=0)).label('appeals')
+        ).join(CaseOutcome, CaseRecord.id == CaseOutcome.case_id, isouter=True).filter(
+            CaseRecord.id.in_(subquery)
+        )
+        
         stats = query.first()
         total_similar = stats.total or 0
         
