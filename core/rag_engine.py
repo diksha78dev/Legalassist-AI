@@ -49,15 +49,18 @@ class LegalRAG:
             LOGGER.error(f"Error initializing vector store: {e}")
             return False
 
-    def query(self, question: str, language: str, openai_client) -> str:
-        """Query the document and generate an answer using the provided LLM client."""
+    def query(self, question: str, language: str, openai_client, chat_history: Optional[List[Dict[str, str]]] = None) -> str:
+        """
+        Query the document and generate an answer using the provided LLM client.
+        Supports chat history for context-aware follow-up questions.
+        """
         if not self.vector_store:
             return "Please wait for the document to finish processing before asking questions."
             
         try:
             LOGGER.info(f"Retrieving context for question: {question}")
             # Retrieve relevant chunks
-            retriever = self.vector_store.as_retriever(search_kwargs={"k": 4})
+            retriever = self.vector_store.as_retriever(search_kwargs={"k": 5})
             relevant_docs = retriever.invoke(question)
             
             if not relevant_docs:
@@ -65,21 +68,34 @@ class LegalRAG:
                 
             context = "\n\n---\n\n".join([doc.page_content for doc in relevant_docs])
             
+            # Format chat history for the prompt
+            history_str = ""
+            if chat_history:
+                # Only take the last 4-6 messages to keep the prompt size manageable
+                recent_history = chat_history[-6:]
+                history_str = "\n".join([f"{m['role'].upper()}: {m['content']}" for m in recent_history])
+
             # Construct the prompt
             prompt = f"""
-You are LegalEase AI, an expert judicial assistant.
-Answer the user's question strictly based on the provided context from the legal document.
-Do not use outside knowledge. If the answer is not in the context, clearly state: "I cannot find the answer to this in the document."
+You are LegalEase AI, an expert judicial researcher. 
+Your goal is to provide accurate, context-grounded answers to user questions about a specific legal document.
 
-STRICT REQUIREMENT: Provide your final answer ONLY in the {language} language.
+STRICT GUIDELINES:
+1. Answer ONLY based on the provided CONTEXT. If the answer is not in the context, say "I cannot find the answer to this in the document."
+2. CITATIONS: Whenever possible, quote specific sentences or phrases from the document to support your answer.
+3. CONVERSATION: Use the RECENT CHAT HISTORY to understand follow-up questions (e.g., "What about the other person?").
+4. LANGUAGE: Provide your final answer ONLY in the {language} language.
 
-CONTEXT FROM DOCUMENT:
+RECENT CHAT HISTORY:
+{history_str}
+
+CONEXT FROM DOCUMENT:
 {context}
 
 USER QUESTION:
 {question}
 
-ANSWER IN {language}:
+ANSWER IN {language} (include citations if possible):
 """
             
             LOGGER.info("Generating response from LLM...")
@@ -89,10 +105,10 @@ ANSWER IN {language}:
                 client=openai_client,
                 model="meta-llama/llama-3.1-8b-instruct",
                 messages=[
-                    {"role": "system", "content": f"You are a helpful legal assistant. Output only in {language}."},
+                    {"role": "system", "content": f"You are a helpful legal researcher. Output only in {language}."},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=500,
+                max_tokens=600,
                 temperature=0.1,
             )
             

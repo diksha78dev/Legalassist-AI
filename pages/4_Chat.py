@@ -26,6 +26,10 @@ def render_page():
     language = st.session_state.get("judgment_language", "English")
     st.sidebar.markdown(f"**Chat Language:** {language}")
     st.sidebar.info("You can change the language on the Home page.")
+    
+    if st.sidebar.button("🗑️ Clear Chat History", use_container_width=True):
+        st.session_state.chat_history = []
+        st.rerun()
 
     # Initialize RAG Engine
     rag_engine = get_rag_engine()
@@ -85,11 +89,12 @@ def render_page():
                     # Get the configured OpenAI/OpenRouter client
                     client = get_client()
                     
-                    # Query the RAG engine
+                    # Query the RAG engine with chat history
                     response = rag_engine.query(
                         question=user_question, 
                         language=language, 
-                        openai_client=client
+                        openai_client=client,
+                        chat_history=st.session_state.chat_history
                     )
                     
                     st.markdown(response)
