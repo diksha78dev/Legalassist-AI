@@ -866,6 +866,81 @@ def safe_llm_call(client, model, messages, max_tokens, temperature, timeout=60, 
     return None, f"An unexpected error occurred: {last_error}"
 
 
+def build_draft_prompt(remedies, language):
+    """Build a prompt for drafting a formal legal document based on remedies."""
+    remedy_summary = json.dumps(remedies, indent=2)
+    return f"""
+You are an expert Indian Legal Drafter. 
+Based on the following REMEDIES identified from a court judgment, draft a formal LEGAL DOCUMENT (either a Legal Notice or an Appeal Memo as appropriate).
+
+REMEDIES DATA:
+{remedy_summary}
+
+STRICT GUIDELINES:
+1. FORMALITY: Use professional, high-court level legal language.
+2. STRUCTURE: Include standard sections: Heading, Subject, Statement of Facts (brief), Grounds for Action/Appeal, and Prayer (Relief sought).
+3. PLACEHOLDERS: Use [SQUARE BRACKETS] for any information the user needs to fill in (e.g., [Your Name], [Date of Judgment]).
+4. SPECIFICITY: Mention the specific court ([appeal_court]), the deadline ([appeal_days]), and the recommended first action ([first_action]) from the remedies.
+5. LANGUAGE: Write the entire draft ONLY in {language}.
+
+DRAFT IN {language}:
+"""
+
+
+def generate_legal_draft(remedies, language, client=None):
+    """Generate a formal legal draft based on remedies using the LLM."""
+    if client is None:
+        client = get_client()
+    if not client:
+        return None, "API Client not available."
+
+    prompt = build_draft_prompt(remedies, language)
+    
+    # Use safe_llm_call for robust generation
+    draft_text, error = safe_llm_call(
+        client=client,
+        model=get_default_model(),
+        messages=[
+            {"role": "system", "content": f"You are a professional legal drafting engine. Output only in {language}."},
+            {"role": "user", "content": prompt}
+        ],
+        max_tokens=1500,
+        temperature=0.1
+    )
+    
+    return draft_text, error
+
+
+def export_draft_to_pdf(content, filename="Legal_Draft.pdf"):
+    """Export the draft content to a PDF file using fpdf2."""
+    from fpdf import FPDF
+    from fpdf.enums import XPos, YPos
+    import io
+
+    # Basic FPDF implementation
+    # Note: Standard FPDF has limited Unicode support for Indian languages without custom fonts.
+    pdf = FPDF()
+    pdf.add_page()
+    
+    # Title
+    pdf.set_font("Helvetica", 'B', size=16)
+    pdf.cell(200, 10, text="LegalEase AI - Document Draft", new_x=XPos.LMARGIN, new_y=YPos.NEXT, align='C')
+    pdf.ln(10)
+    
+    # Content
+    pdf.set_font("Helvetica", size=11)
+    # Handle multi-line text
+    pdf.multi_cell(0, 10, text=content)
+    
+    # Output to bytes
+    pdf_bytes = pdf.output()
+    if isinstance(pdf_bytes, str):
+        # fpdf2 might return string in some versions/destinations
+        pdf_bytes = pdf_bytes.encode('latin-1', errors='replace')
+        
+    return pdf_bytes
+
+
 # ==================== UI STYLING & CONSTANTS ====================
 
 RETRO_STYLING = """

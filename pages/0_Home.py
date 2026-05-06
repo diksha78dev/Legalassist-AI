@@ -33,6 +33,8 @@ from core.app_utils import (
     build_judgment_result_text,
     render_shareable_result_box,
     safe_llm_call,
+    generate_legal_draft,
+    export_draft_to_pdf,
 )
 
 st.markdown(RETRO_STYLING, unsafe_allow_html=True)
@@ -203,6 +205,40 @@ def render_page():
                         # render_shareable_result_box accepts the tuple directly
                         render_shareable_result_box(result, ui)
                         st.success(ui["summary_success"])
+
+                        # ===== DRAFTING SECTION =====
+                        st.markdown("---")
+                        st.markdown("## 📝 One-Click Drafting Center")
+                        st.info("Based on these remedies, our AI can generate a formal legal notice or appeal draft for you.")
+                        
+                        if st.button("⚡ Generate Legal Draft", key="generate_home_draft"):
+                            with st.spinner("Drafting your document..."):
+                                # Remedies is part of the result tuple (summary, remedies, ui) or extracted
+                                # In 0_Home.py, remedies is already defined in line 188
+                                draft, error = generate_legal_draft(remedies, language, client)
+                                if error:
+                                    st.error(f"Drafting failed: {error}")
+                                else:
+                                    st.session_state.current_home_draft = draft
+                                    st.success("✅ Draft generated! You can edit it below.")
+                        
+                        if st.session_state.get("current_home_draft"):
+                            edited_draft = st.text_area(
+                                "Edit your draft", 
+                                value=st.session_state.current_home_draft,
+                                height=350,
+                                key="home_draft_area"
+                            )
+                            st.session_state.current_home_draft = edited_draft
+                            
+                            pdf_bytes = export_draft_to_pdf(edited_draft)
+                            st.download_button(
+                                label="📥 Download as PDF",
+                                data=pdf_bytes,
+                                file_name="Legal_Notice_Draft.pdf",
+                                mime="application/pdf",
+                                key="download_home_draft"
+                            )
 
                         # ===== VOICE ACCESSIBILITY (TTS) =====
                         st.markdown("---")
