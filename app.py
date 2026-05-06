@@ -28,6 +28,8 @@ from core.app_utils import (
     get_localized_ui_text,
     localize_yes_no,
     safe_llm_call,
+    generate_legal_draft,
+    export_draft_to_pdf,
 )
 
 # ==================== Notification System Setup ====================
@@ -525,6 +527,37 @@ def main():
                             if remedies.get("deadline"):
                                 st.subheader(ui["important_deadline"])
                                 st.write(remedies["deadline"])
+                            
+                            # ===== DRAFTING SECTION =====
+                            st.markdown("---")
+                            st.markdown("## 📝 One-Click Drafting Center")
+                            st.info("Based on these remedies, our AI can generate a formal legal notice or appeal draft for you.")
+                            
+                            if st.button("⚡ Generate Legal Draft", key="generate_draft_btn"):
+                                with st.spinner("Drafting your document..."):
+                                    draft, error = generate_legal_draft(remedies, language, client)
+                                    if error:
+                                        st.error(f"Drafting failed: {error}")
+                                    else:
+                                        st.session_state.current_draft = draft
+                                        st.success("✅ Draft generated! You can edit it below.")
+                            
+                            if st.session_state.get("current_draft"):
+                                edited_draft = st.text_area(
+                                    "Edit your draft (placeholders in [BRACKETS])", 
+                                    value=st.session_state.current_draft,
+                                    height=400,
+                                    key="edited_draft_area"
+                                )
+                                st.session_state.current_draft = edited_draft
+                                
+                                pdf_bytes = export_draft_to_pdf(edited_draft)
+                                st.download_button(
+                                    label="📥 Download as PDF",
+                                    data=pdf_bytes,
+                                    file_name="Legal_Notice_Draft.pdf",
+                                    mime="application/pdf"
+                                )
                             
                         except Exception as e:
                             st.error(f"{ui['remedies_error']}: {str(e)}")
