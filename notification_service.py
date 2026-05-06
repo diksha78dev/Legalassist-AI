@@ -81,10 +81,14 @@ class SMSClient:
         """
         try:
             if not self.client:
-                # Not configured: run in mock mode.
-                # (Unit tests expect mock mode when env vars are absent.)
-                logger.info(f"[MOCK SMS] To: {to_number}, Message: {message}")
-                return True, f"mock_sms_{datetime.now().timestamp()}", None
+                # Not configured: run in mock mode ONLY if in debug/testing.
+                if _is_debug_or_testing_mode():
+                    logger.info(f"[MOCK SMS] To: {to_number}, Message: {message}")
+                    return True, f"mock_sms_{datetime.now().timestamp()}", None
+                
+                error_msg = "Twilio credentials not configured. SMS delivery skipped."
+                logger.warning(error_msg)
+                return False, None, error_msg
 
             message_obj = self.client.messages.create(
                 body=message,
@@ -123,10 +127,14 @@ class EmailClient:
         """
         try:
             if not self.client:
-                # Not configured: run in mock mode.
-                # (Unit tests expect mock mode when env vars are absent.)
-                logger.info(f"[MOCK EMAIL] To: {to_email}, Subject: {subject}")
-                return True, f"mock_email_{datetime.now().timestamp()}", None
+                # Not configured: run in mock mode ONLY if in debug/testing.
+                if _is_debug_or_testing_mode():
+                    logger.info(f"[MOCK EMAIL] To: {to_email}, Subject: {subject}")
+                    return True, f"mock_email_{datetime.now().timestamp()}", None
+                
+                error_msg = "SendGrid API key not configured. Email delivery skipped."
+                logger.warning(error_msg)
+                return False, None, error_msg
 
             message = Mail(
                 from_email=self.from_email,
