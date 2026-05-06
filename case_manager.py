@@ -338,17 +338,6 @@ def _auto_create_deadlines_from_remedies(
                 
                 # Normalize to naive for database comparison (matches schema)
                 naive_deadline = deadline_date.replace(tzinfo=None)
-
-                deadline = CaseDeadline(
-                    user_id=user_id,
-                    case_id=case_id,
-                    case_title=case_title,
-                    deadline_date=deadline_date,
-                    deadline_type="appeal",
-                    description=f"Appeal deadline - {remedies.get('appeal_court', 'Unknown court')}",
-                )
-                db.add(deadline)
-                db.flush()  # Flush to generate deadline.id before using it
                 # Check for existing pending deadline of same type/date (±1 day tolerance)
                 existing_deadline = db.query(CaseDeadline).filter(
                     CaseDeadline.case_id == case_id,
@@ -361,8 +350,9 @@ def _auto_create_deadlines_from_remedies(
                 if existing_deadline:
                     logger.info(f"Skipped duplicate appeal deadline for case {case_id} (existing: {existing_deadline.id})")
                 else:
+                    # Create new deadline
                     deadline = CaseDeadline(
-                        user_id=str(user_id),
+                        user_id=user_id,
                         case_id=case_id,
                         case_title=case_title,
                         deadline_date=deadline_date,
@@ -382,6 +372,7 @@ def _auto_create_deadlines_from_remedies(
                     )
 
                     logger.info(f"Auto-created appeal deadline for case {case_id}: {deadline_date}")
+                    db.commit()
 
         db.commit()
 

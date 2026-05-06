@@ -11,6 +11,7 @@ from typing import Optional, List, Tuple
 from dataclasses import dataclass
 from enum import Enum
 import html
+from config import Config
 
 
 from sqlalchemy.orm import Session
@@ -39,15 +40,9 @@ from database import (
 )
 
 # Import debug mode helper
-try:
-    from auth import _is_debug_or_testing_mode
-except ImportError:
-    # Fallback if auth module not available
-    def _is_debug_or_testing_mode() -> bool:
-        truthy = {"1", "true", "yes", "on"}
-        debug_enabled = os.getenv("DEBUG", "").strip().lower() in truthy
-        testing_enabled = os.getenv("TESTING", "").strip().lower() in truthy
-        return debug_enabled or testing_enabled
+def _is_debug_or_testing_mode() -> bool:
+    """Return True when explicit debug/testing flags are enabled."""
+    return Config.DEBUG or Config.TESTING
 
 logger = structlog.get_logger(__name__)
 
@@ -66,9 +61,9 @@ class SMSClient:
     """Wrapper for Twilio SMS client"""
 
     def __init__(self):
-        self.account_sid = os.getenv("TWILIO_ACCOUNT_SID")
-        self.auth_token = os.getenv("TWILIO_AUTH_TOKEN")
-        self.from_number = os.getenv("TWILIO_FROM_NUMBER")
+        self.account_sid = Config.TWILIO_ACCOUNT_SID
+        self.auth_token = Config.TWILIO_AUTH_TOKEN
+        self.from_number = Config.TWILIO_FROM_NUMBER
 
         if not all([self.account_sid, self.auth_token, self.from_number]):
             logger.warning("Twilio credentials not configured. SMS will be mocked.")
@@ -109,8 +104,8 @@ class EmailClient:
     """Wrapper for SendGrid email client"""
 
     def __init__(self):
-        self.api_key = os.getenv("SENDGRID_API_KEY")
-        self.from_email = os.getenv("SENDGRID_FROM_EMAIL", "noreply@legalassist.ai")
+        self.api_key = Config.SENDGRID_API_KEY
+        self.from_email = Config.SENDGRID_FROM_EMAIL
 
         if not self.api_key:
             logger.warning("SendGrid API key not configured. Emails will be mocked.")
