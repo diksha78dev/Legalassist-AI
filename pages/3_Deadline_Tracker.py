@@ -335,7 +335,7 @@ def main():
     if not deadlines:
         st.info("📭 No deadlines yet. Deadlines are created when you upload documents with remedies advice.")
         if st.button("📤 Upload a Judgment"):
-            st.switch_page("app.py")
+            st.switch_page("pages/0_Home.py")
         return
 
     # Render summary cards

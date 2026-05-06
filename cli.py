@@ -832,6 +832,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    
     # Configure structured logging and rich output
     try:
         configure_logging()
