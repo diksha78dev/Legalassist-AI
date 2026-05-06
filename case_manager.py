@@ -343,6 +343,16 @@ def _auto_create_deadlines_from_remedies(
                 # Normalize to naive for database comparison (matches schema)
                 naive_deadline = deadline_date.replace(tzinfo=None)
 
+                deadline = CaseDeadline(
+                    user_id=user_id,
+                    case_id=case_id,
+                    case_title=case_title,
+                    deadline_date=deadline_date,
+                    deadline_type="appeal",
+                    description=f"Appeal deadline - {remedies.get('appeal_court', 'Unknown court')}",
+                )
+                db.add(deadline)
+                db.flush()  # Flush to generate deadline.id before using it
                 # Check for existing pending deadline of same type/date (±1 day tolerance)
                 existing_deadline = db.query(CaseDeadline).filter(
                     CaseDeadline.case_id == case_id,
@@ -428,7 +438,7 @@ def mark_deadline_completed(user_id: int, deadline_id: int) -> bool:
     try:
         deadline = db.query(CaseDeadline).filter(
             CaseDeadline.id == deadline_id,
-            CaseDeadline.user_id == str(user_id),
+            CaseDeadline.user_id == user_id,
         ).first()
 
         if not deadline:
@@ -463,7 +473,7 @@ def mark_deadline_incomplete(user_id: int, deadline_id: int) -> bool:
     try:
         deadline = db.query(CaseDeadline).filter(
             CaseDeadline.id == deadline_id,
-            CaseDeadline.user_id == str(user_id),
+            CaseDeadline.user_id == user_id,
         ).first()
 
         if not deadline:
@@ -500,7 +510,7 @@ def add_manual_deadline(
             return None
 
         deadline = CaseDeadline(
-            user_id=str(user_id),
+            user_id=user_id,
             case_id=case_id,
             case_title=case_title,
             deadline_date=deadline_date,
