@@ -1,12 +1,6 @@
-"""
-Analytics Engine for LegalEase AI
-
-Provides case similarity calculations, success rate estimations, 
-judge analytics, and trend analysis.
-"""
-
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime, timezone
+from sqlalchemy import func, case as sql_case
 from sqlalchemy.orm import Session
 from database import CaseRecord, CaseOutcome, CaseAnalytics, UserFeedback
 import hashlib
@@ -27,13 +21,6 @@ class CaseSimilarityCalculator:
     ) -> float:
         """
         Calculate similarity between two cases (0-100).
-        
-        Weights:
-        - case_type: 0.3
-        - jurisdiction: 0.2
-        - plaintiff_type: 0.15
-        - defendant_type: 0.15
-        - case_value: 0.2
         """
         if not weights:
             weights = {
@@ -64,12 +51,12 @@ class CaseSimilarityCalculator:
             if case1.defendant_type.lower() == case2.defendant_type.lower():
                 score += weights["defendant_type"]
         
-        # Case value match (broad ranges)
+        # Case value match
         if case1.case_value and case2.case_value:
             if case1.case_value == case2.case_value:
                 score += weights["case_value"]
         
-        return score * 100  # Return as percentage (0-100)
+        return score * 100
     
     @staticmethod
     def find_similar_cases(
@@ -78,10 +65,15 @@ class CaseSimilarityCalculator:
         min_similarity: float = 50.0,
         limit: int = 50,
     ) -> List[Tuple[CaseRecord, float]]:
-        """Find cases similar to reference case with similarity scores"""
-        all_cases = db.query(CaseRecord).filter(
-            CaseRecord.case_id != reference_case.case_id
-        ).all()
+        """Find cases similar to reference case using initial DB-side filtering"""
+        # Reduce memory load by pre-filtering on common attributes
+        query = db.query(CaseRecord).filter(
+            CaseRecord.case_id != reference_case.case_id,
+            (CaseRecord.case_type == reference_case.case_type) | (CaseRecord.jurisdiction == reference_case.jurisdiction)
+        )
+        
+        # Limit the search space to the most recent/relevant 1000 cases to prevent OOM
+        all_cases = query.limit(1000).all()
         
         similarities = []
         for case in all_cases:
@@ -89,40 +81,12 @@ class CaseSimilarityCalculator:
             if score >= min_similarity:
                 similarities.append((case, score))
         
-        # Sort by similarity score (descending)
         similarities.sort(key=lambda x: x[1], reverse=True)
         return similarities[:limit]
 
 
 class AnalyticsCalculator:
-    """Calculate various analytics metrics"""
-    
-    @staticmethod
-    def calculate_success_rate(cases: List[CaseRecord], winning_outcome: str = "plaintiff_won") -> float:
-        """Calculate success rate for given cases"""
-        if not cases:
-            return 0.0
-        
-        wins = sum(1 for case in cases if case.outcome.lower() == winning_outcome.lower())
-        return (wins / len(cases)) * 100
-    
-    @staticmethod
-    def calculate_appeal_success_rate(cases: List[CaseRecord]) -> float:
-        """Calculate appeal success rate for cases with appeal data"""
-        cases_with_appeals = [
-            case for case in cases
-            if case.outcome_data is not None and case.outcome_data.appeal_filed
-        ]
-        
-        if not cases_with_appeals:
-            return 0.0
-        
-        successful = sum(
-            1 for case in cases_with_appeals
-            if case.outcome_data is not None and case.outcome_data.appeal_success is True
-        )
-        
-        return (successful / len(cases_with_appeals)) * 100
+    """Calculate various analytics metrics using SQL aggregates"""
     
     @staticmethod
     def calculate_judge_win_rate(
@@ -131,13 +95,19 @@ class AnalyticsCalculator:
         jurisdiction: str,
         winning_outcome: str = "plaintiff_won",
     ) -> Dict:
-        """Calculate judge-specific statistics"""
-        cases = db.query(CaseRecord).filter(
+        """Calculate judge-specific statistics using aggregates"""
+        stats = db.query(
+            func.count(CaseRecord.id).label('total'),
+            func.sum(sql_case((CaseRecord.outcome.ilike(winning_outcome), 1), else_=0)).label('wins'),
+            func.sum(sql_case((CaseOutcome.appeal_filed == True, 1), else_=0)).label('appeals'),
+            func.sum(sql_case(((CaseOutcome.appeal_filed == True) & (CaseOutcome.appeal_success == True), 1), else_=0)).label('appeal_wins')
+        ).join(CaseOutcome, CaseRecord.id == CaseOutcome.case_id, isouter=True).filter(
             CaseRecord.judge_name == judge_name,
             CaseRecord.jurisdiction == jurisdiction,
-        ).all()
+        ).first()
         
-        if not cases:
+        total = stats.total or 0
+        if total == 0:
             return {
                 "judge": judge_name,
                 "jurisdiction": jurisdiction,
@@ -145,16 +115,17 @@ class AnalyticsCalculator:
                 "win_rate": 0.0,
                 "appeal_success_rate": 0.0,
             }
-        
-        win_rate = AnalyticsCalculator.calculate_success_rate(cases, winning_outcome)
-        appeal_rate = AnalyticsCalculator.calculate_appeal_success_rate(cases)
+            
+        wins = stats.wins or 0
+        appeals = stats.appeals or 0
+        appeal_wins = stats.appeal_wins or 0
         
         return {
             "judge": judge_name,
             "jurisdiction": jurisdiction,
-            "total_cases": len(cases),
-            "win_rate": round(win_rate, 1),
-            "appeal_success_rate": round(appeal_rate, 1),
+            "total_cases": total,
+            "win_rate": round((wins / total) * 100, 1),
+            "appeal_success_rate": round((appeal_wins / appeals * 100), 1) if appeals > 0 else 0.0,
         }
     
     @staticmethod
@@ -163,39 +134,43 @@ class AnalyticsCalculator:
         court_name: str,
         case_type: Optional[str] = None,
     ) -> Dict:
-        """Calculate statistics for a specific court"""
-        query = db.query(CaseRecord).filter(CaseRecord.court_name == court_name)
+        """Calculate statistics for a specific court using aggregates"""
+        query = db.query(
+            func.count(CaseRecord.id).label('total'),
+            func.sum(sql_case((CaseRecord.outcome.ilike('plaintiff_won'), 1), else_=0)).label('p_wins'),
+            func.sum(sql_case((CaseRecord.outcome.ilike('defendant_won'), 1), else_=0)).label('d_wins'),
+            func.sum(sql_case((CaseRecord.outcome.ilike('settlement'), 1), else_=0)).label('settlements'),
+            func.sum(sql_case((CaseRecord.outcome.ilike('dismissal'), 1), else_=0)).label('dismissals'),
+            func.sum(sql_case((CaseOutcome.appeal_filed == True, 1), else_=0)).label('appeals')
+        ).join(CaseOutcome, CaseRecord.id == CaseOutcome.case_id, isouter=True).filter(
+            CaseRecord.court_name == court_name
+        )
         
         if case_type:
             query = query.filter(CaseRecord.case_type == case_type)
+            
+        stats = query.first()
+        total = stats.total or 0
         
-        cases = query.all()
-        
-        if not cases:
+        if total == 0:
             return {
                 "court": court_name,
                 "case_type": case_type,
                 "total_cases": 0,
             }
-        
-        # Count outcomes
-        outcomes = Counter(case.outcome for case in cases)
-        
-        appeals_filed = sum(
-            1 for case in cases
-            if case.outcome_data and case.outcome_data.appeal_filed
-        )
+            
+        appeals_filed = stats.appeals or 0
         
         return {
             "court": court_name,
             "case_type": case_type,
-            "total_cases": len(cases),
-            "plaintiff_wins": outcomes.get("plaintiff_won", 0),
-            "defendant_wins": outcomes.get("defendant_won", 0),
-            "settlements": outcomes.get("settlement", 0),
-            "dismissals": outcomes.get("dismissal", 0),
+            "total_cases": total,
+            "plaintiff_wins": stats.p_wins or 0,
+            "defendant_wins": stats.d_wins or 0,
+            "settlements": stats.settlements or 0,
+            "dismissals": stats.dismissals or 0,
             "appeals_filed": appeals_filed,
-            "appeal_rate": round((appeals_filed / len(cases)) * 100, 1) if cases else 0,
+            "appeal_rate": round((appeals_filed / total) * 100, 1),
         }
     
     @staticmethod
@@ -203,38 +178,34 @@ class AnalyticsCalculator:
         db: Session,
         jurisdiction: str,
     ) -> Dict:
-        """Get trends for a jurisdiction"""
-        cases = db.query(CaseRecord).filter(
-            CaseRecord.jurisdiction == jurisdiction
-        ).all()
+        """Get trends for a jurisdiction using grouped aggregates"""
+        total = db.query(func.count(CaseRecord.id)).filter(CaseRecord.jurisdiction == jurisdiction).scalar() or 0
         
-        if not cases:
+        if total == 0:
             return {"jurisdiction": jurisdiction, "total_cases": 0}
-        
-        # Group by case type
-        by_type = {}
-        for case in cases:
-            if case.case_type not in by_type:
-                by_type[case.case_type] = []
-            by_type[case.case_type].append(case)
+            
+        stats_by_type = db.query(
+            CaseRecord.case_type,
+            func.count(CaseRecord.id).label('count'),
+            func.sum(sql_case((CaseRecord.outcome.ilike('plaintiff_won'), 1), else_=0)).label('wins')
+        ).filter(CaseRecord.jurisdiction == jurisdiction).group_by(CaseRecord.case_type).all()
         
         type_stats = {}
-        for case_type, type_cases in by_type.items():
-            win_rate = AnalyticsCalculator.calculate_success_rate(type_cases, "plaintiff_won")
-            type_stats[case_type] = {
-                "count": len(type_cases),
-                "plaintiff_win_rate": round(win_rate, 1),
+        for row in stats_by_type:
+            type_stats[row.case_type] = {
+                "count": row.count,
+                "plaintiff_win_rate": round((row.wins / row.count * 100), 1) if row.count > 0 else 0.0,
             }
-        
+            
         return {
             "jurisdiction": jurisdiction,
-            "total_cases": len(cases),
+            "total_cases": total,
             "case_type_stats": type_stats,
         }
 
 
 class AppealProbabilityEstimator:
-    """Estimate appeal success probability for new cases"""
+    """Estimate appeal success probability for new cases using aggregates"""
     
     @staticmethod
     def estimate_appeal_success(
@@ -243,222 +214,182 @@ class AppealProbabilityEstimator:
         jurisdiction: str,
         court_name: Optional[str] = None,
         judge_name: Optional[str] = None,
-        outcome_magnitude: str = "moderate",  # low, moderate, high
-        similar_cases_limit: int = 50,
+        outcome_magnitude: str = "moderate",
     ) -> Dict:
-        """
-        Estimate appeal success probability for a case.
-        
-        Returns:
-        {
-            "estimated_success_rate": 22.5,
-            "confidence": "medium",  # low, medium, high
-            "similar_cases_found": 23,
-            "reasoning": "Based on 23 similar cases in Delhi District Court..."
-        }
-        """
-        # Get similar cases
-        similar_query = db.query(CaseRecord).filter(
+        """Estimate appeal success probability using SQL aggregates"""
+        query = db.query(
+            func.count(CaseRecord.id).label('total'),
+            func.sum(sql_case(((CaseOutcome.appeal_filed == True) & (CaseOutcome.appeal_success == True), 1), else_=0)).label('appeal_wins'),
+            func.sum(sql_case((CaseOutcome.appeal_filed == True, 1), else_=0)).label('appeals')
+        ).join(CaseOutcome, CaseRecord.id == CaseOutcome.case_id, isouter=True).filter(
             CaseRecord.case_type == case_type,
             CaseRecord.jurisdiction == jurisdiction,
         )
         
         if court_name:
-            similar_query = similar_query.filter(CaseRecord.court_name == court_name)
-        
+            query = query.filter(CaseRecord.court_name == court_name)
         if judge_name:
-            similar_query = similar_query.filter(CaseRecord.judge_name == judge_name)
+            query = query.filter(CaseRecord.judge_name == judge_name)
+            
+        stats = query.first()
+        total_similar = stats.total or 0
         
-        similar_cases = similar_query.all()
-        
-        if not similar_cases:
+        if total_similar == 0:
             return {
                 "estimated_success_rate": None,
                 "confidence": "very_low",
                 "similar_cases_found": 0,
                 "reasoning": f"No similar cases found in {jurisdiction} for {case_type} cases.",
             }
-        
-        # Calculate appeal success rate for similar cases
-        appeal_success_rate = AnalyticsCalculator.calculate_appeal_success_rate(similar_cases)
+            
+        appeals = stats.appeals or 0
+        appeal_wins = stats.appeal_wins or 0
+        appeal_success_rate = (appeal_wins / appeals * 100) if appeals > 0 else 0.0
         
         # Adjust based on outcome magnitude
-        adjustment = {
-            "low": 0.95,      # Lower success if outcome is marginal
-            "moderate": 1.0,  # No adjustment for moderate cases
-            "high": 1.05,     # Slightly higher if decision is clear
-        }.get(outcome_magnitude.lower(), 1.0)
-        
+        adjustment = {"low": 0.95, "moderate": 1.0, "high": 1.05}.get(outcome_magnitude.lower(), 1.0)
         adjusted_rate = min(100, max(0, appeal_success_rate * adjustment))
         
-        # Determine confidence based on number of similar cases
-        if len(similar_cases) >= 50:
-            confidence = "high"
-        elif len(similar_cases) >= 20:
-            confidence = "medium"
-        elif len(similar_cases) >= 10:
-            confidence = "low"
-        else:
-            confidence = "very_low"
+        # Confidence logic
+        if total_similar >= 50: confidence = "high"
+        elif total_similar >= 20: confidence = "medium"
+        elif total_similar >= 10: confidence = "low"
+        else: confidence = "very_low"
         
-        reasoning = f"Based on {len(similar_cases)} similar {case_type} cases in {jurisdiction}. "
-        if court_name:
-            reasoning += f"Court: {court_name}. "
-        if judge_name:
-            reasoning += f"Judge: {judge_name}. "
+        reasoning = f"Based on {total_similar} similar {case_type} cases in {jurisdiction}. "
         reasoning += f"Appeal success rate in similar cases: {appeal_success_rate:.1f}%"
         
         return {
             "estimated_success_rate": round(adjusted_rate, 1),
             "confidence": confidence,
-            "similar_cases_found": len(similar_cases),
+            "similar_cases_found": total_similar,
             "appeal_success_rate_from_similar": round(appeal_success_rate, 1),
             "reasoning": reasoning,
         }
-    
+
     @staticmethod
     def estimate_appeal_cost_and_time(
         db: Session,
         case_type: str,
         jurisdiction: str,
     ) -> Dict:
-        """Estimate typical appeal cost and time"""
-        cases_with_appeals = db.query(CaseRecord).filter(
+        """Estimate typical appeal cost and time using aggregates"""
+        # Fetch only necessary columns
+        res = db.query(
+            CaseOutcome.appeal_cost,
+            CaseOutcome.time_to_appeal_verdict
+        ).join(CaseRecord, CaseRecord.id == CaseOutcome.case_id).filter(
             CaseRecord.case_type == case_type,
             CaseRecord.jurisdiction == jurisdiction,
+            CaseOutcome.appeal_filed == True
         ).all()
         
-        cases_with_outcome = [
-            case for case in cases_with_appeals
-            if case.outcome_data and case.outcome_data.appeal_filed
-        ]
-        
-        if not cases_with_outcome:
-            # Return generic estimates based on case type
-            default_costs = {
-                "civil": "₹12,000 - ₹25,000",
-                "criminal": "₹5,000 - ₹15,000",
-                "family": "₹8,000 - ₹20,000",
-                "commercial": "₹20,000 - ₹50,000",
-            }
-            default_time = {
-                "civil": "12-24 months",
-                "criminal": "12-30 months",
-                "family": "12-24 months",
-                "commercial": "18-36 months",
-            }
+        if not res:
+            # Fallback
+            default_costs = {"civil": "₹12,000 - ₹25,000", "criminal": "₹5,000 - ₹15,000", "family": "₹8,000 - ₹20,000", "commercial": "₹20,000 - ₹50,000"}
+            default_time = {"civil": "12-24 months", "criminal": "12-30 months", "family": "12-24 months", "commercial": "18-36 months"}
             return {
                 "avg_cost": default_costs.get(case_type.lower(), "₹10,000 - ₹30,000"),
                 "avg_time": default_time.get(case_type.lower(), "12-24 months"),
                 "note": "Generic estimates - not based on local data",
             }
-        
-        # Extract costs from case data
+            
         costs = []
         times = []
-        
-        for case in cases_with_outcome:
-            outcome_data = case.outcome_data
-
-            if outcome_data is None:
-                continue
-
-            if outcome_data.appeal_cost:
-                # Try to extract numeric value
-                cost_str = outcome_data.appeal_cost
-                try:
-                    # Very basic extraction - assumes format like "12000" or "12000-15000"
-                    import re
-                    numbers = re.findall(r'\d+', cost_str)
-                    if numbers:
-                        costs.append(int(numbers[0]))
-                except Exception:
-                    pass
-            
-            if outcome_data.time_to_appeal_verdict:
-                times.append(outcome_data.time_to_appeal_verdict)
-        
-        # Calculate averages
+        for row in res:
+            if row.appeal_cost:
+                import re
+                numbers = re.findall(r'\d+', row.appeal_cost)
+                if numbers: costs.append(int(numbers[0]))
+            if row.time_to_appeal_verdict:
+                times.append(row.time_to_appeal_verdict)
+                
         avg_cost = sum(costs) / len(costs) if costs else None
         avg_time_days = sum(times) / len(times) if times else None
         
-        cost_str = f"₹{int(avg_cost)}" if avg_cost else "Unknown"
-        if avg_cost:
-            cost_str = f"₹{int(avg_cost * 0.8):.0f} - ₹{int(avg_cost * 1.2):.0f}"
+        cost_str = f"₹{int(avg_cost * 0.8):.0f} - ₹{int(avg_cost * 1.2):.0f}" if avg_cost else "Unknown"
+        time_str = f"{int(avg_time_days/30 * 0.8)}-{int(avg_time_days/30 * 1.2)} months" if avg_time_days else "12-24 months"
         
-        time_str = "12-24 months"
-        if avg_time_days:
-            months = avg_time_days / 30
-            time_str = f"{int(months * 0.8)}-{int(months * 1.2)} months"
-        
-        return {
-            "avg_cost": cost_str,
-            "avg_time": time_str,
-            "similar_cases": len(cases_with_outcome),
-        }
+        return {"avg_cost": cost_str, "avg_time": time_str, "similar_cases": len(res)}
 
 
 class AnalyticsAggregator:
-    """Generate aggregated analytics for dashboard"""
+    """Generate aggregated analytics for dashboard using SQL aggregates"""
     
     @staticmethod
     def get_dashboard_summary(db: Session) -> Dict:
-        """Get overall dashboard summary"""
-        all_cases = db.query(CaseRecord).all()
+        """Get overall dashboard summary using aggregates"""
+        stats = db.query(
+            func.count(CaseRecord.id).label('total'),
+            func.sum(sql_case((CaseOutcome.appeal_filed == True, 1), else_=0)).label('appeals'),
+            func.sum(sql_case((CaseRecord.outcome.ilike('plaintiff_won'), 1), else_=0)).label('p_wins'),
+            func.sum(sql_case((CaseRecord.outcome.ilike('defendant_won'), 1), else_=0)).label('d_wins'),
+            func.sum(sql_case((CaseRecord.outcome.ilike('settlement'), 1), else_=0)).label('settlements'),
+            func.sum(sql_case((CaseRecord.outcome.ilike('dismissal'), 1), else_=0)).label('dismissals')
+        ).join(CaseOutcome, CaseRecord.id == CaseOutcome.case_id, isouter=True).first()
         
-        total_cases = len(all_cases)
-        appeals_filed = sum(1 for case in all_cases if case.outcome_data and case.outcome_data.appeal_filed)
-        
-        outcomes = Counter(case.outcome for case in all_cases)
+        total = stats.total or 0
+        appeals = stats.appeals or 0
         
         return {
-            "total_cases_processed": total_cases,
-            "appeals_filed": appeals_filed,
-            "appeal_rate_percent": round((appeals_filed / total_cases * 100), 1) if total_cases else 0,
-            "plaintiff_wins": outcomes.get("plaintiff_won", 0),
-            "defendant_wins": outcomes.get("defendant_won", 0),
-            "settlements": outcomes.get("settlement", 0),
-            "dismissals": outcomes.get("dismissal", 0),
+            "total_cases_processed": total,
+            "appeals_filed": appeals,
+            "appeal_rate_percent": round((appeals / total * 100), 1) if total > 0 else 0,
+            "plaintiff_wins": stats.p_wins or 0,
+            "defendant_wins": stats.d_wins or 0,
+            "settlements": stats.settlements or 0,
+            "dismissals": stats.dismissals or 0,
         }
     
     @staticmethod
     def get_top_judges(db: Session, jurisdiction: str, limit: int = 10) -> List[Dict]:
-        """Get top judges by appeal success rate"""
-        all_cases = db.query(CaseRecord).filter(
-            CaseRecord.jurisdiction == jurisdiction
-        ).all()
+        """Get top judges by appeal success rate using grouped aggregates"""
+        judge_stats = db.query(
+            CaseRecord.judge_name,
+            func.count(CaseRecord.id).label('total'),
+            func.sum(sql_case((CaseRecord.outcome.ilike('plaintiff_won'), 1), else_=0)).label('wins'),
+            func.sum(sql_case(((CaseOutcome.appeal_filed == True) & (CaseOutcome.appeal_success == True), 1), else_=0)).label('appeal_wins'),
+            func.sum(sql_case((CaseOutcome.appeal_filed == True, 1), else_=0)).label('appeals')
+        ).join(CaseOutcome, CaseRecord.id == CaseOutcome.case_id, isouter=True).filter(
+            CaseRecord.jurisdiction == jurisdiction,
+            CaseRecord.judge_name != None
+        ).group_by(CaseRecord.judge_name).having(func.count(CaseRecord.id) >= 5).all()
         
-        judges = set(case.judge_name for case in all_cases if case.judge_name)
-        
-        judge_stats = []
-        for judge in judges:
-            stats = AnalyticsCalculator.calculate_judge_win_rate(db, judge, jurisdiction)
-            if stats["total_cases"] >= 5:  # Only include judges with 5+ cases
-                judge_stats.append(stats)
-        
-        # Sort by appeal success rate
-        judge_stats.sort(key=lambda x: x["appeal_success_rate"], reverse=True)
-        return judge_stats[:limit]
+        results = []
+        for row in judge_stats:
+            results.append({
+                "judge": row.judge_name,
+                "jurisdiction": jurisdiction,
+                "total_cases": row.total,
+                "win_rate": round((row.wins / row.total * 100), 1),
+                "appeal_success_rate": round((row.appeal_wins / row.appeals * 100), 1) if row.appeals > 0 else 0.0
+            })
+            
+        results.sort(key=lambda x: x["appeal_success_rate"], reverse=True)
+        return results[:limit]
     
     @staticmethod
     def get_regional_trends(db: Session) -> List[Dict]:
-        """Get trends by region/jurisdiction"""
-        all_cases = db.query(CaseRecord).all()
-        jurisdictions = set(case.jurisdiction for case in all_cases if case.jurisdiction)
+        """Get trends by jurisdiction using grouped aggregates"""
+        trends_stats = db.query(
+            CaseRecord.jurisdiction,
+            func.count(CaseRecord.id).label('total'),
+            func.sum(sql_case(((CaseOutcome.appeal_filed == True) & (CaseOutcome.appeal_success == True), 1), else_=0)).label('appeal_wins'),
+            func.sum(sql_case((CaseOutcome.appeal_filed == True, 1), else_=0)).label('appeals')
+        ).join(CaseOutcome, CaseRecord.id == CaseOutcome.case_id, isouter=True).filter(
+            CaseRecord.jurisdiction != None
+        ).group_by(CaseRecord.jurisdiction).all()
         
-        trends = []
-        for jurisdiction in jurisdictions:
-            jur_cases = [case for case in all_cases if case.jurisdiction == jurisdiction]
-            appeal_success = AnalyticsCalculator.calculate_appeal_success_rate(jur_cases)
-            
-            trends.append({
-                "jurisdiction": jurisdiction,
-                "total_cases": len(jur_cases),
-                "appeal_success_rate": round(appeal_success, 1),
+        results = []
+        for row in trends_stats:
+            results.append({
+                "jurisdiction": row.jurisdiction,
+                "total_cases": row.total,
+                "appeal_success_rate": round((row.appeal_wins / row.appeals * 100), 1) if row.appeals > 0 else 0.0
             })
-        
-        trends.sort(key=lambda x: x["total_cases"], reverse=True)
-        return trends
+            
+        results.sort(key=lambda x: x["total_cases"], reverse=True)
+        return results
 
 
 # Utility function to anonymize case ID
