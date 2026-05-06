@@ -65,12 +65,12 @@ def db_init():
 
 
 @cli.command()
-@click.option("--user-id", required=True, help="User ID")
+@click.option("--user-id", required=True, type=int, help="User ID")
 @click.option("--email", required=True, help="Email address")
 @click.option("--phone", required=False, help="Phone number (with country code)")
 @click.option("--timezone", default="UTC", help="Timezone (e.g., Asia/Kolkata)")
 @click.option("--channel", type=click.Choice(["sms", "email", "both"]), default="both")
-def setup_preferences(user_id: str, email: str, phone: Optional[str], timezone: str, channel: str):
+def setup_preferences(user_id: int, email: str, phone: Optional[str], timezone: str, channel: str):
     """Set up user notification preferences"""
     db = SessionLocal()
     try:
@@ -104,13 +104,13 @@ def setup_preferences(user_id: str, email: str, phone: Optional[str], timezone: 
 # ==================== Deadline Commands ====================
 
 @cli.command()
-@click.option("--user-id", required=True, help="User ID")
+@click.option("--user-id", required=True, type=int, help="User ID")
 @click.option("--case-id", required=True, type=int, help="Numeric case ID (cases.id)")
 @click.option("--case-title", required=True, help="Case title")
 @click.option("--days", type=int, default=30, help="Days until deadline (default 30)")
 @click.option("--type", type=click.Choice(["appeal", "filing", "submission", "response", "hearing", "other"]), default="appeal")
 @click.option("--description", help="Additional notes")
-def add_deadline(user_id: str, case_id: int, case_title: str, days: int, type: str, description: Optional[str]):
+def add_deadline(user_id: int, case_id: int, case_title: str, days: int, type: str, description: Optional[str]):
     """Add a new case deadline"""
     db = SessionLocal()
     try:
@@ -140,8 +140,8 @@ def add_deadline(user_id: str, case_id: int, case_title: str, days: int, type: s
 
 
 @cli.command()
-@click.option("--user-id", required=True, help="User ID")
-def list_deadlines(user_id: str):
+@click.option("--user-id", required=True, type=int, help="User ID")
+def list_deadlines(user_id: int):
     """List all deadlines for a user"""
     db = SessionLocal()
     try:
@@ -229,10 +229,10 @@ def check_all_reminders():
 # ==================== Testing Commands ====================
 
 @cli.command()
-@click.option("--user-id", required=True)
+@click.option("--user-id", required=True, type=int)
 @click.option("--case-title", default="Test Case")
 @click.option("--days-left", type=int, default=10)
-def test_sms(user_id: str, case_title: str, days_left: int):
+def test_sms(user_id: int, case_title: str, days_left: int):
     """Test SMS sending"""
     db = SessionLocal()
     try:
@@ -271,10 +271,10 @@ def test_sms(user_id: str, case_title: str, days_left: int):
 
 
 @cli.command()
-@click.option("--user-id", required=True)
+@click.option("--user-id", required=True, type=int)
 @click.option("--case-title", default="Test Case")
 @click.option("--days-left", type=int, default=10)
-def test_email(user_id: str, case_title: str, days_left: int):
+def test_email(user_id: int, case_title: str, days_left: int):
     """Test email sending"""
     db = SessionLocal()
     try:

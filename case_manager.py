@@ -337,7 +337,7 @@ def _auto_create_deadlines_from_remedies(
                 deadline_date = datetime.now(timezone.utc) + timedelta(days=days)
 
                 deadline = CaseDeadline(
-                    user_id=str(user_id),
+                    user_id=user_id,
                     case_id=case_id,
                     case_title=case_title,
                     deadline_date=deadline_date,
@@ -409,7 +409,7 @@ def mark_deadline_completed(user_id: int, deadline_id: int) -> bool:
     try:
         deadline = db.query(CaseDeadline).filter(
             CaseDeadline.id == deadline_id,
-            CaseDeadline.user_id == str(user_id),
+            CaseDeadline.user_id == user_id,
         ).first()
 
         if not deadline:
@@ -444,7 +444,7 @@ def mark_deadline_incomplete(user_id: int, deadline_id: int) -> bool:
     try:
         deadline = db.query(CaseDeadline).filter(
             CaseDeadline.id == deadline_id,
-            CaseDeadline.user_id == str(user_id),
+            CaseDeadline.user_id == user_id,
         ).first()
 
         if not deadline:
@@ -481,7 +481,7 @@ def add_manual_deadline(
             return None
 
         deadline = CaseDeadline(
-            user_id=str(user_id),
+            user_id=user_id,
             case_id=case_id,
             case_title=case_title,
             deadline_date=deadline_date,

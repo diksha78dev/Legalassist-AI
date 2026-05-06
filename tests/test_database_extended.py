@@ -62,7 +62,7 @@ class TestDatabaseExtended:
         assert "CaseOutcome" in repr(outcome)
         
         # UserFeedback
-        feedback = UserFeedback(user_id="U1", appeal_outcome="lost")
+        feedback = UserFeedback(user_id=1, appeal_outcome="lost")
         assert "UserFeedback" in repr(feedback)
         
         # User
@@ -80,12 +80,12 @@ class TestDatabaseExtended:
     def test_case_record_operations(self, test_db):
         """Test CaseRecord creation and retrieval"""
         record = create_case_record(
-            test_db, "CASE_ID_1", "civil", "Delhi", 
+            test_db, "C1", "civil", "Delhi", 
             court_name="High Court", outcome="plaintiff_won"
         )
-        assert record.case_id == "CASE_ID_1"
+        assert record.case_id == "C1"
         
-        retrieved = get_case_record(test_db, "CASE_ID_1")
+        retrieved = get_case_record(test_db, "C1")
         assert retrieved.id == record.id
         
         # Criteria search
@@ -112,11 +112,11 @@ class TestDatabaseExtended:
     def test_user_feedback_operations(self, test_db):
         """Test UserFeedback submission and retrieval"""
         feedback = submit_user_feedback(
-            test_db, "U1", did_appeal=True, appeal_outcome="won", satisfaction_rating=5
+            test_db, 1, did_appeal=True, appeal_outcome="won", satisfaction_rating=5
         )
-        assert feedback.user_id == "U1"
+        assert feedback.user_id == 1
         
-        history = get_user_feedback(test_db, "U1")
+        history = get_user_feedback(test_db, 1)
         assert len(history) == 1
         assert history[0].appeal_outcome == "won"
 
