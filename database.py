@@ -20,11 +20,11 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
 import enum
-import os
 from contextlib import contextmanager
+from config import Config
 
 # Database setup
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./legalassist.db")
+DATABASE_URL = Config.DATABASE_URL
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, expire_on_commit=False, bind=engine)
 Base = declarative_base()
@@ -975,7 +975,7 @@ def get_user_stats(db: Session, user_id: int) -> dict:
     # Get upcoming deadlines
     now = dt.datetime.now(dt.timezone.utc)
     upcoming_deadlines = db.query(CaseDeadline).filter(
-        CaseDeadline.user_id == str(user_id),
+        CaseDeadline.user_id == user_id,
         CaseDeadline.is_completed == False,
         CaseDeadline.deadline_date > now,
     ).count()

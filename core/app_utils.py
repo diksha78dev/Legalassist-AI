@@ -28,129 +28,28 @@ import pdfplumber
 from typing import Any, Dict, List
 import html as html_lib
 
-try:
-    from dotenv import dotenv_values, load_dotenv
-except ModuleNotFoundError:
-    dotenv_values = None
-    load_dotenv = None
-
-PROJECT_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
-
-if load_dotenv:
-    load_dotenv(dotenv_path=PROJECT_ENV_PATH)
+from config import Config
 
 # For consistent language detection results
 DetectorFactory.seed = 0
 _LOCALIZED_UI_TEXT_CACHE = {}
 
-# ==================== MODEL CONFIGURATION ====================
-
-DEFAULT_MODEL = "meta-llama/llama-3.1-8b-instruct"
-
-
 def get_default_model():
-    try:
-        import streamlit as st
-        return st.secrets.get("DEFAULT_MODEL", DEFAULT_MODEL)
-    except (KeyError, FileNotFoundError, RuntimeError, AttributeError):
-        # Fallback to module DEFAULT_MODEL if secrets are unavailable
-        return DEFAULT_MODEL
-
-
-# ==================== API CLIENT ====================
-
-PLACEHOLDER_CONFIG_VALUES = {
-    "",
-    "change_me",
-    "changeme",
-    "dummy",
-    "none",
-    "null",
-    "test",
-    "test_key",
-    "test_url",
-    "your_key_here",
-}
-
-
-def _clean_config_value(value):
-    """Normalize config values from env vars or Streamlit secrets."""
-    if value is None:
-        return ""
-    return str(value).strip().strip('"').strip("'")
-
-
-def _is_placeholder_config(value):
-    return _clean_config_value(value).lower() in PLACEHOLDER_CONFIG_VALUES
-
-
-def _is_usable_api_key(value):
-    value = _clean_config_value(value)
-    return bool(value) and not _is_placeholder_config(value) and len(value) >= 8
-
-
-def _is_usable_base_url(value):
-    value = _clean_config_value(value)
-    return (
-        bool(value)
-        and not _is_placeholder_config(value)
-        and value.startswith(("http://", "https://"))
-    )
-
-
-def _select_openrouter_config(candidates):
-    """Return the first complete, non-placeholder OpenRouter config pair."""
-    for api_key, base_url in candidates:
-        api_key = _clean_config_value(api_key)
-        base_url = _clean_config_value(base_url)
-        if _is_usable_api_key(api_key) and _is_usable_base_url(base_url):
-            return api_key, base_url
-
-    raise ValueError(
-        "OPENROUTER_API_KEY and OPENROUTER_BASE_URL must be set to real values. "
-        "Placeholder values like dummy/test_url are ignored."
-    )
-
-
-def _read_streamlit_openrouter_secrets():
-    try:
-        import streamlit as st
-
-        return (
-            st.secrets.get("OPENROUTER_API_KEY"),
-            st.secrets.get("OPENROUTER_BASE_URL"),
-        )
-    except (AttributeError, FileNotFoundError, KeyError, RuntimeError):
-        return "", ""
-
-
-def _read_dotenv_openrouter_config():
-    if not dotenv_values or not PROJECT_ENV_PATH.exists():
-        return "", ""
-
-    values = dotenv_values(PROJECT_ENV_PATH)
-    return (
-        values.get("OPENROUTER_API_KEY"),
-        values.get("OPENROUTER_BASE_URL"),
-    )
+    return Config.DEFAULT_MODEL
 
 
 def _initialize_openai_client():
     """
-    Internal function to initialize the OpenAI client using Streamlit secrets or environment variables.
-    Uses Streamlit caching to avoid recreating the client.
+    Internal function to initialize the OpenAI client using Config settings.
     """
-    secrets_api_key, secrets_base_url = _read_streamlit_openrouter_secrets()
-    dotenv_api_key, dotenv_base_url = _read_dotenv_openrouter_config()
-    api_key, base_url = _select_openrouter_config(
-        [
-            (secrets_api_key, secrets_base_url),
-            (os.getenv("OPENROUTER_API_KEY"), os.getenv("OPENROUTER_BASE_URL")),
-            (dotenv_api_key, dotenv_base_url),
-        ]
-    )
-    return OpenAI(api_key=api_key, base_url=base_url)
-
+    api_key = Config.OPENROUTER_API_KEY
+    base_url = Config.OPENROUTER_BASE_URL
+    
+    if not api_key or not base_url:
+        raise ValueError(
+            "OPENROUTER_API_KEY and OPENROUTER_BASE_URL must be set in environment or secrets."
+        )
+        
     return OpenAI(api_key=api_key, base_url=base_url)
 
 

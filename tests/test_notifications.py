@@ -309,12 +309,10 @@ class TestNotificationService:
             phone_number="+91-9876543210",
         )
 
-        # Mock environment variables
-        with patch.dict(os.environ, {
-            "TWILIO_ACCOUNT_SID": "test_sid",
-            "TWILIO_AUTH_TOKEN": "test_token",
-            "TWILIO_FROM_NUMBER": "+1234567890",
-        }):
+        # Mock Config variables
+        with patch("config.Config.TWILIO_ACCOUNT_SID", "test_sid"), \
+             patch("config.Config.TWILIO_AUTH_TOKEN", "test_token"), \
+             patch("config.Config.TWILIO_FROM_NUMBER", "+1234567890"):
             service = NotificationService()
             result = service.send_sms_reminder(test_db, deadline, pref, 30)
 
@@ -392,7 +390,7 @@ class TestNotificationService:
         test_db.refresh(case)
 
         deadline = CaseDeadline(
-            user_id=str(user.id),
+            user_id=user.id,
             case_id=case.id,
             case_title="Appeal Filing",
             deadline_date=datetime.now(timezone.utc) + timedelta(days=10),
@@ -403,7 +401,7 @@ class TestNotificationService:
         test_db.refresh(deadline)
 
         pref = create_or_update_user_preference(
-            test_db, str(user.id), "user@example.com",
+            test_db, user.id, "user@example.com",
         )
 
         with patch.dict(os.environ, {
@@ -428,8 +426,10 @@ class TestNotificationService:
             phone_number="+91-9876543210",
         )
 
-        # Clear environment variables to trigger mock mode (but keep TESTING flag)
-        with patch.dict(os.environ, {"TESTING": "true"}, clear=True):
+        # Clear Config variables to trigger mock mode
+        with patch("config.Config.TWILIO_ACCOUNT_SID", ""), \
+             patch("config.Config.TWILIO_AUTH_TOKEN", ""), \
+             patch("config.Config.TWILIO_FROM_NUMBER", ""):
             service = NotificationService()
             result = service.send_sms_reminder(test_db, deadline, pref, 30)
 
@@ -447,7 +447,7 @@ class TestNotificationService:
             test_db, 1, "user@example.com",
         )
 
-        with patch.dict(os.environ, {"TESTING": "true"}, clear=True):
+        with patch("config.Config.SENDGRID_API_KEY", ""):
             service = NotificationService()
             result = service.send_email_reminder(test_db, deadline, pref, 10)
 
