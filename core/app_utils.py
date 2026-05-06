@@ -386,17 +386,25 @@ TARGET LANGUAGE:
 INSTRUCTIONS:
 1. Extract ONLY the final judgment outcome.
 2. Remove all legal jargon and case history.
-3. Produce AT LEAST 5 bullet points. More than 5 is allowed if needed.
+3. Produce EXACTLY 5 bullet points.
 4. Write ONLY in {language}. ZERO English allowed if language ≠ English.
 5. Each bullet must be 1–2 very short sentences.
-6. Put every bullet point on its own new line.
-7. No extra headings. No disclaimers.
+6. Format your output as a JSON object with a single key "bullets" which is an array of 5 strings.
 
 TEXT TO ANALYZE:
 {safe_text}
 
 OUTPUT REQUIRED:
-- Minimum 5 bullet points in {language} only
+A valid JSON object in {language} like this:
+{{
+  "bullets": [
+    "point 1",
+    "point 2",
+    "point 3",
+    "point 4",
+    "point 5"
+  ]
+}}
 """
 
 
@@ -439,29 +447,73 @@ You are a Legal Rights Advisor. Read this judgment and answer the questions belo
 JUDGMENT:
 {judgment_text}
 
-Answer ONLY these questions in {language}. Be practical and direct.
+Answer the following questions in {language}. Be practical and direct.
 
 TARGET LANGUAGE:
 - Language: {language}
 - Rule: {language_rule}
 - The source PDF may be in another language. Ignore the source language for output.
-- Never mix languages. If a sentence is not in {language}, rewrite it before answering.
-- Do not repeat the question labels; write only the answer after each number.
+- Never mix languages.
 
-1. What happened? (Who won and who lost; 1 sentence)
-2. Can the loser appeal? (yes/no equivalent in {language} + reason; 1-2 sentences)
-3. Appeal timeline: How many days? (Just number)
-4. Appeal court: Which court should they go to? (Court name only)
-5. Cost estimate: Rough cost in rupees? (e.g., 5000-15000)
-6. First action: What should they do first? (1 sentence)
-7. Important deadline: What key deadline should they remember? (1 sentence)
+QUESTIONS TO ANSWER:
+1. what_happened: Who won and who lost; 1 sentence.
+2. can_appeal: yes/no equivalent in {language} + reason; 1-2 sentences.
+3. appeal_days: How many days? (Just number)
+4. appeal_court: Which court should they go to? (Court name only)
+5. cost_estimate: Rough cost in rupees? (e.g., 5000-15000)
+6. first_action: What should they do first? (1 sentence)
+7. important_deadline: What key deadline should they remember? (1 sentence)
 
-Output in numbered form like:
-1. ...\n2. ...\n3. ... etc.
+OUTPUT REQUIRED:
+Return ONLY a valid JSON object with the keys listed above as strings. Example:
+{{
+  "what_happened": "...",
+  "can_appeal": "...",
+  "appeal_days": "30",
+  "appeal_court": "...",
+  "cost_estimate": "...",
+  "first_action": "...",
+  "important_deadline": "..."
+}}
 """
 
 
 # ==================== REMEDIES PARSER ====================
+
+# ==================== PARSING UTILITIES ====================
+
+def _parse_json_safely(text: str) -> Optional[Dict]:
+    """
+    Robust JSON parser that handles markdown blocks and whitespace.
+    """
+    if not text:
+        return None
+    
+    # Try direct parse
+    try:
+        return json.loads(text.strip())
+    except json.JSONDecodeError:
+        pass
+    
+    # Try extracting from markdown code blocks
+    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+            
+    # Try finding the first { and last }
+    start = text.find('{')
+    end = text.rfind('}')
+    if start != -1 and end != -1:
+        try:
+            return json.loads(text[start:end+1].strip())
+        except json.JSONDecodeError:
+            pass
+            
+    return None
+
 
 KNOWN_COURTS = {
     "supreme court", "high court", "district court", "sessions court",
@@ -573,12 +625,10 @@ def _validate_court_name(value: str) -> str:
     return cleaned
 
 
-def parse_remedies_response(response_text):
+def parse_remedies_response(response_text: str) -> Dict:
     """
-    Extract structured info from LLM response using flexible numbered-line parsing.
-    Supports multiple separators: . ) : - 
-    Handles both 5-section (old) and 7-section (new) formats.
-    Returns dict with remedies and _is_partial flag set appropriately.
+    Extract structured info from LLM response.
+    Prioritizes JSON parsing, with a robust fallback to regex-based line parsing.
     """
     remedies = {
         "what_happened": "",
@@ -588,8 +638,8 @@ def parse_remedies_response(response_text):
         "cost_estimate": "",
         "cost": "",
         "first_action": "",
+        "important_deadline": "",
         "deadline": "",
-        "appeal_details": "",
         "_is_partial": False,
         "_warning": "",
     }
@@ -598,6 +648,30 @@ def parse_remedies_response(response_text):
     if not text:
         remedies["_is_partial"] = True
         remedies["_warning"] = "Empty response"
+        return remedies
+
+    # --- STEP 1: Try JSON parsing ---
+    data = _parse_json_safely(text)
+    if data and isinstance(data, dict):
+        # Map fields
+        remedies["what_happened"] = _clean_answer(data.get("what_happened", ""))
+        remedies["can_appeal"] = _clean_answer(data.get("can_appeal", ""))
+        remedies["appeal_days"] = _clean_answer(str(data.get("appeal_days", "")))
+        remedies["appeal_court"] = _validate_court_name(data.get("appeal_court", ""))
+        remedies["cost_estimate"] = _clean_answer(data.get("cost_estimate", ""))
+        remedies["cost"] = remedies["cost_estimate"]
+        remedies["first_action"] = _clean_answer(data.get("first_action", ""))
+        remedies["important_deadline"] = _clean_answer(data.get("important_deadline", ""))
+        remedies["deadline"] = remedies["important_deadline"]
+        
+        # Validation: ensure at least some fields are populated
+        populated_fields = [v for k, v in remedies.items() if v and not k.startswith("_")]
+        if len(populated_fields) >= 4:
+            return remedies
+        # If JSON was thin, fall through to regex just in case
+
+    # --- STEP 2: Fallback to regex-based line parsing ---
+    # Detect all numbered sections (flexible separators: . ) : -)
         return remedies
 
     # Detect all numbered sections (flexible separators: . ) : -)
