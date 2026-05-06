@@ -196,6 +196,19 @@ def render_page():
                         render_shareable_result_box(result, ui)
                         st.success(ui["summary_success"])
 
+                        # ===== VOICE ACCESSIBILITY (TTS) =====
+                        st.markdown("---")
+                        st.markdown("### 🎧 Listen to Summary")
+                        plain_text_summary = result[0] if isinstance(result, tuple) else result
+                        if st.button("🔊 Generate Audio", key="generate_audio_btn"):
+                            with st.spinner("Generating audio..."):
+                                from core.audio_utils import generate_audio
+                                audio_bytes = generate_audio(plain_text_summary, language)
+                                if audio_bytes:
+                                    st.audio(audio_bytes, format="audio/mp3")
+                                else:
+                                    st.error("Audio generation is not supported for this language or failed.")
+
                         # ===== ANALYTICS & TRACKING SECTION =====
                         st.markdown("---")
                         st.markdown(f"## {ui['track_title']}")

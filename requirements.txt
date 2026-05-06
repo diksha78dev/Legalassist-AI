@@ -42,3 +42,6 @@ chromadb>=0.4.0
 langchain>=0.1.0
 langchain-community>=0.0.10
 sentence-transformers>=2.2.2
+
+# Audio & Accessibility
+gTTS>=2.5.1

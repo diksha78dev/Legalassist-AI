@@ -51,13 +51,32 @@ def render_page():
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    # React to user input
+    # React to user input (text or audio)
+    audio_val = st.audio_input("🎤 Or speak your question...")
+    
+    user_question = None
+
     if prompt := st.chat_input("Ask a question about the judgment..."):
+        user_question = prompt
+    elif audio_val is not None:
+        # Check if we already processed this exact audio file
+        audio_id = hash(audio_val.getvalue())
+        if st.session_state.get("last_processed_audio_id") != audio_id:
+            with st.spinner("Transcribing audio..."):
+                from core.audio_utils import transcribe_audio
+                transcribed_text = transcribe_audio(audio_val.getvalue())
+                if transcribed_text:
+                    user_question = transcribed_text
+                    st.session_state["last_processed_audio_id"] = audio_id
+                else:
+                    st.error("Failed to transcribe audio.")
+
+    if user_question:
         # Display user message in chat message container
-        st.chat_message("user").markdown(prompt)
+        st.chat_message("user").markdown(user_question)
         
         # Add user message to chat history
-        st.session_state.chat_history.append({"role": "user", "content": prompt})
+        st.session_state.chat_history.append({"role": "user", "content": user_question})
 
         # Generate response
         with st.chat_message("assistant"):
@@ -68,7 +87,7 @@ def render_page():
                     
                     # Query the RAG engine
                     response = rag_engine.query(
-                        question=prompt, 
+                        question=user_question, 
                         language=language, 
                         openai_client=client
                     )
