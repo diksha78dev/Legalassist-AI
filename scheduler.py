@@ -156,6 +156,8 @@ def setup_scheduler(scheduler_class):
         name="Daily Deadline Reminder Check",
         replace_existing=True,
         misfire_grace_time=300,  # 5 minute grace for misfires
+        max_instances=1,
+        coalesce=True,
     )
     
     return scheduler
