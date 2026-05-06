@@ -8,6 +8,11 @@ CHANGE: build_judgment_result_text now returns (plain_text, structured_dict).
 
 import streamlit as st
 import logging
+import sys
+import os
+
+# Add parent directory to sys.path to resolve 'core' module
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from core.app_utils import (
     get_client,
@@ -25,6 +30,8 @@ from core.app_utils import (
     LANGUAGES,
     parse_summary_bullets,
     validate_pdf_metadata,
+    build_judgment_result_text,
+    render_shareable_result_box,
 )
 
 st.markdown(RETRO_STYLING, unsafe_allow_html=True)
