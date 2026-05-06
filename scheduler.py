@@ -71,7 +71,6 @@ def check_and_send_reminders():
     logger.info(f"Check time: {datetime.now(timezone.utc)} UTC")
 
     # Ensure tables exist when running from a fresh DB.
-    from database import init_db
     init_db()
 
     db = SessionLocal()

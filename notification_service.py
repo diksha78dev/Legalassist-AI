@@ -27,7 +27,6 @@ try:
 except ImportError:
     SendGridAPIClient = None
     Mail = None
-
 from database import (
     Case,
     NotificationStatus,
@@ -36,6 +35,7 @@ from database import (
     UserPreference,
     CaseDeadline,
     log_notification,
+    has_notification_been_sent,
 )
 
 # Import debug mode helper
@@ -370,7 +370,6 @@ class NotificationService:
         else:
             channels = [user_preference.notification_channel]
 
-        from database import has_notification_been_sent
 
         for channel in channels:
             # Check if reminder was already sent for this specific threshold and channel
