@@ -7,6 +7,10 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
 import logging
 import hashlib
+import hmac
+import os
+from pathlib import Path
+
 
 from sqlalchemy.orm import Session
 
@@ -649,12 +653,50 @@ def generate_case_summary_text(user_id: int, case_id: int) -> Optional[str]:
         db.close()
 
 
+def _get_case_anonymization_secret() -> str:
+    """Return secret used to generate anonymized case IDs.
+
+    Primary source: CASE_ANONYMIZATION_SECRET env var.
+    Fallback: contents of .jwt_secret (kept for local dev compatibility).
+    """
+    secret = os.getenv("CASE_ANONYMIZATION_SECRET", "").strip()
+    if secret:
+        return secret
+
+    # Fallback to repo-local .jwt_secret (best-effort; avoids breaking existing deployments).
+    jwt_secret_path = Path(__file__).resolve().parents[0] / ".jwt_secret"
+    if not jwt_secret_path.exists():
+        # Also try one directory up (in case file layout differs)
+        jwt_secret_path = Path(__file__).resolve().parents[1] / ".jwt_secret"
+
+    if jwt_secret_path.exists():
+        try:
+            return jwt_secret_path.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+
+    # Last resort: no secret. This is insecure, but prevents runtime crashes.
+    # Prefer setting CASE_ANONYMIZATION_SECRET.
+    return ""
+
+
+def _generate_anonymized_case_id(case_id: int, created_at: Any) -> str:
+    created_at_str = getattr(created_at, "isoformat", None)
+    created_at_str = created_at.isoformat() if callable(created_at_str) else str(created_at)
+    secret = _get_case_anonymization_secret().encode("utf-8")
+    msg = f"{case_id}-{created_at_str}".encode("utf-8")
+
+    digest = hmac.new(secret, msg, hashlib.sha256).hexdigest()
+    return digest[:12]
+
+
 def generate_anonymized_case_data(case_id: int) -> Optional[Dict[str, Any]]:
     """
     Generate anonymized case data for sharing.
     Removes personal identifiers, hashes case ID.
     """
     db = SessionLocal()
+
     try:
         case = get_case_by_id(db, case_id)
         if not case:
@@ -663,8 +705,9 @@ def generate_anonymized_case_data(case_id: int) -> Optional[Dict[str, Any]]:
         documents = get_case_documents(db, case_id)
         timeline = get_case_timeline(db, case_id)
 
-        # Hash case ID for anonymity
-        anonymized_id = hashlib.sha256(f"{case_id}-{case.created_at}".encode()).hexdigest()[:12]
+        # Generate secret-based anonymized ID for anonymity
+        anonymized_id = _generate_anonymized_case_id(case_id=case_id, created_at=case.created_at)
+
 
         return {
             "anonymized_id": anonymized_id,
