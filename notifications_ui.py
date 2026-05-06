@@ -5,7 +5,6 @@ Integrate these into the main app.py or use as a separate page.
 
 import streamlit as st
 from datetime import datetime, timezone, timedelta
-import pytz
 from typing import Optional
 
 from database import (
