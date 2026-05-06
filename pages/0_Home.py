@@ -32,6 +32,7 @@ from core.app_utils import (
     validate_pdf_metadata,
     build_judgment_result_text,
     render_shareable_result_box,
+    safe_llm_call,
 )
 
 st.markdown(RETRO_STYLING, unsafe_allow_html=True)
@@ -151,7 +152,9 @@ def render_page():
                     prompt = build_prompt(safe_text, language)
                     model_id = "meta-llama/llama-3.1-8b-instruct"
 
-                    response = client.chat.completions.create(
+                    # Use safe_llm_call for robust error handling and retries
+                    summary_raw, error = safe_llm_call(
+                        client=client,
                         model=model_id,
                         messages=[
                             {"role": "system", "content": f"You are an expert legal simplification engine. Output only in {language}."},
@@ -161,11 +164,17 @@ def render_page():
                         temperature=0.05,
                     )
 
-                    summary = response.choices[0].message.content.strip()
+                    if error:
+                        st.error(f"❌ {error}")
+                        return
+                    
+                    summary = summary_raw
 
                     if language.lower() != "english" and output_language_mismatch_detected(summary, language):
                         retry_prompt = build_retry_prompt(safe_text, language)
-                        response2 = client.chat.completions.create(
+                        # Use safe_llm_call for retry as well
+                        retry_summary, error2 = safe_llm_call(
+                            client=client,
                             model=model_id,
                             messages=[
                                 {"role": "system", "content": f"Strict multilingual rewriting engine. Output only in {language}."},
@@ -174,7 +183,6 @@ def render_page():
                             max_tokens=260,
                             temperature=0.03,
                         )
-                        retry_summary = response2.choices[0].message.content.strip()
                         if len(retry_summary) > 0 and not output_language_mismatch_detected(retry_summary, language):
                             summary = retry_summary
 
