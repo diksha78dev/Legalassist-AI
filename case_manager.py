@@ -320,6 +320,72 @@ def upload_case_document(
         db.close()
 
 
+def _extract_days_from_text(text: str) -> Optional[int]:
+    """
+    Extract the number of days from a natural language string.
+    
+    This function uses multiple regex patterns to handle various formats:
+    - "30 days" (standard format)
+    - "appeal within 15 days" (with prefix)
+    - "file appeal in 7 days" (with prefix)
+    - "30days" (no space)
+    - "30 Days" (capitalized)
+    
+    Args:
+        text: The text containing the days information
+        
+    Returns:
+        The extracted number of days, or None if not found
+        
+    Examples:
+        >>> _extract_days_from_text("30 days")
+        30
+        >>> _extract_days_from_text("appeal within 15 days")
+        15
+        >>> _extract_days_from_text("Cost is 500 Rs, appeal in 30 days")
+        30
+        >>> _extract_days_from_text("Invalid text")
+        None
+    """
+    if not text or not isinstance(text, str):
+        return None
+    
+    text = text.strip()
+    
+    # Primary pattern: digits followed by "day" or "days" (with optional space)
+    # This is the most reliable pattern for our use case
+    primary_match = re.search(r'(\d+)\s*days?\b', text, re.IGNORECASE)
+    if primary_match:
+        return int(primary_match.group(1))
+    
+    # Fallback pattern: digits that appear near "day" keywords
+    # This handles cases like "in 30 days" or "within 15 days"
+    fallback_match = re.search(r'(?:in|within|after)\s+(\d+)\s*days?', text, re.IGNORECASE)
+    if fallback_match:
+        return int(fallback_match.group(1))
+    
+    return None
+
+
+def _validate_days_value(days: int) -> bool:
+    """
+    Validate that the extracted days value is within acceptable bounds.
+    
+    Args:
+        days: The number of days to validate
+        
+    Returns:
+        True if valid, False otherwise
+    """
+    # Define reasonable bounds for appeal deadlines
+    # Minimum: 1 day, Maximum: 365 days (1 year)
+    # These bounds can be adjusted based on business requirements
+    MIN_DAYS = 1
+    MAX_DAYS = 365
+    
+    return MIN_DAYS <= days <= MAX_DAYS
+
+
 def _auto_create_deadlines_from_remedies(
     db: Session,
     user_id: int,
@@ -330,65 +396,119 @@ def _auto_create_deadlines_from_remedies(
 ):
     """
     Auto-create deadlines from remedies advice.
+    
+    This function extracts deadline information from LLM-generated remedies and creates
+    appropriate deadline entries in the database. It includes robust parsing to handle
+    various natural language formats and prevents duplicate deadline creation.
+    
+    Key improvements:
+    - Uses helper functions for precise day extraction
+    - Validates extracted values to prevent invalid deadline dates
+    - Includes comprehensive logging for debugging and audit trails
+    - Handles various natural language formats for days specification
     """
     try:
+        # Retrieve appeal_days from remedies dictionary
         appeal_days = remedies.get("appeal_days")
-        if appeal_days:
-            # Extract number from string like "30 days"
-            match = re.search(r'\d+', str(appeal_days))
-            if match:
-                days = int(match.group())
-                
-                # Sanity check: ensure days is within reasonable range (1 day to 1 year)
-                # This prevents absurd deadlines from model hallucinations
-                if not (1 <= days <= 365):
-                    logger.warning(f"Extracted absurd appeal_days ({days}) for case {case_id}. Skipping auto-deadline creation.")
-                    return
-
-                deadline_date = datetime.now(timezone.utc) + timedelta(days=days)
-                
-                # Normalize to naive for database comparison (matches schema)
-                naive_deadline = deadline_date.replace(tzinfo=None)
-                # Check for existing pending deadline of same type/date (±1 day tolerance)
-                existing_deadline = db.query(CaseDeadline).filter(
-                    CaseDeadline.case_id == case_id,
-                    CaseDeadline.deadline_type == "appeal",
-                    CaseDeadline.is_completed == False,
-                    CaseDeadline.deadline_date >= naive_deadline - timedelta(days=1),
-                    CaseDeadline.deadline_date <= naive_deadline + timedelta(days=1)
-                ).first()
-
-                if existing_deadline:
-                    logger.info(f"Skipped duplicate appeal deadline for case {case_id} (existing: {existing_deadline.id})")
-                else:
-                    # Create new deadline
-                    deadline = CaseDeadline(
-                        user_id=user_id,
-                        case_id=case_id,
-                        case_title=case_title,
-                        deadline_date=deadline_date,
-                        deadline_type="appeal",
-                        description=f"Appeal deadline - {remedies.get('appeal_court', 'Unknown court')}",
-                    )
-                    db.add(deadline)
-                    db.flush()  # Flush to generate deadline.id before using it
-
-                    # Create timeline event
-                    create_timeline_event(
-                        db=db,
-                        case_id=case_id,
-                        event_type="deadline_created",
-                        description=f"Appeal deadline set for {deadline_date.strftime('%d %B %Y')}",
-                        metadata={"deadline_id": deadline.id, "document_id": document_id},
-                    )
-
-                    logger.info(f"Auto-created appeal deadline for case {case_id}: {deadline_date}")
-                    db.commit()
-
+        
+        # Skip if no appeal_days information is present
+        if not appeal_days:
+            logger.debug(f"No appeal_days found in remedies for case {case_id}, skipping deadline creation")
+            return
+        
+        # Convert to string for processing
+        appeal_days_str = str(appeal_days).strip()
+        
+        # Extract the number of days using the helper function
+        # This handles various formats like "30 days", "appeal in 15 days", etc.
+        days = _extract_days_from_text(appeal_days_str)
+        
+        if days is None:
+            logger.warning(
+                f"Could not extract days from appeal_days value: '{appeal_days_str}' "
+                f"for case {case_id}. Expected format: '30 days', '15 days', etc."
+            )
+            return
+        
+        # Validate the extracted days value
+        if not _validate_days_value(days):
+            logger.warning(
+                f"Invalid appeal_days value ({days}) for case {case_id}. "
+                f"Value must be between 1 and 365 days."
+            )
+            return
+        
+        # Calculate the deadline date
+        # Using timezone-aware datetime for consistency
+        current_time = datetime.now(timezone.utc)
+        deadline_date = current_time + timedelta(days=days)
+        
+        # Normalize to naive datetime for database storage
+        # The database schema uses timezone-naive timestamps
+        naive_deadline = deadline_date.replace(tzinfo=None)
+        
+        # Check for existing pending deadlines to prevent duplicates
+        # We use a ±1 day tolerance to handle minor variations in deadline dates
+        # that might result from different processing times or timezone conversions
+        existing_deadline = db.query(CaseDeadline).filter(
+            CaseDeadline.case_id == case_id,
+            CaseDeadline.deadline_type == "appeal",
+            CaseDeadline.is_completed == False,
+            CaseDeadline.deadline_date >= naive_deadline - timedelta(days=1),
+            CaseDeadline.deadline_date <= naive_deadline + timedelta(days=1)
+        ).first()
+        
+        if existing_deadline:
+            logger.info(
+                f"Skipped duplicate appeal deadline for case {case_id}. "
+                f"Existing deadline ID: {existing_deadline.id}, "
+                f"Date: {existing_deadline.deadline_date.strftime('%Y-%m-%d')}"
+            )
+            return
+        
+        # Create the new deadline entry
+        deadline = CaseDeadline(
+            user_id=user_id,
+            case_id=case_id,
+            case_title=case_title,
+            deadline_date=deadline_date,
+            deadline_type="appeal",
+            description=f"Appeal deadline - {remedies.get('appeal_court', 'Unknown court')}",
+        )
+        db.add(deadline)
+        db.flush()  # Flush to generate deadline.id before using it
+        
+        # Create a timeline event to document the automatic deadline creation
+        create_timeline_event(
+            db=db,
+            case_id=case_id,
+            event_type="deadline_created",
+            description=f"Appeal deadline set for {deadline_date.strftime('%d %B %Y')} based on document analysis",
+            metadata={
+                "deadline_id": deadline.id,
+                "document_id": document_id,
+                "source_days": days,
+                "original_text": appeal_days_str,
+            },
+        )
+        
+        logger.info(
+            f"Auto-created appeal deadline for case {case_id}: "
+            f"{deadline_date.strftime('%Y-%m-%d')} ({days} days from now). "
+            f"Source: document {document_id}"
+        )
+        
+        # Commit the transaction
         db.commit()
-
+        
     except Exception as e:
-        logger.error(f"Error auto-creating deadlines: {str(e)}")
+        # Log the full error with context for debugging
+        logger.error(
+            f"Error auto-creating deadlines for case {case_id}: {str(e)}. "
+            f"Remedies: {remedies}. Document ID: {document_id}",
+            exc_info=True  # Include full traceback for debugging
+        )
+        # Rollback the transaction to prevent partial data writes
         db.rollback()
 
 
