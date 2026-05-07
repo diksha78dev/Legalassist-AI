@@ -17,6 +17,7 @@ from sqlalchemy import (
     ForeignKey,
     Enum as SQLEnum,
     JSON,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
 import enum
@@ -318,6 +319,7 @@ class DocumentType(str, enum.Enum):
 class Case(Base):
     """Model for tracking user cases"""
     __tablename__ = "cases"
+    __table_args__ = (UniqueConstraint("user_id", "case_number", name="uq_user_case_number"),)
 
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
