@@ -10,7 +10,8 @@ from typing import Optional, Dict, Any
 from auth import require_auth, redirect_to_login, get_current_user_id
 from case_manager import get_case_detail, upload_case_document, mark_deadline_completed, mark_deadline_incomplete, add_manual_deadline, mark_case_appealed, mark_case_closed, mark_case_active, generate_case_summary_text
 from core import extract_text_from_pdf
-from database import DocumentType, CaseStatus
+from database import DocumentType, CaseStatus, SessionLocal, UserPreference
+import pytz
 
 # Page config
 st.set_page_config(
@@ -249,12 +250,27 @@ def render_deadlines_section(case_id: int, deadlines: list, user_id: int):
             submitted = st.form_submit_button("➕ Add Deadline", use_container_width=True)
 
             if submitted:
-                deadline_datetime = datetime.combine(deadline_date, datetime.min.time()).replace(tzinfo=timezone.utc)
+                # Get user's timezone from preferences
+                db = SessionLocal()
+                user_tz_name = "UTC"
+                try:
+                    pref = db.query(UserPreference).filter(UserPreference.user_id == user_id).first()
+                    if pref and pref.timezone:
+                        user_tz_name = pref.timezone
+                finally:
+                    db.close()
+                
+                # Capture local date and convert to UTC
+                user_tz = pytz.timezone(user_tz_name)
+                local_dt = datetime.combine(deadline_date, datetime.min.time())
+                localized_dt = user_tz.localize(local_dt)
+                deadline_utc = localized_dt.astimezone(pytz.UTC)
+
                 success = add_manual_deadline(
                     user_id=user_id,
                     case_id=case_id,
                     case_title=st.session_state.current_case_title or "Case",
-                    deadline_date=deadline_datetime,
+                    deadline_date=deadline_utc,
                     deadline_type=deadline_type.lower(),
                     description=description,
                 )
