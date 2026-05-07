@@ -62,7 +62,7 @@ class TestDatabaseModels:
         
         deadline = create_case_deadline(
             db=test_db,
-            user_id="user123",
+            user_id=123,
             case_id=1,
             case_title="Property Dispute",
             deadline_date=deadline_date,
@@ -70,7 +70,7 @@ class TestDatabaseModels:
             description="Appeal deadline",
         )
 
-        assert deadline.user_id == "user123"
+        assert deadline.user_id == 123
         assert deadline.case_id == 1
         assert deadline.case_title == "Property Dispute"
         assert deadline.is_completed == False
@@ -82,7 +82,7 @@ class TestDatabaseModels:
 
         deadline = create_case_deadline(
             db=test_db,
-            user_id="user123",
+            user_id=123,
             case_id="2",
             case_title="Appeal Filing",
             deadline_date=deadline_date,
@@ -98,7 +98,7 @@ class TestDatabaseModels:
         with pytest.raises(ValueError, match="case_id must be an integer matching cases.id"):
             create_case_deadline(
                 db=test_db,
-                user_id="user123",
+                user_id=123,
                 case_id="abc",
                 case_title="Appeal Filing",
                 deadline_date=deadline_date,
@@ -109,14 +109,14 @@ class TestDatabaseModels:
         """Test creating user notification preferences"""
         pref = create_or_update_user_preference(
             db=test_db,
-            user_id="user123",
+            user_id=123,
             email="user@example.com",
             phone_number="+91-9876543210",
             notification_channel=NotificationChannel.BOTH,
             timezone="Asia/Kolkata",
         )
 
-        assert pref.user_id == "user123"
+        assert pref.user_id == 123
         assert pref.email == "user@example.com"
         assert pref.phone_number == "+91-9876543210"
         assert pref.notification_channel == NotificationChannel.BOTH
@@ -127,7 +127,7 @@ class TestDatabaseModels:
         # Create initial preference
         create_or_update_user_preference(
             db=test_db,
-            user_id="user123",
+            user_id=123,
             email="old@example.com",
             phone_number="+91-1234567890",
         )
@@ -135,7 +135,7 @@ class TestDatabaseModels:
         # Update preference
         updated = create_or_update_user_preference(
             db=test_db,
-            user_id="user123",
+            user_id=123,
             email="new@example.com",
             phone_number="+91-9876543210",
             notification_channel=NotificationChannel.SMS,
@@ -151,15 +151,15 @@ class TestDatabaseModels:
         
         # Create deadlines at different time points
         create_case_deadline(
-            test_db, "user1", 1, "Case 1",
+            test_db, 1, 1, "Case 1",
             now + timedelta(days=5), "appeal"
         )
         create_case_deadline(
-            test_db, "user1", 2, "Case 2",
+            test_db, 1, 2, "Case 2",
             now + timedelta(days=15), "filing"
         )
         create_case_deadline(
-            test_db, "user1", 3, "Case 3",
+            test_db, 1, 3, "Case 3",
             now + timedelta(days=40), "submission"
         )
 
@@ -170,7 +170,7 @@ class TestDatabaseModels:
     def test_notification_logging(self, test_db):
         """Test logging notification attempts"""
         deadline = create_case_deadline(
-            test_db, "user123", 1, "Case",
+            test_db, 123, 1, "Case",
             datetime.now(timezone.utc) + timedelta(days=30), "appeal",
         )
 
@@ -178,7 +178,7 @@ class TestDatabaseModels:
         sms_log = log_notification(
             db=test_db,
             deadline_id=deadline.id,
-            user_id="user123",
+            user_id=123,
             channel=NotificationChannel.SMS,
             recipient="+91-9876543210",
             days_before=30,
@@ -193,13 +193,13 @@ class TestDatabaseModels:
     def test_prevent_duplicate_notifications(self, test_db):
         """Test that duplicate notifications are not sent"""
         deadline = create_case_deadline(
-            test_db, "user123", 1, "Case",
+            test_db, 123, 1, "Case",
             datetime.now(timezone.utc) + timedelta(days=30), "appeal",
         )
 
         # Log first notification
         log_notification(
-            test_db, deadline.id, "user123", NotificationChannel.SMS,
+            test_db, deadline.id, 123, NotificationChannel.SMS,
             "+91-9876543210", 30, NotificationStatus.SENT,
         )
 
@@ -211,15 +211,15 @@ class TestDatabaseModels:
         now = datetime.now(timezone.utc)
         
         create_case_deadline(
-            test_db, "user1", 1, "Case 1",
+            test_db, 1, 1, "Case 1",
             now + timedelta(days=50), "appeal"
         )
         create_case_deadline(
-            test_db, "user1", 2, "Case 2",
+            test_db, 1, 2, "Case 2",
             now + timedelta(days=10), "filing"
         )
 
-        deadlines = get_user_deadlines(test_db, "user1")
+        deadlines = get_user_deadlines(test_db, 1)
         assert len(deadlines) == 2
         assert deadlines[0].days_until_deadline() < deadlines[1].days_until_deadline()
 
@@ -301,11 +301,11 @@ class TestNotificationService:
 
         # Create test data
         deadline = create_case_deadline(
-            test_db, "user123", 1, "Test Case",
+            test_db, 123, 1, "Test Case",
             datetime.now(timezone.utc) + timedelta(days=30), "appeal",
         )
         pref = create_or_update_user_preference(
-            test_db, "user123", "user@example.com",
+            test_db, 123, "user@example.com",
             phone_number="+91-9876543210",
         )
 
@@ -325,11 +325,11 @@ class TestNotificationService:
     def test_sms_send_missing_phone(self, test_db):
         """Test SMS fails gracefully when no phone number"""
         deadline = create_case_deadline(
-            test_db, "user123", 1, "Test Case",
+            test_db, 123, 1, "Test Case",
             datetime.now(timezone.utc) + timedelta(days=30), "appeal",
         )
         pref = create_or_update_user_preference(
-            test_db, "user123", "user@example.com",
+            test_db, 123, "user@example.com",
             phone_number=None,  # No phone
         )
 
@@ -349,11 +349,11 @@ class TestNotificationService:
         mock_sendgrid.return_value.send.return_value = mock_response
 
         deadline = create_case_deadline(
-            test_db, "user123", 1, "Test Case",
+            test_db, 123, 1, "Test Case",
             datetime.now(timezone.utc) + timedelta(days=10), "appeal",
         )
         pref = create_or_update_user_preference(
-            test_db, "user123", "user@example.com",
+            test_db, 123, "user@example.com",
         )
 
         with patch.dict(os.environ, {
@@ -392,7 +392,7 @@ class TestNotificationService:
         test_db.refresh(case)
 
         deadline = CaseDeadline(
-            user_id=str(user.id),
+            user_id=user.id,
             case_id=case.id,
             case_title="Appeal Filing",
             deadline_date=datetime.now(timezone.utc) + timedelta(days=10),
@@ -403,7 +403,7 @@ class TestNotificationService:
         test_db.refresh(deadline)
 
         pref = create_or_update_user_preference(
-            test_db, str(user.id), "user@example.com",
+            test_db, user.id, "user@example.com",
         )
 
         with patch.dict(os.environ, {
@@ -420,11 +420,11 @@ class TestNotificationService:
     def test_mock_mode_sms(self, test_db):
         """Test SMS in mock mode (no credentials)"""
         deadline = create_case_deadline(
-            test_db, "user123", 1, "Test Case",
+            test_db, 123, 1, "Test Case",
             datetime.now(timezone.utc) + timedelta(days=30), "appeal",
         )
         pref = create_or_update_user_preference(
-            test_db, "user123", "user@example.com",
+            test_db, 123, "user@example.com",
             phone_number="+91-9876543210",
         )
 
@@ -440,11 +440,11 @@ class TestNotificationService:
     def test_mock_mode_email(self, test_db):
         """Test email in mock mode (no API key)"""
         deadline = create_case_deadline(
-            test_db, "user123", 1, "Test Case",
+            test_db, 123, 1, "Test Case",
             datetime.now(timezone.utc) + timedelta(days=10), "appeal",
         )
         pref = create_or_update_user_preference(
-            test_db, "user123", "user@example.com",
+            test_db, 123, "user@example.com",
         )
 
         with patch.dict(os.environ, {"TESTING": "true"}, clear=True):
@@ -466,13 +466,13 @@ class TestScheduler:
         
         # Create deadline at exactly 30 days
         create_case_deadline(
-            test_db, "user1", 1, "Case 1",
+            test_db, 1, 1, "Case 1",
             now + timedelta(days=30), "appeal",
         )
         
         # Create user preference
         create_or_update_user_preference(
-            test_db, "user1", "user@example.com",
+            test_db, 1, "user@example.com",
             phone_number="+91-9876543210",
         )
 
@@ -487,20 +487,20 @@ class TestScheduler:
         now = datetime.now(timezone.utc)
         
         deadline = create_case_deadline(
-            test_db, "user1", 1, "Case 1",
+            test_db, 1, 1, "Case 1",
             now + timedelta(days=30), "appeal",
         )
         
         # Create preference with 30-day reminder disabled
         pref = create_or_update_user_preference(
-            test_db, "user1", "user@example.com",
+            test_db, 1, "user@example.com",
             phone_number="+91-9876543210",
         )
         pref.notify_30_days = False
         test_db.commit()
 
         # Verify preference was saved
-        check_pref = test_db.query(UserPreference).filter_by(user_id="user1").first()
+        check_pref = test_db.query(UserPreference).filter_by(user_id=1).first()
         assert check_pref.notify_30_days == False
 
 
@@ -514,13 +514,13 @@ class TestIntegration:
         # 1. Create deadline
         deadline_date = datetime.now(timezone.utc) + timedelta(days=30)
         deadline = create_case_deadline(
-            test_db, "user1", 1, "Appeal Filing",
+            test_db, 1, 1, "Appeal Filing",
             deadline_date, "appeal", "Need to submit appeal"
         )
 
         # 2. Create user preference
         pref = create_or_update_user_preference(
-            test_db, "user1", "user@example.com",
+            test_db, 1, "user@example.com",
             phone_number="+91-9876543210",
             notification_channel=NotificationChannel.BOTH,
             timezone="Asia/Kolkata",
@@ -539,7 +539,7 @@ class TestIntegration:
             assert email_result.success == True
 
         # 4. Verify logs were created
-        logs = get_notification_history(test_db, "user1")
+        logs = get_notification_history(test_db, 1)
         assert len(logs) >= 2
         
         # Verify we can't send duplicates
@@ -556,8 +556,9 @@ class TestIntegration:
         ]
 
         for tz in timezones_to_test:
+            user_id = 1000 + timezones_to_test.index(tz)
             pref = create_or_update_user_preference(
-                test_db, f"user_{tz}", f"user_{tz}@example.com",
+                test_db, user_id, f"user_{user_id}@example.com",
                 timezone=tz,
             )
             assert pref.timezone == tz
@@ -566,18 +567,18 @@ class TestIntegration:
         """Test that all reminder thresholds work for same deadline"""
         now = datetime.now(timezone.utc)
         deadline = create_case_deadline(
-            test_db, "user1", 1, "Case",
+            test_db, 1, 1, "Case",
             now + timedelta(days=30), "appeal",
         )
         pref = create_or_update_user_preference(
-            test_db, "user1", "user@example.com",
+            test_db, 1, "user@example.com",
             phone_number="+91-9876543210",
         )
 
         # Log reminders at different thresholds
         for days in [30, 10, 3, 1]:
             log_notification(
-                test_db, deadline.id, "user1", NotificationChannel.SMS,
+                test_db, deadline.id, 1, NotificationChannel.SMS,
                 "+91-9876543210", days, NotificationStatus.SENT,
             )
 

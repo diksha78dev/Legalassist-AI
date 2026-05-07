@@ -53,7 +53,7 @@ class CaseDeadline(Base):
     __tablename__ = "case_deadlines"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(String, index=True, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
     case_id = Column(Integer, ForeignKey("cases.id"), nullable=False, index=True)
     case_title = Column(String, nullable=False)
     deadline_date = Column(DateTime, nullable=False, index=True)
@@ -110,7 +110,7 @@ class NotificationLog(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     deadline_id = Column(Integer, ForeignKey("case_deadlines.id"), nullable=False, index=True)
-    user_id = Column(String, nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     channel = Column(SQLEnum(NotificationChannel), nullable=False)
     status = Column(SQLEnum(NotificationStatus), default=NotificationStatus.PENDING, index=True)
     recipient = Column(String, nullable=False)  # phone or email
@@ -211,7 +211,7 @@ class UserFeedback(Base):
     __tablename__ = "user_feedback"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(String, nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     case_id = Column(Integer, ForeignKey("case_records.id"), nullable=True)
 
     # Feedback fields
@@ -402,7 +402,7 @@ def get_db():
 
 def create_or_update_user_preference(
     db: Session,
-    user_id: str,
+    user_id: int,
     email: str,
     phone_number: Optional[str] = None,
     notification_channel: NotificationChannel = NotificationChannel.BOTH,
@@ -434,7 +434,7 @@ def create_or_update_user_preference(
 
 def create_case_deadline(
     db: Session,
-    user_id: str,
+    user_id: int,
     case_id: int,
     case_title: str,
     deadline_date: dt.datetime,
@@ -473,7 +473,7 @@ def get_upcoming_deadlines(db: Session, days_before: int = 30) -> List[CaseDeadl
     ).all()
 
 
-def get_user_deadlines(db: Session, user_id: str) -> List[CaseDeadline]:
+def get_user_deadlines(db: Session, user_id: int) -> List[CaseDeadline]:
     """Get all active deadlines for a user"""
     now = dt.datetime.now(dt.timezone.utc)
     return db.query(CaseDeadline).filter(
@@ -501,7 +501,7 @@ def has_notification_been_sent(
 def log_notification(
     db: Session,
     deadline_id: int,
-    user_id: str,
+    user_id: int,
     channel: NotificationChannel,
     recipient: str,
     days_before: int,
@@ -527,7 +527,7 @@ def log_notification(
     return log
 
 
-def get_notification_history(db: Session, user_id: str, limit: int = 50) -> List[NotificationLog]:
+def get_notification_history(db: Session, user_id: int, limit: int = 50) -> List[NotificationLog]:
     """Get notification history for a user"""
     return db.query(NotificationLog).filter(
         NotificationLog.user_id == user_id
@@ -639,7 +639,7 @@ def get_cases_by_criteria(
 
 def submit_user_feedback(
     db: Session,
-    user_id: str,
+    user_id: int,
     did_appeal: Optional[bool] = None,
     appeal_outcome: Optional[str] = None,
     appeal_cost: Optional[int] = None,
@@ -667,7 +667,7 @@ def submit_user_feedback(
     return feedback
 
 
-def get_user_feedback(db: Session, user_id: str, limit: int = 50) -> List[UserFeedback]:
+def get_user_feedback(db: Session, user_id: int, limit: int = 50) -> List[UserFeedback]:
     """Get feedback submitted by a user"""
     return db.query(UserFeedback).filter(
         UserFeedback.user_id == user_id
@@ -975,7 +975,7 @@ def get_user_stats(db: Session, user_id: int) -> dict:
     # Get upcoming deadlines
     now = dt.datetime.now(dt.timezone.utc)
     upcoming_deadlines = db.query(CaseDeadline).filter(
-        CaseDeadline.user_id == str(user_id),
+        CaseDeadline.user_id == user_id,
         CaseDeadline.is_completed == False,
         CaseDeadline.deadline_date > now,
     ).count()

@@ -40,11 +40,11 @@ TIMEZONES = [
 ]
 
 
-def get_user_id() -> str:
+def get_user_id() -> int:
     """Get user ID from session state (implement auth as needed)"""
     if "user_id" not in st.session_state:
-        st.session_state.user_id = st.secrets.get("TEST_USER_ID", "user_default")
-    return st.session_state.user_id
+        st.session_state.user_id = int(st.secrets.get("TEST_USER_ID", 1))
+    return int(st.session_state.user_id)
 
 
 def page_notification_preferences():
