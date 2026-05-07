@@ -40,10 +40,12 @@ TIMEZONES = [
 
 
 def get_user_id() -> int:
-    """Get user ID from session state (implement auth as needed)"""
-    if "user_id" not in st.session_state:
-        st.session_state.user_id = int(st.secrets.get("TEST_USER_ID", 1))
-    return int(st.session_state.user_id)
+    """Get authenticated user ID from session state"""
+    user_id = st.session_state.get("user_id")
+    if not user_id:
+        st.error("Authentication required. Please log in.")
+        st.stop()
+    return int(user_id)
 
 
 def page_notification_preferences():
