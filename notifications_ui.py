@@ -373,7 +373,8 @@ def page_notification_history():
                 col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
 
                 with col1:
-                    st.text(f"Case: {notif.deadline.case_title}")
+                    case_title = notif.deadline.case_title if notif.deadline else "Deleted Case/Deadline"
+                    st.text(f"Case: {case_title}")
                     st.caption(notif.recipient)
 
                 with col2:
