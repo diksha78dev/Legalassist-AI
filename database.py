@@ -923,11 +923,11 @@ def update_case_document(
     """Update case document"""
     doc = db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
     if doc:
-        if document_content:
+        if document_content is not None:
             doc.document_content = document_content
-        if summary:
+        if summary is not None:
             doc.summary = summary
-        if remedies:
+        if remedies is not None:
             doc.remedies = remedies
         db.commit()
         db.refresh(doc)
