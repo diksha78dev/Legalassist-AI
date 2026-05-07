@@ -338,6 +338,13 @@ def _auto_create_deadlines_from_remedies(
             match = re.search(r'\d+', str(appeal_days))
             if match:
                 days = int(match.group())
+                
+                # Sanity check: ensure days is within reasonable range (1 day to 1 year)
+                # This prevents absurd deadlines from model hallucinations
+                if not (1 <= days <= 365):
+                    logger.warning(f"Extracted absurd appeal_days ({days}) for case {case_id}. Skipping auto-deadline creation.")
+                    return
+
                 deadline_date = datetime.now(timezone.utc) + timedelta(days=days)
                 
                 # Normalize to naive for database comparison (matches schema)
