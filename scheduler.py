@@ -51,10 +51,12 @@ def is_reminder_time_for_user(user_timezone: str, reminder_hour: int = 8) -> boo
         True if current time in user's timezone is within the reminder hour
     """
     try:
+        if not user_timezone or not isinstance(user_timezone, str):
+            raise ValueError("Invalid timezone type")
         tz = pytz.timezone(user_timezone)
         user_now = datetime.now(tz)
         return user_now.hour == reminder_hour
-    except pytz.exceptions.UnknownTimeZoneError:
+    except (pytz.exceptions.UnknownTimeZoneError, ValueError, AttributeError):
         logger.warning(f"Invalid timezone '{user_timezone}', falling back to UTC")
         # Fallback to UTC if timezone is invalid
         user_now = datetime.now(timezone.utc)
@@ -64,14 +66,13 @@ def is_reminder_time_for_user(user_timezone: str, reminder_hour: int = 8) -> boo
 def check_and_send_reminders():
     """
     Hourly job: Check all upcoming deadlines and send reminders at 8 AM in each user's local timezone.
-    This runs every hour and evaluates 8 AM per user based on their saved timezone preference.
+    This runs every hour and evaluates if it's 8 AM for each user based on their saved timezone preference.
     """
     logger.info("=" * 60)
     logger.info("Starting deadline reminder check job")
     logger.info(f"Check time: {datetime.now(timezone.utc)} UTC")
 
     # Ensure tables exist when running from a fresh DB.
-    from database import init_db
     init_db()
 
     db = SessionLocal()
@@ -148,14 +149,16 @@ def setup_scheduler(scheduler_class):
     is_background = (scheduler_class == BackgroundScheduler)
     scheduler = scheduler_class(daemon=is_background)
     
-    # Schedule daily job at 8 AM UTC
+    # Schedule hourly job to check for 8 AM in all user timezones
     scheduler.add_job(
         check_and_send_reminders,
-        trigger=CronTrigger(hour=8, minute=0, second=0),  # 8 AM UTC daily
+        trigger=CronTrigger(minute=0, second=0),  # Run at the start of every hour
         id="deadline_reminder_job",
-        name="Daily Deadline Reminder Check",
+        name="Hourly Deadline Reminder Check",
         replace_existing=True,
         misfire_grace_time=300,  # 5 minute grace for misfires
+        max_instances=1,
+        coalesce=True,
     )
     
     return scheduler
@@ -232,7 +235,7 @@ def run_worker():
         except ValueError:
             logger.warning("Could not register signal handlers (not in main thread?)")
     
-    logger.info("Worker initialized. Job scheduled for 08:00 UTC daily.")
+    logger.info("Worker initialized. Job scheduled to run every hour.")
     logger.info("Press Ctrl+C to exit.")
     
     try:
