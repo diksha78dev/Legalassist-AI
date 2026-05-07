@@ -55,7 +55,7 @@ class TestDatabaseExtended:
     def test_repr_methods(self, test_db):
         """Test __repr__ methods of all models for coverage"""
         # CaseRecord
-        record = CaseRecord(case_id="C1", case_type="civil", jurisdiction="Delhi", outcome="won")
+        record = CaseRecord(hashed_case_id="C1", case_type="civil", jurisdiction="Delhi", outcome="won")
         assert "CaseRecord" in repr(record)
         
         # CaseOutcome
@@ -84,7 +84,7 @@ class TestDatabaseExtended:
             test_db, "C1", "civil", "Delhi", 
             court_name="High Court", outcome="plaintiff_won"
         )
-        assert record.case_id == "C1"
+        assert record.hashed_case_id == "C1"
         
         retrieved = get_case_record(test_db, "C1")
         assert retrieved.id == record.id

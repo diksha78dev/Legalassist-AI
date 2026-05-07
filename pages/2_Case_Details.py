@@ -9,6 +9,7 @@ from typing import Optional, Dict, Any
 
 from auth import require_auth, redirect_to_login, get_current_user_id
 from case_manager import get_case_detail, upload_case_document, mark_deadline_completed, mark_deadline_incomplete, add_manual_deadline, mark_case_appealed, mark_case_closed, mark_case_active, generate_case_summary_text
+from core import extract_text_from_pdf
 from database import DocumentType, CaseStatus
 
 # Page config
@@ -121,18 +122,8 @@ def render_documents_section(case_id: int, documents: list, user_id: int):
             uploaded_pdf = st.file_uploader("Upload Judgment PDF", type=["pdf"])
             document_text = None
             if uploaded_pdf:
-                from pypdf import PdfReader
                 try:
-                    reader = PdfReader(uploaded_pdf)
-                    text = ""
-                    for page in reader.pages:
-                        page_text = page.extract_text()
-                        if page_text:
-                            text += page_text + "\n"
-                    if text.strip():
-                        document_text = text
-                    else:
-                        st.error("No extractable text found in PDF.")
+                    document_text = extract_text_from_pdf(uploaded_pdf, enable_ocr=True)
                 except Exception as e:
                     st.error(f"Error reading PDF: {str(e)}")
 

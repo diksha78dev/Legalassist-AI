@@ -472,7 +472,7 @@ class TestScheduler:
         
         # Create user preference
         create_or_update_user_preference(
-            test_db, "user1", "user@example.com",
+            test_db, 1, "user@example.com",
             phone_number="+91-9876543210",
         )
 
@@ -520,7 +520,7 @@ class TestIntegration:
 
         # 2. Create user preference
         pref = create_or_update_user_preference(
-            test_db, "user1", "user@example.com",
+            test_db, 1, "user@example.com",
             phone_number="+91-9876543210",
             notification_channel=NotificationChannel.BOTH,
             timezone="Asia/Kolkata",
@@ -556,8 +556,9 @@ class TestIntegration:
         ]
 
         for tz in timezones_to_test:
+            user_id = 1000 + timezones_to_test.index(tz)
             pref = create_or_update_user_preference(
-                test_db, f"user_{tz}", f"user_{tz}@example.com",
+                test_db, user_id, f"user_{user_id}@example.com",
                 timezone=tz,
             )
             assert pref.timezone == tz
@@ -570,14 +571,14 @@ class TestIntegration:
             now + timedelta(days=30), "appeal",
         )
         pref = create_or_update_user_preference(
-            test_db, "user1", "user@example.com",
+            test_db, 1, "user@example.com",
             phone_number="+91-9876543210",
         )
 
         # Log reminders at different thresholds
         for days in [30, 10, 3, 1]:
             log_notification(
-                test_db, deadline.id, "user1", NotificationChannel.SMS,
+                test_db, deadline.id, 1, NotificationChannel.SMS,
                 "+91-9876543210", days, NotificationStatus.SENT,
             )
 
