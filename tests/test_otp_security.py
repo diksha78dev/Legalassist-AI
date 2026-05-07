@@ -14,25 +14,33 @@ os.environ["OTP_EXPIRY_MINUTES"] = "10"
 os.environ["OTP_MAX_FAILED_ATTEMPTS"] = "5"
 os.environ["OTP_LOCKOUT_MINUTES"] = "15"
 
-from database import SessionLocal, OTPVerification, init_db, Base, engine
+from database import OTPVerification, init_db, Base
+import database
 import auth
 from auth import verify_otp_and_create_token, _hash_otp, _verify_otp_hash
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+test_engine = create_engine("sqlite:///:memory:")
+TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope="function", autouse=True)
 def setup_test_db():
     """Setup and cleanup test database for each test"""
     # Create all tables
-    Base.metadata.create_all(bind=engine)
-    yield
+    Base.metadata.create_all(bind=test_engine)
+    with patch("database.SessionLocal", TestingSessionLocal), \
+         patch("auth.SessionLocal", TestingSessionLocal):
+        yield
     # Drop all tables after test
-    Base.metadata.drop_all(bind=engine)
+    Base.metadata.drop_all(bind=test_engine)
 
 
 @pytest.fixture
-def db_session(setup_test_db):
+def db_session():
     """Get a database session for testing"""
-    db = SessionLocal()
+    db = TestingSessionLocal()
     yield db
     db.close()
 
@@ -157,7 +165,7 @@ class TestOTPBruteForceProtection:
 
         # Verify failed attempt was recorded in database
         # Need to create a fresh session to see the changes from verify_otp_and_create_token
-        fresh_db = SessionLocal()
+        fresh_db = TestingSessionLocal()
         try:
             otp_record = fresh_db.query(OTPVerification).filter(
                 OTPVerification.email == email,

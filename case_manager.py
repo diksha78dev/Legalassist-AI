@@ -3,6 +3,7 @@ Case Management Service for LegalAssist AI.
 CRUD operations for cases, documents, and timeline events.
 """
 
+import re
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
 import logging
@@ -334,26 +335,28 @@ def _auto_create_deadlines_from_remedies(
         appeal_days = remedies.get("appeal_days")
         if appeal_days:
             # Extract number from string like "30 days"
-            import re
             match = re.search(r'\d+', str(appeal_days))
             if match:
                 days = int(match.group())
                 deadline_date = datetime.now(timezone.utc) + timedelta(days=days)
-
+                
+                # Normalize to naive for database comparison (matches schema)
+                naive_deadline = deadline_date.replace(tzinfo=None)
                 # Check for existing pending deadline of same type/date (±1 day tolerance)
                 existing_deadline = db.query(CaseDeadline).filter(
                     CaseDeadline.case_id == case_id,
                     CaseDeadline.deadline_type == "appeal",
                     CaseDeadline.is_completed == False,
-                    CaseDeadline.deadline_date >= deadline_date - timedelta(days=1),
-                    CaseDeadline.deadline_date <= deadline_date + timedelta(days=1)
+                    CaseDeadline.deadline_date >= naive_deadline - timedelta(days=1),
+                    CaseDeadline.deadline_date <= naive_deadline + timedelta(days=1)
                 ).first()
 
                 if existing_deadline:
                     logger.info(f"Skipped duplicate appeal deadline for case {case_id} (existing: {existing_deadline.id})")
                 else:
+                    # Create new deadline
                     deadline = CaseDeadline(
-                        user_id=str(user_id),
+                        user_id=user_id,
                         case_id=case_id,
                         case_title=case_title,
                         deadline_date=deadline_date,
@@ -361,18 +364,19 @@ def _auto_create_deadlines_from_remedies(
                         description=f"Appeal deadline - {remedies.get('appeal_court', 'Unknown court')}",
                     )
                     db.add(deadline)
-                db.flush()  # Flush to generate deadline.id before using it
+                    db.flush()  # Flush to generate deadline.id before using it
 
-                # Create timeline event
-                create_timeline_event(
-                    db=db,
-                    case_id=case_id,
-                    event_type="deadline_created",
-                    description=f"Appeal deadline set for {deadline_date.strftime('%d %B %Y')}",
-                    metadata={"deadline_id": deadline.id, "document_id": document_id},
-                )
+                    # Create timeline event
+                    create_timeline_event(
+                        db=db,
+                        case_id=case_id,
+                        event_type="deadline_created",
+                        description=f"Appeal deadline set for {deadline_date.strftime('%d %B %Y')}",
+                        metadata={"deadline_id": deadline.id, "document_id": document_id},
+                    )
 
-                logger.info(f"Auto-created appeal deadline for case {case_id}: {deadline_date}")
+                    logger.info(f"Auto-created appeal deadline for case {case_id}: {deadline_date}")
+                    db.commit()
 
         db.commit()
 
@@ -425,7 +429,7 @@ def mark_deadline_completed(user_id: int, deadline_id: int) -> bool:
     try:
         deadline = db.query(CaseDeadline).filter(
             CaseDeadline.id == deadline_id,
-            CaseDeadline.user_id == str(user_id),
+            CaseDeadline.user_id == user_id,
         ).first()
 
         if not deadline:
@@ -460,7 +464,7 @@ def mark_deadline_incomplete(user_id: int, deadline_id: int) -> bool:
     try:
         deadline = db.query(CaseDeadline).filter(
             CaseDeadline.id == deadline_id,
-            CaseDeadline.user_id == str(user_id),
+            CaseDeadline.user_id == user_id,
         ).first()
 
         if not deadline:
@@ -497,7 +501,7 @@ def add_manual_deadline(
             return None
 
         deadline = CaseDeadline(
-            user_id=str(user_id),
+            user_id=user_id,
             case_id=case_id,
             case_title=case_title,
             deadline_date=deadline_date,

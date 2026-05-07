@@ -65,7 +65,7 @@ def db_init():
 
 
 @cli.command()
-@click.option("--user-id", required=True, type=int, help="Numeric user ID")
+@click.option("--user-id", required=True, type=int, help="User ID")
 @click.option("--email", required=True, help="Email address")
 @click.option("--phone", required=False, help="Phone number (with country code)")
 @click.option("--timezone", default="UTC", help="Timezone (e.g., Asia/Kolkata)")
@@ -104,7 +104,7 @@ def setup_preferences(user_id: int, email: str, phone: Optional[str], timezone: 
 # ==================== Deadline Commands ====================
 
 @cli.command()
-@click.option("--user-id", required=True, type=int, help="Numeric user ID")
+@click.option("--user-id", required=True, type=int, help="User ID")
 @click.option("--case-id", required=True, type=int, help="Numeric case ID (cases.id)")
 @click.option("--case-title", required=True, help="Case title")
 @click.option("--days", type=int, default=30, help="Days until deadline (default 30)")
@@ -140,7 +140,7 @@ def add_deadline(user_id: int, case_id: int, case_title: str, days: int, type: s
 
 
 @cli.command()
-@click.option("--user-id", required=True, type=int, help="Numeric user ID")
+@click.option("--user-id", required=True, type=int, help="User ID")
 def list_deadlines(user_id: int):
     """List all deadlines for a user"""
     db = SessionLocal()
