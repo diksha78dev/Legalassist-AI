@@ -5,7 +5,6 @@ Integrate these into the main app.py or use as a separate page.
 
 import streamlit as st
 from datetime import datetime, timezone, timedelta
-import pytz
 from typing import Optional
 
 from database import (
@@ -40,13 +39,13 @@ TIMEZONES = [
 ]
 
 
-def get_user_id() -> str:
+def get_user_id() -> int:
     """Get authenticated user ID from session state"""
     user_id = st.session_state.get("user_id")
     if not user_id:
         st.error("Authentication required. Please log in.")
         st.stop()
-    return user_id
+    return int(user_id)
 
 
 def page_notification_preferences():

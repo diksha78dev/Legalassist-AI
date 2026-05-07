@@ -77,7 +77,7 @@ def generate_sample_cases(num_cases=200):
             
             case = create_case_record(
                 db,
-                case_id=case_id,
+                hashed_case_id=case_id,
                 case_type=case_type,
                 jurisdiction=jurisdiction,
                 court_name=court_name,
@@ -112,7 +112,7 @@ def generate_sample_cases(num_cases=200):
                 
                 update_case_outcome(
                     db,
-                    case_id=case_id,
+                    hashed_case_id=case_id,
                     appeal_filed=appeal_filed,
                     appeal_date=datetime.now(timezone.utc) - timedelta(days=random.randint(100, 800)),
                     appeal_outcome=appeal_outcome,
