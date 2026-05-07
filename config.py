@@ -81,28 +81,37 @@ class Config:
     
     @classmethod
     def get_jwt_secret(cls):
-        """Deterministically resolve JWT secret."""
+        """
+        Resolve JWT secret securely.
+        
+        Order of precedence:
+        1. Environment variable or Streamlit secret 'JWT_SECRET'
+        2. File-based secret in '.jwt_secret' (legacy/local development)
+        
+        NOTE: Automatic generation and writing of .jwt_secret has been disabled 
+        for security in all environments.
+        """
         secret = str(_get_val("JWT_SECRET", "")).strip()
         if secret:
             return secret
             
         secret_file = PROJECT_ROOT / ".jwt_secret"
         if secret_file.exists():
-            file_secret = secret_file.read_text(encoding="utf-8").strip()
-            if file_secret:
-                return file_secret
-                
-        # Only auto-generate in non-production
-        if cls.APP_ENV in ("dev", "development", "local") or cls.DEBUG:
-            generated = secrets.token_urlsafe(32)
             try:
-                secret_file.write_text(generated, encoding="utf-8")
-                return generated
+                file_secret = secret_file.read_text(encoding="utf-8").strip()
+                if file_secret:
+                    return file_secret
             except Exception as e:
-                logger.warning(f"Failed to persist generated secret: {e}")
-                return generated
+                logger.warning(f"Failed to read .jwt_secret file: {e}")
         
-        raise RuntimeError("JWT_SECRET must be set in production environments.")
+        # We no longer auto-generate secrets to prevent insecure fallback.
+        # This forces explicit configuration which is a security best practice.
+        env_name = cls.APP_ENV.upper()
+        raise RuntimeError(
+            f"JWT_SECRET is not configured for the {env_name} environment. "
+            "For security, secrets must be explicitly provided via the 'JWT_SECRET' "
+            "environment variable or a manually created '.jwt_secret' file in the root."
+        )
 
     # --- Notification Settings (SMS) ---
     TWILIO_ACCOUNT_SID = _get_val("TWILIO_ACCOUNT_SID", "")
