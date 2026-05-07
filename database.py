@@ -284,6 +284,19 @@ class OTPVerification(Base):
         return now < locked_until
 
 
+class RevokedToken(Base):
+    """Model for storing revoked JWT tokens (logout blacklist)"""
+    __tablename__ = "revoked_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    jti = Column(String, unique=True, nullable=False, index=True)  # JWT ID
+    revoked_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)  # When the token would naturally expire
+
+    def __repr__(self):
+        return f"<RevokedToken(jti={self.jti})>"
+
+
 class CaseStatus(str, enum.Enum):
     """Status of a case"""
     ACTIVE = "active"
@@ -798,6 +811,30 @@ def cleanup_expired_otps(db: Session) -> int:
     now = dt.datetime.now(dt.timezone.utc)
     deleted = db.query(OTPVerification).filter(
         OTPVerification.expires_at < now
+    ).delete()
+    db.commit()
+    return deleted
+
+
+def revoke_token(db: Session, jti: str, expires_at: dt.datetime) -> RevokedToken:
+    """Add a token JTI to the revoked list"""
+    token = RevokedToken(jti=jti, expires_at=expires_at)
+    db.add(token)
+    db.commit()
+    db.refresh(token)
+    return token
+
+
+def is_token_revoked(db: Session, jti: str) -> bool:
+    """Check if a token has been revoked"""
+    return db.query(RevokedToken).filter(RevokedToken.jti == jti).first() is not None
+
+
+def cleanup_expired_revoked_tokens(db: Session) -> int:
+    """Delete revoked tokens that have naturally expired"""
+    now = dt.datetime.now(dt.timezone.utc)
+    deleted = db.query(RevokedToken).filter(
+        RevokedToken.expires_at < now
     ).delete()
     db.commit()
     return deleted

@@ -13,6 +13,7 @@ from typing import Optional, Tuple
 import logging
 from config import Config
 
+import uuid
 import jwt
 import sendgrid
 from sendgrid.helpers.mail import Mail
@@ -28,6 +29,9 @@ from database import (
     update_user_last_login,
     record_otp_failed_attempt,
     reset_otp_failed_attempts,
+    revoke_token,
+    is_token_revoked,
+    cleanup_expired_revoked_tokens,
     User,
     OTPVerification,  # Added to fix NameError in request_otp rate limiting
 )
@@ -344,7 +348,11 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
 
 def create_jwt_token(user_id: int, email: str) -> str:
     """Create JWT token for authenticated user"""
+    # Generate a unique JWT ID to allow for future token revocation
+    jti = str(uuid.uuid4())
+    
     payload = {
+        "jti": jti,
         "user_id": user_id,
         "email": email,
         "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRY_HOURS),
@@ -357,10 +365,42 @@ def create_jwt_token(user_id: int, email: str) -> str:
 def verify_jwt_token(token: str) -> Optional[dict]:
     """
     Verify JWT token and return payload.
-    Returns None if token is invalid or expired.
+    Returns None if token is invalid, expired, incorrectly purposed,
+    revoked (logged out), or if the user has been removed.
     """
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        
+        # 1. Verify token purpose
+        # We explicitly set type="access" during token creation to prevent
+        # other types of tokens (e.g., password reset, email verification)
+        # from being used to gain system access.
+        if payload.get("type") != "access":
+            logger.warning(f"Invalid token type provided: {payload.get('type')}")
+            return None
+            
+        jti = payload.get("jti")
+        email = payload.get("email")
+        if not email or not jti:
+            logger.warning("Token payload missing required 'email' or 'jti' claim")
+            return None
+            
+        # 2. Database verifications (Revocation and User Existence)
+        db = SessionLocal()
+        try:
+            # Check if token has been revoked (e.g. via logout)
+            if is_token_revoked(db, jti):
+                logger.warning(f"Attempted to use revoked token jti={jti} for user {email}")
+                return None
+                
+            # Check the database to guarantee the user hasn't been deleted or suspended.
+            user = get_user_by_email(db, email)
+            if not user:
+                logger.warning(f"Token verification failed: User {email} no longer exists in DB")
+                return None
+        finally:
+            db.close()
+            
         return payload
     except jwt.ExpiredSignatureError:
         logger.warning("JWT token expired")
@@ -368,6 +408,40 @@ def verify_jwt_token(token: str) -> Optional[dict]:
     except jwt.InvalidTokenError as e:
         logger.warning(f"Invalid JWT token: {str(e)}")
         return None
+
+
+def revoke_jwt_token(token: str) -> bool:
+    """
+    Revokes a JWT token so it can no longer be used.
+    Used during logout to immediately invalidate the session.
+    """
+    if not token:
+        return False
+        
+    try:
+        # We don't need to verify expiration here, just decode it.
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM], options={"verify_exp": False})
+        jti = payload.get("jti")
+        exp = payload.get("exp")
+        
+        if not jti or not exp:
+            return False
+            
+        expires_at = datetime.fromtimestamp(exp, tz=timezone.utc)
+        
+        db = SessionLocal()
+        try:
+            # Avoid duplicate revocation
+            if not is_token_revoked(db, jti):
+                revoke_token(db, jti, expires_at)
+                logger.info(f"Token jti={jti} successfully revoked")
+            return True
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Error revoking token: {str(e)}")
+        return False
 
 
 def get_current_user_from_token(token: str) -> Optional[User]:
@@ -386,14 +460,16 @@ def get_current_user_from_token(token: str) -> Optional[User]:
 
 def cleanup_old_data() -> int:
     """
-    Cleanup expired OTPs and old data.
+    Cleanup expired OTPs and expired revoked tokens.
     Returns count of cleaned up records.
     """
     db = SessionLocal()
     try:
-        deleted = cleanup_expired_otps(db)
-        logger.info(f"Cleaned up {deleted} expired OTPs")
-        return deleted
+        deleted_otps = cleanup_expired_otps(db)
+        deleted_tokens = cleanup_expired_revoked_tokens(db)
+        total_deleted = deleted_otps + deleted_tokens
+        logger.info(f"Cleaned up {deleted_otps} expired OTPs and {deleted_tokens} expired revoked tokens")
+        return total_deleted
     except Exception as e:
         logger.error(f"Error during cleanup: {str(e)}")
         return 0
@@ -469,10 +545,16 @@ def verify_login(otp: str) -> bool:
 
 
 def logout_user():
-    """Logout current user"""
+    """Logout current user and revoke their token"""
     import streamlit as st
 
     init_auth_session()
+    
+    # Revoke the token if it exists
+    token = st.session_state.get("user_token")
+    if token:
+        revoke_jwt_token(token)
+        
     st.session_state.user_token = None
     st.session_state.user_email = None
     st.session_state.user_id = None
