@@ -12,6 +12,7 @@ from case_manager import get_case_detail, upload_case_document, mark_deadline_co
 from core import extract_text_from_pdf
 from database import DocumentType, CaseStatus, SessionLocal, UserPreference
 import pytz
+import html
 
 # Page config
 st.set_page_config(
@@ -59,7 +60,8 @@ def render_timeline_section(timeline: list):
                 <div class="timeline-item">
                     <div class="timeline-date">{date_str}</div>
                     <div>{icon} <strong>{event["event_type"].replace("_", " ").title()}</strong></div>
-                    <div style="margin-top: 8px;">{event["description"]}</div>
+                    <div style="margin-top: 8px;">{html.escape(str(event.get("description", "")))}</div>
+
                 </div>
                 """,
                 unsafe_allow_html=True,
