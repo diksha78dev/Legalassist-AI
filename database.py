@@ -456,11 +456,21 @@ def create_case_deadline(
     deadline_type: str,
     description: Optional[str] = None,
 ) -> CaseDeadline:
-    """Create a new case deadline"""
+    """Create a new case deadline.
+
+    Security: enforce that `case_id` belongs to `user_id` (server-side ownership validation).
+    """
     try:
         normalized_case_id = int(case_id)
     except (TypeError, ValueError) as exc:
         raise ValueError("case_id must be an integer matching cases.id") from exc
+
+    # Ownership validation (prevents creating deadlines for other users' cases)
+    case = db.query(Case).filter(Case.id == normalized_case_id).first()
+    if not case or case.user_id != user_id:
+        raise PermissionError(
+            "case_id not found or not owned by the provided user_id"
+        )
 
     deadline = CaseDeadline(
         user_id=user_id,
@@ -474,6 +484,7 @@ def create_case_deadline(
     db.commit()
     db.refresh(deadline)
     return deadline
+
 
 
 def get_upcoming_deadlines(db: Session, days_before: int = 30) -> List[CaseDeadline]:
