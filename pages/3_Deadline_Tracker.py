@@ -28,7 +28,7 @@ def get_all_user_deadlines(user_id: int) -> List[Dict[str, Any]]:
     db = SessionLocal()
     try:
         deadlines = db.query(CaseDeadline).filter(
-            CaseDeadline.user_id == str(user_id)
+            CaseDeadline.user_id == user_id
         ).order_by(CaseDeadline.deadline_date).all()
 
         result = []
@@ -335,7 +335,7 @@ def main():
     if not deadlines:
         st.info("📭 No deadlines yet. Deadlines are created when you upload documents with remedies advice.")
         if st.button("📤 Upload a Judgment"):
-            st.switch_page("app.py")
+            st.switch_page("pages/0_Home.py")
         return
 
     # Render summary cards

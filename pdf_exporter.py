@@ -474,7 +474,7 @@ def generate_case_pdf(user_id: int, case_id: int) -> Optional[bytes]:
     finally:
         db.close()
 
-def generate_anonymized_pdf(case_id: int, anon_id: str) -> Optional[bytes]:
+def generate_anonymized_pdf(case_id: int, anon_id: str, user_id: int) -> Optional[bytes]:
     """
     Generate an anonymized PDF for external legal review.
     Strips all personal identifiers to maintain privacy.

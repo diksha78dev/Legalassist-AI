@@ -17,14 +17,15 @@ from sqlalchemy import (
     ForeignKey,
     Enum as SQLEnum,
     JSON,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
 import enum
-import os
 from contextlib import contextmanager
+from config import Config
 
 # Database setup
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./legalassist.db")
+DATABASE_URL = Config.DATABASE_URL
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, expire_on_commit=False, bind=engine)
 Base = declarative_base()
@@ -52,15 +53,15 @@ class CaseDeadline(Base):
     """Model for case deadlines"""
     __tablename__ = "case_deadlines"
 
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
-    case_id = Column(Integer, ForeignKey("cases.id"), nullable=False, index=True)
-    case_title = Column(String, nullable=False)
-    deadline_date = Column(DateTime, nullable=False, index=True)
-    deadline_type = Column(String, nullable=False)  # appeal, filing, submission, etc.
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    case_title = Column(String(255), nullable=False)
+    deadline_date = Column(DateTime(timezone=True), nullable=False, index=True)
+    deadline_type = Column(String(255), nullable=False)  # appeal, filing, submission, etc.
     description = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
-    updated_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
     is_completed = Column(Boolean, default=False, index=True)
 
     # Relationships
@@ -84,18 +85,18 @@ class UserPreference(Base):
     """Model for user notification preferences"""
     __tablename__ = "user_preferences"
 
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False, index=True)
-    phone_number = Column(String, nullable=True)
-    email = Column(String, nullable=False)
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
+    phone_number = Column(String(255), nullable=True)
+    email = Column(String(255), nullable=False)
     notification_channel = Column(SQLEnum(NotificationChannel), default=NotificationChannel.BOTH)
-    timezone = Column(String, default="UTC")  # e.g., "Asia/Kolkata", "America/New_York"
+    timezone = Column(String(255), default="UTC")  # e.g., "Asia/Kolkata", "America/New_York"
     notify_30_days = Column(Boolean, default=True)
     notify_10_days = Column(Boolean, default=True)
     notify_3_days = Column(Boolean, default=True)
     notify_1_day = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc))
-    updated_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
 
     # Relationships
     user = relationship("User", back_populates="preferences")
@@ -108,18 +109,18 @@ class NotificationLog(Base):
     """Model for tracking sent notifications"""
     __tablename__ = "notification_logs"
 
-    id = Column(Integer, primary_key=True, index=True)
-    deadline_id = Column(Integer, ForeignKey("case_deadlines.id"), nullable=False, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    id = Column(Integer, primary_key=True)
+    deadline_id = Column(Integer, ForeignKey("case_deadlines.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     channel = Column(SQLEnum(NotificationChannel), nullable=False)
     status = Column(SQLEnum(NotificationStatus), default=NotificationStatus.PENDING, index=True)
-    recipient = Column(String, nullable=False)  # phone or email
+    recipient = Column(String(255), nullable=False)  # phone or email
     days_before = Column(Integer, nullable=False)  # 30, 10, 3, or 1 day reminder
-    message_id = Column(String, nullable=True)  # From Twilio or SendGrid
+    message_id = Column(String(255), nullable=True)  # From Twilio or SendGrid
     error_message = Column(Text, nullable=True)
-    sent_at = Column(DateTime, nullable=True)
-    delivered_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    sent_at = Column(DateTime(timezone=True), nullable=True)
+    delivered_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
 
     # Relationships
     deadline = relationship("CaseDeadline", back_populates="notifications")
@@ -132,19 +133,19 @@ class CaseRecord(Base):
     """Model for tracking individual case records (anonymized)"""
     __tablename__ = "case_records"
 
-    id = Column(Integer, primary_key=True, index=True)
-    case_id = Column(String, unique=True, nullable=False, index=True)  # Hashed ID for privacy
-    case_type = Column(String, nullable=False, index=True)  # civil, criminal, family, etc.
-    jurisdiction = Column(String, nullable=False, index=True)  # Delhi, Maharashtra, etc.
-    court_name = Column(String, nullable=True, index=True)  # District court, High court, etc.
-    judge_name = Column(String, nullable=True, index=True)  # Anonymized judge reference
-    plaintiff_type = Column(String, nullable=True)  # individual, organization, government
-    defendant_type = Column(String, nullable=True)
-    case_value = Column(String, nullable=True)  # value range: <1L, 1-5L, 5-10L, >10L
-    outcome = Column(String, nullable=False, index=True)  # plaintiff_won, defendant_won, settlement, dismissal
+    id = Column(Integer, primary_key=True)
+    hashed_case_id = Column(String(255), unique=True, nullable=False, index=True)  # Hashed ID for privacy
+    case_type = Column(String(255), nullable=False, index=True)  # civil, criminal, family, etc.
+    jurisdiction = Column(String(255), nullable=False, index=True)  # Delhi, Maharashtra, etc.
+    court_name = Column(String(255), nullable=True, index=True)  # District court, High court, etc.
+    judge_name = Column(String(255), nullable=True, index=True)  # Anonymized judge reference
+    plaintiff_type = Column(String(255), nullable=True)  # individual, organization, government
+    defendant_type = Column(String(255), nullable=True)
+    case_value = Column(String(255), nullable=True)  # value range: <1L, 1-5L, 5-10L, >10L
+    outcome = Column(String(255), nullable=False, index=True)  # plaintiff_won, defendant_won, settlement, dismissal
     judgment_summary = Column(Text, nullable=True)  # Brief summary of judgment
-    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
-    updated_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
 
     # Relationships
     outcome_data = relationship("CaseOutcome", back_populates="case_record", uselist=False, cascade="all, delete-orphan")
@@ -157,17 +158,17 @@ class CaseOutcome(Base):
     """Model for tracking appeal outcomes and follow-ups"""
     __tablename__ = "case_outcomes"
 
-    id = Column(Integer, primary_key=True, index=True)
-    case_id = Column(Integer, ForeignKey("case_records.id"), nullable=False, unique=True, index=True)
+    id = Column(Integer, primary_key=True)
+    case_id = Column(Integer, ForeignKey("case_records.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
     appeal_filed = Column(Boolean, default=False, nullable=False)
-    appeal_date = Column(DateTime, nullable=True)
-    appeal_outcome = Column(String, nullable=True)  # appeal_allowed, appeal_rejected, withdrawn, pending
+    appeal_date = Column(DateTime(timezone=True), nullable=True)
+    appeal_outcome = Column(String(255), nullable=True)  # appeal_allowed, appeal_rejected, withdrawn, pending
     appeal_success = Column(Boolean, nullable=True)  # True = won, False = lost, None = pending
     time_to_appeal_verdict = Column(Integer, nullable=True)  # days
-    appeal_cost = Column(String, nullable=True)  # estimated cost range
+    appeal_cost = Column(String(255), nullable=True)  # estimated cost range
     additional_notes = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
-    updated_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
 
     # Relationships
     case_record = relationship("CaseRecord", back_populates="outcome_data")
@@ -180,11 +181,11 @@ class CaseAnalytics(Base):
     """Model for aggregated analytics (refreshed periodically)"""
     __tablename__ = "case_analytics"
 
-    id = Column(Integer, primary_key=True, index=True)
-    case_type = Column(String, nullable=False)  # civil, criminal, etc.
-    jurisdiction = Column(String, nullable=False, index=True)
-    court_name = Column(String, nullable=True)
-    judge_name = Column(String, nullable=True)
+    id = Column(Integer, primary_key=True)
+    case_type = Column(String(255), nullable=False)  # civil, criminal, etc.
+    jurisdiction = Column(String(255), nullable=False, index=True)
+    court_name = Column(String(255), nullable=True)
+    judge_name = Column(String(255), nullable=True)
     
     # Metrics
     total_cases = Column(Integer, default=0)
@@ -194,13 +195,13 @@ class CaseAnalytics(Base):
     
     appeals_filed = Column(Integer, default=0)
     appeals_successful = Column(Integer, default=0)
-    appeal_success_rate = Column(String, default="0%")  # e.g., "22%"
+    appeal_success_rate = Column(String(255), default="0%")  # e.g., "22%"
     
     avg_case_duration = Column(Integer, nullable=True)  # days
     avg_appeal_duration = Column(Integer, nullable=True)  # days
     avg_appeal_cost = Column(Integer, nullable=True)  # rupees
     
-    last_updated = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+    last_updated = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
 
     def __repr__(self):
         return f"<CaseAnalytics(jurisdiction={self.jurisdiction}, appeal_success_rate={self.appeal_success_rate})>"
@@ -210,23 +211,23 @@ class UserFeedback(Base):
     """Model for tracking user feedback on case outcomes"""
     __tablename__ = "user_feedback"
 
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    case_id = Column(Integer, ForeignKey("case_records.id"), nullable=True)
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    case_id = Column(Integer, ForeignKey("case_records.id", ondelete="CASCADE"), nullable=True)
 
     # Feedback fields
     did_appeal = Column(Boolean, nullable=True)
-    appeal_outcome = Column(String, nullable=True)  # won, lost, pending, withdrawn
+    appeal_outcome = Column(String(255), nullable=True)  # won, lost, pending, withdrawn
     appeal_cost = Column(Integer, nullable=True)  # actual cost in rupees
     time_to_verdict = Column(Integer, nullable=True)  # days
-    case_type = Column(String, nullable=True)
-    jurisdiction = Column(String, nullable=True)
+    case_type = Column(String(255), nullable=True)
+    jurisdiction = Column(String(255), nullable=True)
 
     # Satisfaction feedback
     satisfaction_rating = Column(Integer, nullable=True)  # 1-5
     feedback_text = Column(Text, nullable=True)  # User's notes
     
-    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
 
     def __repr__(self):
         return f"<UserFeedback(user_id={self.user_id}, appeal_outcome={self.appeal_outcome})>"
@@ -239,10 +240,10 @@ class User(Base):
     """Model for user authentication and profiles"""
     __tablename__ = "users"
 
-    id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, unique=True, nullable=False, index=True)
-    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
-    last_login = Column(DateTime, nullable=True)
+    id = Column(Integer, primary_key=True)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    last_login = Column(DateTime(timezone=True), nullable=True)
     is_verified = Column(Boolean, default=True, nullable=False)
 
     # Relationships
@@ -257,14 +258,14 @@ class OTPVerification(Base):
     """Model for storing email OTP codes for authentication"""
     __tablename__ = "otp_verifications"
 
-    id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, nullable=False, index=True)
-    otp_hash = Column(String, nullable=False)  # Hashed OTP code
-    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
-    expires_at = Column(DateTime, nullable=False)
+    id = Column(Integer, primary_key=True)
+    email = Column(String(255), nullable=False, index=True)
+    otp_hash = Column(String(255), nullable=False)  # Hashed OTP code
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
     is_used = Column(Boolean, default=False, nullable=False)
     failed_attempts = Column(Integer, default=0, nullable=False)  # Track failed verification attempts
-    locked_until = Column(DateTime, nullable=True)  # Timestamp until which OTP is locked
+    locked_until = Column(DateTime(timezone=True), nullable=True)  # Timestamp until which OTP is locked
 
     def __repr__(self):
         return f"<OTPVerification(email={self.email}, expires_at={self.expires_at})>"
@@ -282,6 +283,19 @@ class OTPVerification(Base):
             locked_until = locked_until.replace(tzinfo=dt.timezone.utc)
         
         return now < locked_until
+
+
+class RevokedToken(Base):
+    """Model for storing revoked JWT tokens (logout blacklist)"""
+    __tablename__ = "revoked_tokens"
+
+    id = Column(Integer, primary_key=True)
+    jti = Column(String(255), unique=True, nullable=False, index=True)  # JWT ID
+    revoked_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)  # When the token would naturally expire
+
+    def __repr__(self):
+        return f"<RevokedToken(jti={self.jti})>"
 
 
 class CaseStatus(str, enum.Enum):
@@ -305,16 +319,17 @@ class DocumentType(str, enum.Enum):
 class Case(Base):
     """Model for tracking user cases"""
     __tablename__ = "cases"
+    __table_args__ = (UniqueConstraint("user_id", "case_number", name="uq_user_case_number"),)
 
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    case_number = Column(String, nullable=False)  # User-facing identifier
-    case_type = Column(String, nullable=False, index=True)  # civil, criminal, family, etc.
-    jurisdiction = Column(String, nullable=False, index=True)
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    case_number = Column(String(255), nullable=False)  # User-facing identifier
+    case_type = Column(String(255), nullable=False, index=True)  # civil, criminal, family, etc.
+    jurisdiction = Column(String(255), nullable=False, index=True)
     status = Column(SQLEnum(CaseStatus), default=CaseStatus.ACTIVE, nullable=False)
-    title = Column(String, nullable=True)  # Optional case title
-    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
-    updated_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+    title = Column(String(255), nullable=True)  # Optional case title
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
 
     # Relationships
     user = relationship("User", back_populates="cases")
@@ -330,12 +345,12 @@ class CaseDocument(Base):
     """Model for storing documents uploaded for a case"""
     __tablename__ = "case_documents"
 
-    id = Column(Integer, primary_key=True, index=True)
-    case_id = Column(Integer, ForeignKey("cases.id"), nullable=False, index=True)
+    id = Column(Integer, primary_key=True)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
     document_type = Column(SQLEnum(DocumentType), nullable=False)
     document_content = Column(Text, nullable=True)  # Extracted text from PDF
-    file_path = Column(String, nullable=True)  # Optional: path to stored PDF
-    uploaded_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    file_path = Column(String(255), nullable=True)  # Optional: path to stored PDF
+    uploaded_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     summary = Column(Text, nullable=True)  # LLM-generated 3-bullet summary
     remedies = Column(JSON, nullable=True)  # JSON: appeal info, deadlines, costs
 
@@ -350,13 +365,13 @@ class CaseTimeline(Base):
     """Model for tracking timeline events in a case"""
     __tablename__ = "case_timeline"
 
-    id = Column(Integer, primary_key=True, index=True)
-    case_id = Column(Integer, ForeignKey("cases.id"), nullable=False, index=True)
-    event_type = Column(String, nullable=False, index=True)  # document_upload, deadline_created, action_completed, etc.
-    event_date = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False, index=True)
+    id = Column(Integer, primary_key=True)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    event_type = Column(String(255), nullable=False, index=True)  # document_upload, deadline_created, action_completed, etc.
+    event_date = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False, index=True)
     description = Column(Text, nullable=False)
     event_metadata = Column(JSON, nullable=True)  # Extra context (document_id, deadline_id, etc.)
-    created_at = Column(DateTime, default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
 
     # Relationships
     case = relationship("Case", back_populates="timeline_events")
@@ -539,7 +554,7 @@ def get_notification_history(db: Session, user_id: int, limit: int = 50) -> List
 
 def create_case_record(
     db: Session,
-    case_id: str,
+    hashed_case_id: str,
     case_type: str,
     jurisdiction: str,
     court_name: Optional[str] = None,
@@ -552,7 +567,7 @@ def create_case_record(
 ) -> CaseRecord:
     """Create a new case record for analytics"""
     case = CaseRecord(
-        case_id=case_id,
+        hashed_case_id=hashed_case_id,
         case_type=case_type,
         jurisdiction=jurisdiction,
         court_name=court_name,
@@ -571,7 +586,7 @@ def create_case_record(
 
 def update_case_outcome(
     db: Session,
-    case_id: str,
+    hashed_case_id: str,
     appeal_filed: bool = False,
     appeal_date: Optional[dt.datetime] = None,
     appeal_outcome: Optional[str] = None,
@@ -580,9 +595,9 @@ def update_case_outcome(
     appeal_cost: Optional[str] = None,
 ) -> CaseOutcome:
     """Update case outcome with appeal information"""
-    case = db.query(CaseRecord).filter(CaseRecord.case_id == case_id).first()
+    case = db.query(CaseRecord).filter(CaseRecord.hashed_case_id == hashed_case_id).first()
     if not case:
-        raise ValueError(f"Case {case_id} not found")
+        raise ValueError(f"Case {hashed_case_id} not found")
     
     outcome = db.query(CaseOutcome).filter(CaseOutcome.case_id == case.id).first()
     if not outcome:
@@ -606,9 +621,9 @@ def update_case_outcome(
     return outcome
 
 
-def get_case_record(db: Session, case_id: str) -> Optional[CaseRecord]:
+def get_case_record(db: Session, hashed_case_id: str) -> Optional[CaseRecord]:
     """Get a case record by ID"""
-    return db.query(CaseRecord).filter(CaseRecord.case_id == case_id).first()
+    return db.query(CaseRecord).filter(CaseRecord.hashed_case_id == hashed_case_id).first()
 
 
 def get_cases_by_criteria(
@@ -803,6 +818,30 @@ def cleanup_expired_otps(db: Session) -> int:
     return deleted
 
 
+def revoke_token(db: Session, jti: str, expires_at: dt.datetime) -> RevokedToken:
+    """Add a token JTI to the revoked list"""
+    token = RevokedToken(jti=jti, expires_at=expires_at)
+    db.add(token)
+    db.commit()
+    db.refresh(token)
+    return token
+
+
+def is_token_revoked(db: Session, jti: str) -> bool:
+    """Check if a token has been revoked"""
+    return db.query(RevokedToken).filter(RevokedToken.jti == jti).first() is not None
+
+
+def cleanup_expired_revoked_tokens(db: Session) -> int:
+    """Delete revoked tokens that have naturally expired"""
+    now = dt.datetime.now(dt.timezone.utc)
+    deleted = db.query(RevokedToken).filter(
+        RevokedToken.expires_at < now
+    ).delete()
+    db.commit()
+    return deleted
+
+
 # ==================== Case Management Helper Functions ====================
 
 
@@ -921,11 +960,11 @@ def update_case_document(
     """Update case document"""
     doc = db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
     if doc:
-        if document_content:
+        if document_content is not None:
             doc.document_content = document_content
-        if summary:
+        if summary is not None:
             doc.summary = summary
-        if remedies:
+        if remedies is not None:
             doc.remedies = remedies
         db.commit()
         db.refresh(doc)

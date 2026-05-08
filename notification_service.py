@@ -11,6 +11,7 @@ from typing import Optional, List, Tuple
 from dataclasses import dataclass
 from enum import Enum
 import html
+from config import Config
 
 
 from sqlalchemy.orm import Session
@@ -27,7 +28,6 @@ try:
 except ImportError:
     SendGridAPIClient = None
     Mail = None
-
 from database import (
     Case,
     NotificationStatus,
@@ -36,18 +36,13 @@ from database import (
     UserPreference,
     CaseDeadline,
     log_notification,
+    has_notification_been_sent,
 )
 
 # Import debug mode helper
-try:
-    from auth import _is_debug_or_testing_mode
-except ImportError:
-    # Fallback if auth module not available
-    def _is_debug_or_testing_mode() -> bool:
-        truthy = {"1", "true", "yes", "on"}
-        debug_enabled = os.getenv("DEBUG", "").strip().lower() in truthy
-        testing_enabled = os.getenv("TESTING", "").strip().lower() in truthy
-        return debug_enabled or testing_enabled
+def _is_debug_or_testing_mode() -> bool:
+    """Return True when explicit debug/testing flags are enabled."""
+    return Config.DEBUG or Config.TESTING
 
 logger = structlog.get_logger(__name__)
 
@@ -66,9 +61,9 @@ class SMSClient:
     """Wrapper for Twilio SMS client"""
 
     def __init__(self):
-        self.account_sid = os.getenv("TWILIO_ACCOUNT_SID")
-        self.auth_token = os.getenv("TWILIO_AUTH_TOKEN")
-        self.from_number = os.getenv("TWILIO_FROM_NUMBER")
+        self.account_sid = Config.TWILIO_ACCOUNT_SID
+        self.auth_token = Config.TWILIO_AUTH_TOKEN
+        self.from_number = Config.TWILIO_FROM_NUMBER
 
         if not all([self.account_sid, self.auth_token, self.from_number]):
             logger.warning("Twilio credentials not configured. SMS will be mocked.")
@@ -86,10 +81,14 @@ class SMSClient:
         """
         try:
             if not self.client:
-                # Not configured: run in mock mode.
-                # (Unit tests expect mock mode when env vars are absent.)
-                logger.info(f"[MOCK SMS] To: {to_number}, Message: {message}")
-                return True, f"mock_sms_{datetime.now().timestamp()}", None
+                # Not configured: run in mock mode ONLY if in debug/testing.
+                if _is_debug_or_testing_mode():
+                    logger.info(f"[MOCK SMS] To: {to_number}, Message: {message}")
+                    return True, f"mock_sms_{datetime.now().timestamp()}", None
+                
+                error_msg = "Twilio credentials not configured. SMS delivery skipped."
+                logger.warning(error_msg)
+                return False, None, error_msg
 
             message_obj = self.client.messages.create(
                 body=message,
@@ -109,8 +108,8 @@ class EmailClient:
     """Wrapper for SendGrid email client"""
 
     def __init__(self):
-        self.api_key = os.getenv("SENDGRID_API_KEY")
-        self.from_email = os.getenv("SENDGRID_FROM_EMAIL", "noreply@legalassist.ai")
+        self.api_key = Config.SENDGRID_API_KEY
+        self.from_email = Config.SENDGRID_FROM_EMAIL
 
         if not self.api_key:
             logger.warning("SendGrid API key not configured. Emails will be mocked.")
@@ -128,10 +127,14 @@ class EmailClient:
         """
         try:
             if not self.client:
-                # Not configured: run in mock mode.
-                # (Unit tests expect mock mode when env vars are absent.)
-                logger.info(f"[MOCK EMAIL] To: {to_email}, Subject: {subject}")
-                return True, f"mock_email_{datetime.now().timestamp()}", None
+                # Not configured: run in mock mode ONLY if in debug/testing.
+                if _is_debug_or_testing_mode():
+                    logger.info(f"[MOCK EMAIL] To: {to_email}, Subject: {subject}")
+                    return True, f"mock_email_{datetime.now().timestamp()}", None
+                
+                error_msg = "SendGrid API key not configured. Email delivery skipped."
+                logger.warning(error_msg)
+                return False, None, error_msg
 
             message = Mail(
                 from_email=self.from_email,
@@ -370,7 +373,6 @@ class NotificationService:
         else:
             channels = [user_preference.notification_channel]
 
-        from database import has_notification_been_sent
 
         for channel in channels:
             # Check if reminder was already sent for this specific threshold and channel

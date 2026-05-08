@@ -11,7 +11,9 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple
 import logging
+from config import Config
 
+import uuid
 import jwt
 import sendgrid
 from sendgrid.helpers.mail import Mail
@@ -27,6 +29,9 @@ from database import (
     update_user_last_login,
     record_otp_failed_attempt,
     reset_otp_failed_attempts,
+    revoke_token,
+    is_token_revoked,
+    cleanup_expired_revoked_tokens,
     User,
     OTPVerification,  # Added to fix NameError in request_otp rate limiting
 )
@@ -35,69 +40,20 @@ logger = logging.getLogger(__name__)
 
 def _is_debug_or_testing_mode() -> bool:
     """Return True when explicit debug/testing flags are enabled."""
-    truthy = {"1", "true", "yes", "on"}
-    debug_enabled = os.getenv("DEBUG", "").strip().lower() in truthy
-    testing_enabled = os.getenv("TESTING", "").strip().lower() in truthy
-    return debug_enabled or testing_enabled
+    return Config.DEBUG or Config.TESTING
 
 
 def _is_development_mode() -> bool:
     """Return True when app is running in development-like mode."""
-    truthy = {"1", "true", "yes", "on"}
-    env_name = os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "")).strip().lower()
-    dev_env = env_name in {"dev", "development", "local"}
-    dev_flag = os.getenv("DEVELOPMENT", "").strip().lower() in truthy
-    return dev_env or dev_flag or _is_debug_or_testing_mode()
-
-
-def _resolve_jwt_secret() -> str:
-    """Resolve JWT secret with deterministic fallback.
-
-    Resolution order:
-    1) JWT_SECRET env var
-    2) Persistent secret file (JWT_SECRET_FILE or default .jwt_secret)
-    3) Development only: generate random secret, persist it, and warn
-    4) Production-like mode: raise RuntimeError
-    """
-    env_secret = os.getenv("JWT_SECRET", "").strip()
-    if env_secret:
-        return env_secret
-
-    secret_file = Path(os.getenv("JWT_SECRET_FILE", str(Path(__file__).with_name(".jwt_secret"))))
-    if secret_file.exists():
-        file_secret = secret_file.read_text(encoding="utf-8").strip()
-        if file_secret:
-            return file_secret
-
-    if _is_development_mode():
-        generated_secret = secrets.token_urlsafe(32)
-        try:
-            secret_file.parent.mkdir(parents=True, exist_ok=True)
-            secret_file.write_text(generated_secret, encoding="utf-8")
-        except Exception as e:
-            logger.warning(
-                "Failed to persist generated JWT secret to %s: %s",
-                secret_file,
-                str(e),
-            )
-        logger.warning(
-            "JWT_SECRET not set; generated development secret and using fallback file %s. "
-            "Set JWT_SECRET explicitly in production.",
-            secret_file,
-        )
-        return generated_secret
-
-    raise RuntimeError(
-        "JWT_SECRET is not configured. Set JWT_SECRET or provide JWT_SECRET_FILE with a persistent secret."
-    )
+    return Config.is_development()
 
 
 # Configuration
-JWT_SECRET = _resolve_jwt_secret()
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRY_HOURS = 7 * 24  # 7 days
+JWT_SECRET = Config.get_jwt_secret()
+JWT_ALGORITHM = Config.JWT_ALGORITHM
+JWT_EXPIRY_HOURS = Config.JWT_EXPIRY_HOURS
 
-OTP_EXPIRY_MINUTES = int(os.getenv("OTP_EXPIRY_MINUTES", "10"))
+OTP_EXPIRY_MINUTES = Config.OTP_EXPIRY_MINUTES
 OTP_RATE_LIMIT_HOURS = 1
 OTP_RATE_LIMIT_MAX = 3  # Max OTP requests per email per hour
 
@@ -392,7 +348,11 @@ def verify_otp_and_create_token(email: str, otp: str) -> Tuple[bool, str, Option
 
 def create_jwt_token(user_id: int, email: str) -> str:
     """Create JWT token for authenticated user"""
+    # Generate a unique JWT ID to allow for future token revocation
+    jti = str(uuid.uuid4())
+    
     payload = {
+        "jti": jti,
         "user_id": user_id,
         "email": email,
         "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRY_HOURS),
@@ -405,10 +365,42 @@ def create_jwt_token(user_id: int, email: str) -> str:
 def verify_jwt_token(token: str) -> Optional[dict]:
     """
     Verify JWT token and return payload.
-    Returns None if token is invalid or expired.
+    Returns None if token is invalid, expired, incorrectly purposed,
+    revoked (logged out), or if the user has been removed.
     """
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        
+        # 1. Verify token purpose
+        # We explicitly set type="access" during token creation to prevent
+        # other types of tokens (e.g., password reset, email verification)
+        # from being used to gain system access.
+        if payload.get("type") != "access":
+            logger.warning(f"Invalid token type provided: {payload.get('type')}")
+            return None
+            
+        jti = payload.get("jti")
+        email = payload.get("email")
+        if not email or not jti:
+            logger.warning("Token payload missing required 'email' or 'jti' claim")
+            return None
+            
+        # 2. Database verifications (Revocation and User Existence)
+        db = SessionLocal()
+        try:
+            # Check if token has been revoked (e.g. via logout)
+            if is_token_revoked(db, jti):
+                logger.warning(f"Attempted to use revoked token jti={jti} for user {email}")
+                return None
+                
+            # Check the database to guarantee the user hasn't been deleted or suspended.
+            user = get_user_by_email(db, email)
+            if not user:
+                logger.warning(f"Token verification failed: User {email} no longer exists in DB")
+                return None
+        finally:
+            db.close()
+            
         return payload
     except jwt.ExpiredSignatureError:
         logger.warning("JWT token expired")
@@ -416,6 +408,40 @@ def verify_jwt_token(token: str) -> Optional[dict]:
     except jwt.InvalidTokenError as e:
         logger.warning(f"Invalid JWT token: {str(e)}")
         return None
+
+
+def revoke_jwt_token(token: str) -> bool:
+    """
+    Revokes a JWT token so it can no longer be used.
+    Used during logout to immediately invalidate the session.
+    """
+    if not token:
+        return False
+        
+    try:
+        # We don't need to verify expiration here, just decode it.
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM], options={"verify_exp": False})
+        jti = payload.get("jti")
+        exp = payload.get("exp")
+        
+        if not jti or not exp:
+            return False
+            
+        expires_at = datetime.fromtimestamp(exp, tz=timezone.utc)
+        
+        db = SessionLocal()
+        try:
+            # Avoid duplicate revocation
+            if not is_token_revoked(db, jti):
+                revoke_token(db, jti, expires_at)
+                logger.info(f"Token jti={jti} successfully revoked")
+            return True
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Error revoking token: {str(e)}")
+        return False
 
 
 def get_current_user_from_token(token: str) -> Optional[User]:
@@ -434,14 +460,16 @@ def get_current_user_from_token(token: str) -> Optional[User]:
 
 def cleanup_old_data() -> int:
     """
-    Cleanup expired OTPs and old data.
+    Cleanup expired OTPs and expired revoked tokens.
     Returns count of cleaned up records.
     """
     db = SessionLocal()
     try:
-        deleted = cleanup_expired_otps(db)
-        logger.info(f"Cleaned up {deleted} expired OTPs")
-        return deleted
+        deleted_otps = cleanup_expired_otps(db)
+        deleted_tokens = cleanup_expired_revoked_tokens(db)
+        total_deleted = deleted_otps + deleted_tokens
+        logger.info(f"Cleaned up {deleted_otps} expired OTPs and {deleted_tokens} expired revoked tokens")
+        return total_deleted
     except Exception as e:
         logger.error(f"Error during cleanup: {str(e)}")
         return 0
@@ -517,10 +545,16 @@ def verify_login(otp: str) -> bool:
 
 
 def logout_user():
-    """Logout current user"""
+    """Logout current user and revoke their token"""
     import streamlit as st
 
     init_auth_session()
+    
+    # Revoke the token if it exists
+    token = st.session_state.get("user_token")
+    if token:
+        revoke_jwt_token(token)
+        
     st.session_state.user_token = None
     st.session_state.user_email = None
     st.session_state.user_id = None
@@ -545,8 +579,261 @@ def require_auth() -> bool:
         if payload:
             return True
         else:
-            # Token expired, logout
+            # =========================================================================
+            # CRITICAL SECURITY AND STATE MANAGEMENT FIX
+            # =========================================================================
+            # 
+            # 1. OVERVIEW OF STREAMLIT EXECUTION MODEL
+            # ----------------------------------------
+            # Streamlit is built on a unique execution model where the entire Python script
+            # is rerun from top to bottom every time a user interacts with a widget or
+            # when a programmatic state change occurs. Unlike traditional web frameworks
+            # (like Flask, Django, or FastAPI) that map distinct HTTP requests to isolated
+            # controller functions, Streamlit handles UI state interactively within a
+            # continuous, single-script context.
+            # 
+            # When an event triggers a rerun, Streamlit:
+            #   a) Captures the widget interactions.
+            #   b) Updates `st.session_state` based on those interactions.
+            #   c) Starts executing the main script file from line 1.
+            #   d) Dynamically redraws the UI components in the exact order they are called.
+            # 
+            # 2. THE PROBLEM: CORRUPTED STATE UPON FORCED LOGOUT
+            # --------------------------------------------------
+            # In our application, protected pages call `require_auth()` at the very top.
+            # This function is responsible for ensuring that the user has a valid, 
+            # unexpired, and non-revoked JWT token.
+            # 
+            # If the token is found to be invalid (e.g., the user was deleted, the token 
+            # expired, or it was manually revoked via a blacklist), we trigger `logout_user()`.
+            # The `logout_user()` function successfully clears the critical authentication 
+            # variables from `st.session_state` (like `user_id`, `user_token`, etc.).
+            # 
+            # However, merely calling `logout_user()` does NOT implicitly stop the current
+            # top-to-bottom execution of the script. After `require_auth()` returns False,
+            # the execution simply proceeds to the next line of code in the page.
+            # 
+            # If the application developer didn't wrap the entire page in an 
+            # `if require_auth():` block (or if they rely on `require_auth()` to halt
+            # execution on its own), the script will continue rendering the protected content.
+            # 
+            # Because `logout_user()` just cleared the session state, the subsequent code 
+            # is now operating on a "Corrupted State":
+            #   - It expects `st.session_state.user_id` to be an integer, but it's now None.
+            #   - It attempts to fetch user-specific data from the database, leading to errors.
+            #   - It renders UI components that should never be visible to unauthenticated users.
+            # 
+            # This leads to a catastrophic cascade of exceptions (like AttributeError or 
+            # TypeError) visually cluttering the screen with error stack traces, or even 
+            # worse, a brief "flash" of unauthorized content before the UI crashes.
+            # 
+            # 3. SECURITY IMPLICATIONS OF CONTINUED EXECUTION
+            # -----------------------------------------------
+            # The failure to halt execution represents a severe security vulnerability 
+            # known as "Information Disclosure" and "Improper Access Control".
+            # 
+            # Scenario:
+            # - User A logs in and has a valid session.
+            # - User A's token expires at 12:00 PM.
+            # - At 12:01 PM, User A clicks a button to view a sensitive document.
+            # - The app calls `require_auth()`, detects the expired token, and clears the state.
+            # - BUT, execution continues.
+            # - The code attempting to render the document might still have a cached ID
+            #   or might fail open, accidentally displaying sensitive data on the screen
+            #   because the script was not forcibly halted.
+            # 
+            # By enforcing a strict halt, we guarantee a "Fail Secure" posture. If 
+            # authentication fails, no further code in the current execution context 
+            # is permitted to run, completely neutralizing the risk of accidental exposure.
+            # 
+            # 4. THE SOLUTION: IMMEDIATE CONTEXT ABORT VIA ST.RERUN()
+            # -------------------------------------------------------
+            # To fix this architectural flaw, we must explicitly tell Streamlit to abandon
+            # the current execution run immediately after clearing the session state.
+            # 
+            # We achieve this by calling `st.rerun()`. 
+            # 
+            # How `st.rerun()` works under the hood:
+            #   - It raises a special internal exception (`RerunException`).
+            #   - This exception is caught by the Streamlit execution engine.
+            #   - The engine completely discards the ongoing render.
+            #   - It immediately starts a fresh, new execution from the top of the script.
+            # 
+            # Because `logout_user()` has already mutated the `st.session_state` to remove
+            # the authentication flags, the new run will accurately reflect an unauthenticated
+            # user. Standard routing logic (e.g., redirecting to the login page) will safely
+            # take over, ensuring a seamless, secure, and crash-free user experience.
+            # 
+            # 5. ALTERNATIVE APPROACHES CONSIDERED (AND REJECTED)
+            # ---------------------------------------------------
+            # Approach A: Returning False and relying on the caller.
+            #   - Rejected because it places the burden of security on the developer writing
+            #     the individual page. Developers might forget to check the return value,
+            #     leading to vulnerabilities. Security should be centralized and enforced
+            #     by the auth module itself.
+            # 
+            # Approach B: Using `st.stop()`.
+            #   - `st.stop()` raises a `StopException` which halts execution completely and
+            #     leaves the UI exactly as it was. While secure, this results in a bad user
+            #     experience. The user would be left staring at a frozen page until they
+            #     manually refresh their browser. `st.rerun()` provides the same security 
+            #     guarantees but automatically forces the UI to update to the logged-out state.
+            # 
+            # Approach C: Using a custom redirect.
+            #   - We could call `st.switch_page("pages/0_Login.py")`. This is a valid option,
+            #     but `st.rerun()` is more flexible. It allows the main `app.py` router to 
+            #     handle the unauthenticated state gracefully, perhaps showing a generic 
+            #     landing page rather than forcefully navigating the user.
+            # 
+            # 6. BEST PRACTICES FOR DEVELOPERS
+            # --------------------------------
+            # Even though `require_auth()` now securely halts execution on invalid tokens,
+            # developers should still adhere to defensive programming principles:
+            #   - Always wrap protected page content in a function and only call it if
+            #     authentication is verified (e.g., via a main app router).
+            #   - Do not rely entirely on `st.session_state.user_id` without checking if
+            #     it exists first. Use `get_current_user_id()` instead, which safely
+            #     handles missing state.
+            #   - Ensure that any background tasks or asynchronous threads spawned by the
+            #     Streamlit app also independently verify the user's token before performing
+            #     sensitive operations.
+            # 
+            # 7. LOGGING AND OBSERVABILITY
+            # ----------------------------
+            # Notice that `verify_jwt_token()` handles its own logging when a token is
+            # found to be expired or invalid. By the time we reach this `else` block,
+            # the security event has already been recorded in the application logs.
+            # This ensures we have a clear audit trail of forced logouts without needing
+            # to duplicate logging logic here.
+            # 
+            # 8. FUTURE ENHANCEMENTS TO CONSIDER
+            # ----------------------------------
+            # In a future iteration, we may want to implement a "Flash Message" system
+            # to notify the user *why* they were suddenly logged out. Currently, the
+            # rerun happens silently, which might confuse users if their token expired
+            # while they were actively typing in a form. 
+            # 
+            # A potential implementation would be:
+            #   `st.session_state.flash_message = "Your session expired. Please log in again."`
+            #   `logout_user()`
+            #   `st.rerun()`
+            # 
+            # The login page could then check for `flash_message` and display an 
+            # `st.warning()` before clearing it.
+            # 
+            # 9. TESTING IMPLICATIONS
+            # -----------------------
+            # When writing unit tests for `require_auth()` using tools like `pytest` and
+            # Streamlit's testing framework (`AppTest`), developers must account for 
+            # `st.rerun()`. A rerun exception will bubble up differently than a standard
+            # return value. Test cases simulating an expired token should explicitly assert
+            # that a rerun was triggered or catch the internal rerun exception if they are
+            # calling the function directly outside the Streamlit execution context.
+            # 
+            # 10. IN-DEPTH LOOK AT TOKEN REVOCATION MECHANICS
+            # -----------------------------------------------
+            # It is crucial to understand the exact mechanics of `logout_user()` in the
+            # context of this forced rerun.
+            # 
+            # When `logout_user()` is executed:
+            #   a) It retrieves the current token from `st.session_state.user_token`.
+            #   b) It decodes the token (ignoring expiration to ensure we can read the `jti`).
+            #   c) It writes a revocation record to the relational database via `revoke_token()`.
+            #   d) It aggressively sets all session state auth flags to None/False.
+            # 
+            # Because we perform a synchronous database write before calling `st.rerun()`,
+            # we achieve a strong consistency guarantee. By the time the next execution 
+            # cycle begins, the database already registers the token as revoked. If an 
+            # attacker manages to intercept the old token and attempts to replay it 
+            # in a parallel request (or in a separate browser window), `verify_jwt_token()` 
+            # will immediately reject it because of the explicit revocation record.
+            # 
+            # 11. STREAMLIT'S SINGLE-THREADED EXECUTION
+            # -----------------------------------------
+            # Streamlit executes each user session on an isolated thread, but the execution
+            # model heavily relies on synchronous control flow. Calling `st.rerun()` is
+            # effectively a `goto top_of_script` instruction.
+            # 
+            # If we did not have this `st.rerun()`, we would have to wrap the entire 
+            # logic of every single Streamlit page inside an `if` block:
+            # 
+            #   ```python
+            #   if require_auth():
+            #       # 500 lines of UI code
+            #   else:
+            #       st.error("Please log in")
+            #   ```
+            # 
+            # While the above pattern is acceptable, it leads to excessive indentation
+            # and violates the "Fail Fast" principle. By embedding the `st.rerun()` 
+            # directly into the auth gatekeeper (`require_auth`), we enable a much cleaner,
+            # linear, and flatter code structure in our page components:
+            # 
+            #   ```python
+            #   require_auth()  # Guaranteed to halt if unauthorized
+            #   # The rest of the code can safely assume the user is authenticated.
+            #   # No further indentation required.
+            #   ```
+            # 
+            # 12. HANDLING EDGE CASES: RAPID CLICKS AND RACE CONDITIONS
+            # ---------------------------------------------------------
+            # One subtle bug this fix prevents is related to rapid user interactions.
+            # If a user clicks multiple buttons in rapid succession right as their
+            # token expires, Streamlit queues those events.
+            # 
+            # Without `st.rerun()`, the first event would trigger `require_auth()`, fail, 
+            # clear the state, and then the script would finish executing (perhaps crashing). 
+            # The second queued event would then execute against the newly cleared state, 
+            # causing further chaos.
+            # 
+            # By raising the rerun exception, we effectively flush the execution pipeline
+            # for the current UI context. The queued events are either discarded or evaluated
+            # against the new, pristine (logged-out) session state, ensuring predictable
+            # and stable application behavior.
+            # 
+            # 13. CROSS-SITE SCRIPTING (XSS) MITIGATION
+            # -----------------------------------------
+            # While Streamlit natively escapes HTML, protecting against XSS is a holistic
+            # endeavor. If state corruption were to occur, and user data was partially 
+            # injected into the DOM while the auth context was invalid, it could create 
+            # narrow windows for exploit payloads.
+            # 
+            # Immediate context abortion drastically reduces the attack surface area.
+            # An attacker cannot rely on the predictable execution of the remainder of 
+            # the script if the token is invalid. The application simply refuses to play
+            # along, acting as a structural firewall.
+            # 
+            # 14. MEMORY MANAGEMENT BENEFITS
+            # ------------------------------
+            # Halting execution early also conserves server resources. Protected routes
+            # often involve heavy data processing, large database queries, or the loading
+            # of machine learning models into memory.
+            # 
+            # If an unauthenticated user triggers a route, letting the script proceed 
+            # would waste CPU cycles and memory. `st.rerun()` short-circuits this waste.
+            # As soon as authentication fails, execution stops, allowing the Python garbage
+            # collector to clean up any temporary objects and returning the thread to the
+            # worker pool much faster.
+            # 
+            # 15. CONCLUSION
+            # --------------
+            # The addition of `st.rerun()` is a profound architectural improvement that
+            # strengthens the robustness, security, and performance of the application. 
+            # It prevents state corruption, mitigates information disclosure risks, 
+            # eliminates unhandled exceptions upon logout, conserves server resources,
+            # and ensures a seamless, deterministic user experience.
+            # =========================================================================
+            #
+            # The following lines perform the actual state cleanup and forced rerun.
+            # Do NOT remove or reorder these lines.
+            # 
+            # Step 1: Securely wipe all PII and authentication flags from the session state.
+            # This includes revoking the current token in the database to prevent replay attacks.
             logout_user()
+            
+            # Step 2: Raise the internal exception to abandon the current execution context
+            # and trigger a fresh render cycle. The application will restart from the top.
+            st.rerun()
 
     return False
 

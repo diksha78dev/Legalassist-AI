@@ -1,6 +1,7 @@
 
 import pytest
 from datetime import datetime, timezone, timedelta
+from unittest.mock import MagicMock, patch
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -54,7 +55,7 @@ class TestDatabaseExtended:
     def test_repr_methods(self, test_db):
         """Test __repr__ methods of all models for coverage"""
         # CaseRecord
-        record = CaseRecord(case_id="C1", case_type="civil", jurisdiction="Delhi", outcome="won")
+        record = CaseRecord(hashed_case_id="C1", case_type="civil", jurisdiction="Delhi", outcome="won")
         assert "CaseRecord" in repr(record)
         
         # CaseOutcome
@@ -62,7 +63,7 @@ class TestDatabaseExtended:
         assert "CaseOutcome" in repr(outcome)
         
         # UserFeedback
-        feedback = UserFeedback(user_id="U1", appeal_outcome="lost")
+        feedback = UserFeedback(user_id=1, appeal_outcome="lost")
         assert "UserFeedback" in repr(feedback)
         
         # User
@@ -80,12 +81,12 @@ class TestDatabaseExtended:
     def test_case_record_operations(self, test_db):
         """Test CaseRecord creation and retrieval"""
         record = create_case_record(
-            test_db, "CASE_ID_1", "civil", "Delhi", 
+            test_db, "C1", "civil", "Delhi", 
             court_name="High Court", outcome="plaintiff_won"
         )
-        assert record.case_id == "CASE_ID_1"
+        assert record.hashed_case_id == "C1"
         
-        retrieved = get_case_record(test_db, "CASE_ID_1")
+        retrieved = get_case_record(test_db, "C1")
         assert retrieved.id == record.id
         
         # Criteria search
@@ -112,11 +113,11 @@ class TestDatabaseExtended:
     def test_user_feedback_operations(self, test_db):
         """Test UserFeedback submission and retrieval"""
         feedback = submit_user_feedback(
-            test_db, "U1", did_appeal=True, appeal_outcome="won", satisfaction_rating=5
+            test_db, 1, did_appeal=True, appeal_outcome="won", satisfaction_rating=5
         )
-        assert feedback.user_id == "U1"
+        assert feedback.user_id == 1
         
-        history = get_user_feedback(test_db, "U1")
+        history = get_user_feedback(test_db, 1)
         assert len(history) == 1
         assert history[0].appeal_outcome == "won"
 
@@ -180,3 +181,77 @@ class TestDatabaseExtended:
         """Test database initialization (schema creation)"""
         # This just ensures metadata.create_all doesn't crash
         init_db()
+
+
+class TestAutoDeadlineDeduplication:
+    """Regression tests for duplicate deadline creation (PR #197 fix)."""
+
+    def test_skip_duplicate_does_not_raise_nameerror(self, test_db):
+        """
+        Regression: when an existing appeal deadline is found, _auto_create_deadlines_from_remedies
+        must NOT try to access `deadline.id` (NameError) — it should log and return cleanly.
+        """
+        from database import CaseDeadline
+        from case_manager import _auto_create_deadlines_from_remedies
+
+        # Pre-insert a deadline that will trigger the "existing deadline" branch
+        now = datetime.now(timezone.utc)
+        existing = CaseDeadline(
+            user_id=1,
+            case_id=99,
+            case_title="CASE-DUP",
+            deadline_date=(now + timedelta(days=30)).replace(tzinfo=None),
+            deadline_type="appeal",
+            description="Pre-existing appeal deadline",
+        )
+        test_db.add(existing)
+        test_db.commit()
+        test_db.refresh(existing)
+
+        remedies = {"appeal_days": "30", "appeal_court": "High Court"}
+
+        # Must not raise NameError or any other exception
+        _auto_create_deadlines_from_remedies(
+            db=test_db,
+            user_id=1,
+            case_id=99,
+            case_title="CASE-DUP",
+            remedies=remedies,
+            document_id=42,
+        )
+
+        # Only the original deadline should exist — no duplicate created
+        deadlines = test_db.query(CaseDeadline).filter(
+            CaseDeadline.case_id == 99,
+            CaseDeadline.deadline_type == "appeal",
+        ).all()
+        assert len(deadlines) == 1, "Duplicate deadline must not be created"
+
+    def test_new_deadline_creates_timeline_event(self, test_db):
+        """When no existing deadline is found, a new one plus a timeline event must be created."""
+        from database import CaseDeadline, CaseTimeline
+        from case_manager import _auto_create_deadlines_from_remedies
+
+        remedies = {"appeal_days": "15", "appeal_court": "District Court"}
+
+        _auto_create_deadlines_from_remedies(
+            db=test_db,
+            user_id=2,
+            case_id=100,
+            case_title="CASE-NEW",
+            remedies=remedies,
+            document_id=7,
+        )
+
+        deadlines = test_db.query(CaseDeadline).filter(
+            CaseDeadline.case_id == 100,
+        ).all()
+        assert len(deadlines) == 1
+        assert deadlines[0].deadline_type == "appeal"
+
+        events = test_db.query(CaseTimeline).filter(
+            CaseTimeline.case_id == 100,
+            CaseTimeline.event_type == "deadline_created",
+        ).all()
+        assert len(events) == 1
+

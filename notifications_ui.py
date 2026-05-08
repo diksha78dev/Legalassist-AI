@@ -5,7 +5,6 @@ Integrate these into the main app.py or use as a separate page.
 
 import streamlit as st
 from datetime import datetime, timezone, timedelta
-import pytz
 from typing import Optional
 
 from database import (
@@ -41,10 +40,12 @@ TIMEZONES = [
 
 
 def get_user_id() -> int:
-    """Get user ID from session state (implement auth as needed)"""
-    if "user_id" not in st.session_state:
-        st.session_state.user_id = int(st.secrets.get("TEST_USER_ID", 1))
-    return int(st.session_state.user_id)
+    """Get authenticated user ID from session state"""
+    user_id = st.session_state.get("user_id")
+    if not user_id:
+        st.error("Authentication required. Please log in.")
+        st.stop()
+    return int(user_id)
 
 
 def page_notification_preferences():
@@ -57,7 +58,7 @@ def page_notification_preferences():
 
         # Get existing preferences
         user_pref = db.query(UserPreference).filter(
-            UserPreference.user_id == user_id
+            UserPreference.user_id == int(user_id)
         ).first()
 
         if not user_pref:
@@ -148,7 +149,7 @@ def page_notification_preferences():
             try:
                 create_or_update_user_preference(
                     db=db,
-                    user_id=user_id,
+                    user_id=int(user_id),
                     email=email_input,
                     phone_number=phone_input if phone_input else None,
                     notification_channel=channel_options[selected_channel],
@@ -157,7 +158,7 @@ def page_notification_preferences():
 
                 # Update the preference object to reflect new values
                 user_pref = db.query(UserPreference).filter(
-                    UserPreference.user_id == user_id
+                    UserPreference.user_id == int(user_id)
                 ).first()
                 
                 # Update boolean fields
@@ -202,7 +203,7 @@ def page_manage_deadlines():
 
         # Check if user has preferences set up
         user_pref = db.query(UserPreference).filter(
-            UserPreference.user_id == user_id
+            UserPreference.user_id == int(user_id)
         ).first()
 
         if not user_pref:
@@ -251,7 +252,7 @@ def page_manage_deadlines():
 
                         create_case_deadline(
                             db=db,
-                            user_id=user_id,
+                            user_id=int(user_id),
                             case_id=int(case_id),
                             case_title=case_title,
                             deadline_date=deadline_datetime,
@@ -270,7 +271,7 @@ def page_manage_deadlines():
 
         # Display user's deadlines
         st.subheader("📋 Your Active Deadlines")
-        deadlines = get_user_deadlines(db, user_id)
+        deadlines = get_user_deadlines(db, int(user_id))
 
         if not deadlines:
             st.info("No active deadlines yet. Add one above!")
@@ -331,7 +332,7 @@ def page_notification_history():
         user_id = get_user_id()
 
         # Get notification history
-        notifications = get_notification_history(db, user_id, limit=100)
+        notifications = get_notification_history(db, int(user_id), limit=100)
 
         if not notifications:
             st.info("No notifications sent yet.")
@@ -372,7 +373,8 @@ def page_notification_history():
                 col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
 
                 with col1:
-                    st.text(f"Case: {notif.deadline.case_title}")
+                    case_title = notif.deadline.case_title if notif.deadline else "Deleted Case/Deadline"
+                    st.text(f"Case: {case_title}")
                     st.caption(notif.recipient)
 
                 with col2:

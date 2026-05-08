@@ -25,6 +25,11 @@ from core.app_utils import (
     get_remedies_advice,
     parse_summary_bullets,
     validate_pdf_metadata,
+    get_localized_ui_text,
+    localize_yes_no,
+    safe_llm_call,
+    generate_legal_draft,
+    export_draft_to_pdf,
 )
 
 # ==================== Notification System Setup ====================
@@ -34,17 +39,18 @@ from auth import init_auth_session, require_auth, get_current_user_id, get_curre
 from case_manager import get_user_cases_summary, upload_case_document, create_new_case, get_case_detail
 
 # Initialize database
+from config import Config
 init_db()
 
 # ==================== Logging Setup ====================
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
+    level=Config.LOG_LEVEL,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 
 # ==================== App Config ====================
 st.set_page_config(
-    page_title="LegalEase AI",
+    page_title=Config.APP_NAME,
     page_icon="⚖",
     layout="wide" if st.query_params.get("page") == "deadlines" else "centered"
 )
@@ -52,7 +58,7 @@ st.set_page_config(
 # Using default Streamlit theme
 
 # ==================== File Upload Configuration ====================
-MAX_FILE_SIZE_MB = 10
+MAX_FILE_SIZE_MB = Config.MAX_FILE_SIZE_MB
 
 LEGAL_AID_DIRECTORY_PATH = Path(__file__).parent / "legal_aid_directory.json"
 
@@ -368,8 +374,8 @@ def main():
     is_valid_pdf = True
     if uploaded_file:
         # Check file size
-        MAX_FILE_SIZE_MB = 25
-        WARN_FILE_SIZE_MB = 10
+        MAX_FILE_SIZE_MB = Config.MAX_FILE_SIZE_MB
+        WARN_FILE_SIZE_MB = Config.WARN_FILE_SIZE_MB
         file_size_mb = (uploaded_file.size or 0) / (1024 * 1024)
         if file_size_mb > MAX_FILE_SIZE_MB:
             st.error(f"🛑 File too large. Maximum size is {MAX_FILE_SIZE_MB}MB.")
@@ -414,21 +420,22 @@ def main():
                     # ⚡ Best multilingual model for Hindi/Bengali/Urdu
                     model_id = get_default_model()
                     
-                    # Added a 60-second timeout to prevent the Streamlit app
-                    # from spinning indefinitely in case the OpenAI API
-                    # hangs or becomes unresponsive.
-                    response = client.chat.completions.create(
+                    # Use safe_llm_call for robust error handling and retries
+                    summary_raw, error = safe_llm_call(
+                        client=client,
                         model=model_id,
                         messages=[
                             {"role": "system", "content": f"You are an expert legal simplification engine. Output only in {language}."},
                             {"role": "user", "content": prompt}
                         ],
-                        max_tokens=280,
-                        temperature=0.05,
-                        timeout=60.0,
+                        max_tokens=Config.SUMMARY_MAX_TOKENS,
+                        temperature=Config.LLM_TEMPERATURE,
+                        timeout=Config.LLM_TIMEOUT,
                     )
 
-                    summary_raw = response.choices[0].message.content.strip()
+                    if error:
+                        st.error(f"❌ {error}")
+                        return
                     
                     # Use a structured parser to ensure exactly 3 bullet points 
                     # and remove any introductory text like "Here is your summary:"
@@ -440,20 +447,18 @@ def main():
                     if language.lower() != "english" and output_language_mismatch_detected(summary, language):
                         retry_prompt = build_retry_prompt(safe_text, language)
 
-                        # Added a 60-second timeout to prevent the Streamlit app
-                        # from spinning indefinitely in case the OpenAI API
-                        # hangs or becomes unresponsive.
-                        response2 = client.chat.completions.create(
+                        # Use safe_llm_call for retry as well
+                        retry_summary_raw, error2 = safe_llm_call(
+                            client=client,
                             model=model_id,
                             messages=[
                                 {"role": "system", "content": f"Strict multilingual rewriting engine. Output only in {language}."},
                                 {"role": "user", "content": retry_prompt}
                             ],
-                            max_tokens=260,
-                            temperature=0.03,
-                            timeout=60.0,
+                            max_tokens=Config.SUMMARY_MAX_TOKENS,
+                            temperature=Config.LLM_TEMPERATURE,
+                            timeout=Config.LLM_TIMEOUT,
                         )
-                        retry_summary_raw = response2.choices[0].message.content.strip()
 
                         if len(retry_summary_raw) > 0 and not english_leakage_detected(retry_summary_raw):
                             # Apply structured parsing to retry summary as well
@@ -522,6 +527,37 @@ def main():
                             if remedies.get("deadline"):
                                 st.subheader(ui["important_deadline"])
                                 st.write(remedies["deadline"])
+                            
+                            # ===== DRAFTING SECTION =====
+                            st.markdown("---")
+                            st.markdown("## 📝 One-Click Drafting Center")
+                            st.info("Based on these remedies, our AI can generate a formal legal notice or appeal draft for you.")
+                            
+                            if st.button("⚡ Generate Legal Draft", key="generate_draft_btn"):
+                                with st.spinner("Drafting your document..."):
+                                    draft, error = generate_legal_draft(remedies, language, client)
+                                    if error:
+                                        st.error(f"Drafting failed: {error}")
+                                    else:
+                                        st.session_state.current_draft = draft
+                                        st.success("✅ Draft generated! You can edit it below.")
+                            
+                            if st.session_state.get("current_draft"):
+                                edited_draft = st.text_area(
+                                    "Edit your draft (placeholders in [BRACKETS])", 
+                                    value=st.session_state.current_draft,
+                                    height=400,
+                                    key="edited_draft_area"
+                                )
+                                st.session_state.current_draft = edited_draft
+                                
+                                pdf_bytes = export_draft_to_pdf(edited_draft)
+                                st.download_button(
+                                    label="📥 Download as PDF",
+                                    data=pdf_bytes,
+                                    file_name="Legal_Notice_Draft.pdf",
+                                    mime="application/pdf"
+                                )
                             
                         except Exception as e:
                             st.error(f"{ui['remedies_error']}: {str(e)}")

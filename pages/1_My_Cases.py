@@ -166,7 +166,7 @@ def render_empty_state():
         pass
     with col2:
         if st.button("📤 Upload Judgment", use_container_width=True):
-            st.switch_page("app.py")
+            st.switch_page("pages/0_Home.py")
     with col3:
         pass
 
