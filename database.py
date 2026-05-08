@@ -405,11 +405,14 @@ def db_session():
 
 def get_db():
     """
-    Helper function to get a database session.
-    Note: The caller is responsible for closing the session.
-    For safer usage, use the db_session context manager instead.
+    Generator that yields a database session and ensures it's closed after use.
+    Suitable for use as a FastAPI dependency or context manager.
     """
-    return SessionLocal()
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 # ==================== Helper Functions ====================
