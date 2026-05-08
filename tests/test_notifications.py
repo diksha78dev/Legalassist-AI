@@ -59,16 +59,30 @@ class TestDatabaseModels:
     def test_create_case_deadline(self, test_db):
         """Test creating a case deadline"""
         deadline_date = datetime.now(timezone.utc) + timedelta(days=30)
-        
+
+        # Create an owned case (required for ownership validation)
+        case = Case(
+            user_id=1,
+            case_number="CASE-1",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Property Dispute",
+        )
+        test_db.add(case)
+        test_db.commit()
+        test_db.refresh(case)
+
         deadline = create_case_deadline(
             db=test_db,
             user_id=1,
-            case_id=1,
+            case_id=case.id,
             case_title="Property Dispute",
             deadline_date=deadline_date,
             deadline_type="appeal",
             description="Appeal deadline",
         )
+
 
         assert deadline.user_id == 1
         assert deadline.case_id == 1
@@ -150,18 +164,50 @@ class TestDatabaseModels:
         now = datetime.now(timezone.utc)
         
         # Create deadlines at different time points
+        # Create owned cases (required for ownership validation)
+        case1 = Case(
+            user_id=1,
+            case_number="CASE-1",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Case 1",
+        )
+        case2 = Case(
+            user_id=1,
+            case_number="CASE-2",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Case 2",
+        )
+        case3 = Case(
+            user_id=1,
+            case_number="CASE-3",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Case 3",
+        )
+        test_db.add_all([case1, case2, case3])
+        test_db.commit()
+        test_db.refresh(case1)
+        test_db.refresh(case2)
+        test_db.refresh(case3)
+
         create_case_deadline(
-            test_db, 1, 1, "Case 1",
+            test_db, 1, case1.id, "Case 1",
             now + timedelta(days=5), "appeal"
         )
         create_case_deadline(
-            test_db, 1, 2, "Case 2",
+            test_db, 1, case2.id, "Case 2",
             now + timedelta(days=15), "filing"
         )
         create_case_deadline(
-            test_db, 1, 3, "Case 3",
+            test_db, 1, case3.id, "Case 3",
             now + timedelta(days=40), "submission"
         )
+
 
         # Get deadlines within 30 days
         upcoming = get_upcoming_deadlines(test_db, days_before=30)
@@ -169,10 +215,28 @@ class TestDatabaseModels:
 
     def test_notification_logging(self, test_db):
         """Test logging notification attempts"""
-        deadline = create_case_deadline(
-            test_db, 1, 1, "Case",
-            datetime.now(timezone.utc) + timedelta(days=30), "appeal",
+        # Create owned case (required for ownership validation)
+        case = Case(
+            user_id=1,
+            case_number="CASE-4",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Case",
         )
+        test_db.add(case)
+        test_db.commit()
+        test_db.refresh(case)
+
+        deadline = create_case_deadline(
+            test_db,
+            1,
+            case.id,
+            "Case",
+            datetime.now(timezone.utc) + timedelta(days=30),
+            "appeal",
+        )
+
 
         # Log SMS notification
         sms_log = log_notification(
@@ -192,10 +256,28 @@ class TestDatabaseModels:
 
     def test_prevent_duplicate_notifications(self, test_db):
         """Test that duplicate notifications are not sent"""
-        deadline = create_case_deadline(
-            test_db, 1, 1, "Case",
-            datetime.now(timezone.utc) + timedelta(days=30), "appeal",
+        # Create owned case (required for ownership validation)
+        case = Case(
+            user_id=1,
+            case_number="CASE-5",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Case",
         )
+        test_db.add(case)
+        test_db.commit()
+        test_db.refresh(case)
+
+        deadline = create_case_deadline(
+            test_db,
+            1,
+            case.id,
+            "Case",
+            datetime.now(timezone.utc) + timedelta(days=30),
+            "appeal",
+        )
+
 
         # Log first notification
         log_notification(
@@ -209,19 +291,50 @@ class TestDatabaseModels:
     def test_get_user_deadlines_sorted(self, test_db):
         """Test fetching user deadlines sorted by date"""
         now = datetime.now(timezone.utc)
-        
+
+        # Owned cases required for ownership validation
+        case1 = Case(
+            user_id=1,
+            case_number="CASE-1",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Case 1",
+        )
+        case2 = Case(
+            user_id=1,
+            case_number="CASE-2",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Case 2",
+        )
+        test_db.add_all([case1, case2])
+        test_db.commit()
+        test_db.refresh(case1)
+        test_db.refresh(case2)
+
         create_case_deadline(
-            test_db, 1, 1, "Case 1",
-            now + timedelta(days=50), "appeal"
+            test_db,
+            1,
+            case1.id,
+            "Case 1",
+            now + timedelta(days=50),
+            "appeal",
         )
         create_case_deadline(
-            test_db, 1, 2, "Case 2",
-            now + timedelta(days=10), "filing"
+            test_db,
+            1,
+            case2.id,
+            "Case 2",
+            now + timedelta(days=10),
+            "filing",
         )
 
         deadlines = get_user_deadlines(test_db, 1)
         assert len(deadlines) == 2
         assert deadlines[0].days_until_deadline() < deadlines[1].days_until_deadline()
+
 
 
 # ==================== Notification Service Tests ====================
@@ -300,10 +413,28 @@ class TestNotificationService:
         mock_twilio.return_value.messages.create.return_value = mock_message
 
         # Create test data
-        deadline = create_case_deadline(
-            test_db, 1, 1, "Test Case",
-            datetime.now(timezone.utc) + timedelta(days=30), "appeal",
+        # Create owned case (required for ownership validation)
+        case = Case(
+            user_id=1,
+            case_number="CASE-6",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Test Case",
         )
+        test_db.add(case)
+        test_db.commit()
+        test_db.refresh(case)
+
+        deadline = create_case_deadline(
+            test_db,
+            1,
+            case.id,
+            "Test Case",
+            datetime.now(timezone.utc) + timedelta(days=30),
+            "appeal",
+        )
+
         pref = create_or_update_user_preference(
             test_db, 1, "user@example.com",
             phone_number="+91-9876543210",
@@ -316,16 +447,35 @@ class TestNotificationService:
             service = NotificationService()
             result = service.send_sms_reminder(test_db, deadline, pref, 30)
 
+
         assert result.success == True
         assert result.channel == NotificationChannel.SMS
         assert result.message_id == "SM123456789"
 
     def test_sms_send_missing_phone(self, test_db):
         """Test SMS fails gracefully when no phone number"""
-        deadline = create_case_deadline(
-            test_db, 1, 1, "Test Case",
-            datetime.now(timezone.utc) + timedelta(days=30), "appeal",
+        # Owned case required for ownership validation
+        case = Case(
+            user_id=1,
+            case_number="CASE-7",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Test Case",
         )
+        test_db.add(case)
+        test_db.commit()
+        test_db.refresh(case)
+
+        deadline = create_case_deadline(
+            test_db,
+            1,
+            case.id,
+            "Test Case",
+            datetime.now(timezone.utc) + timedelta(days=30),
+            "appeal",
+        )
+
         pref = create_or_update_user_preference(
             test_db, 1, "user@example.com",
             phone_number=None,  # No phone
@@ -346,10 +496,24 @@ class TestNotificationService:
         mock_response.headers = {"X-Message-ID": "email_123"}
         mock_sendgrid.return_value.send.return_value = mock_response
 
+        # Owned case required for ownership validation
+        case = Case(
+            user_id=1,
+            case_number="CASE-8",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Test Case",
+        )
+        test_db.add(case)
+        test_db.commit()
+        test_db.refresh(case)
+
         deadline = create_case_deadline(
-            test_db, 1, 1, "Test Case",
+            test_db, 1, case.id, "Test Case",
             datetime.now(timezone.utc) + timedelta(days=10), "appeal",
         )
+
         pref = create_or_update_user_preference(
             test_db, 1, "user@example.com",
         )
@@ -417,10 +581,28 @@ class TestNotificationService:
 
     def test_mock_mode_sms(self, test_db):
         """Test SMS in mock mode (no credentials)"""
-        deadline = create_case_deadline(
-            test_db, 1, 1, "Test Case",
-            datetime.now(timezone.utc) + timedelta(days=30), "appeal",
+        # Owned case required for ownership validation
+        case = Case(
+            user_id=1,
+            case_number="CASE-7",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Test Case",
         )
+        test_db.add(case)
+        test_db.commit()
+        test_db.refresh(case)
+
+        deadline = create_case_deadline(
+            test_db,
+            1,
+            case.id,
+            "Test Case",
+            datetime.now(timezone.utc) + timedelta(days=30),
+            "appeal",
+        )
+
         pref = create_or_update_user_preference(
             test_db, 1, "user@example.com",
             phone_number="+91-9876543210",
@@ -439,10 +621,24 @@ class TestNotificationService:
 
     def test_mock_mode_email(self, test_db):
         """Test email in mock mode (no API key)"""
+        # Owned case required for ownership validation
+        case = Case(
+            user_id=1,
+            case_number="CASE-9",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Test Case",
+        )
+        test_db.add(case)
+        test_db.commit()
+        test_db.refresh(case)
+
         deadline = create_case_deadline(
-            test_db, 1, 1, "Test Case",
+            test_db, 1, case.id, "Test Case",
             datetime.now(timezone.utc) + timedelta(days=10), "appeal",
         )
+
         pref = create_or_update_user_preference(
             test_db, 1, "user@example.com",
         )
@@ -486,10 +682,23 @@ class TestScheduler:
         """Test that reminders respect user preferences"""
         now = datetime.now(timezone.utc)
         
+        case = Case(
+            user_id=1,
+            case_number="CASE-10",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Case 1",
+        )
+        test_db.add(case)
+        test_db.commit()
+        test_db.refresh(case)
+
         deadline = create_case_deadline(
-            test_db, 1, 1, "Case 1",
+            test_db, 1, case.id, "Case 1",
             now + timedelta(days=30), "appeal",
         )
+
         
         # Create preference with 30-day reminder disabled
         pref = create_or_update_user_preference(
