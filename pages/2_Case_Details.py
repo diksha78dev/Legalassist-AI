@@ -12,6 +12,8 @@ from case_manager import get_case_detail, upload_case_document, mark_deadline_co
 from core import extract_text_from_pdf
 from database import DocumentType, CaseStatus, SessionLocal, UserPreference
 import pytz
+from config import Config
+from pypdf import PdfReader
 
 # Page config
 st.set_page_config(
@@ -123,10 +125,27 @@ def render_documents_section(case_id: int, documents: list, user_id: int):
             uploaded_pdf = st.file_uploader("Upload Judgment PDF", type=["pdf"])
             document_text = None
             if uploaded_pdf:
-                try:
-                    document_text = extract_text_from_pdf(uploaded_pdf, enable_ocr=True)
-                except Exception as e:
-                    st.error(f"Error reading PDF: {str(e)}")
+                # Validate file size
+                file_size_mb = uploaded_pdf.size / (1024 * 1024)
+                is_valid = True
+                
+                if file_size_mb > Config.MAX_FILE_SIZE_MB:
+                    st.error(f"🛑 File too large. Maximum size is {Config.MAX_FILE_SIZE_MB}MB.")
+                    is_valid = False
+                elif file_size_mb > Config.WARN_FILE_SIZE_MB:
+                    st.warning("⚠️ This file is quite large. Processing may take longer than usual.")
+                
+                if is_valid:
+                    try:
+                        # Check page count
+                        pdf_reader = PdfReader(uploaded_pdf)
+                        num_pages = len(pdf_reader.pages)
+                        if num_pages > 100:
+                            st.warning(f"⚠️ This document has {num_pages} pages. Analysis may be less precise.")
+                        
+                        document_text = extract_text_from_pdf(uploaded_pdf, enable_ocr=True)
+                    except Exception as e:
+                        st.error(f"Error reading PDF: {str(e)}")
 
         if st.button("📤 Upload Document", use_container_width=True):
             if document_text:
