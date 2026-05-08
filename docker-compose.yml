@@ -1,49 +1,191 @@
-version: '3.8'
+version: '3.9'
 
 services:
-  streamlit:
-    image: python:3.11-slim
-    working_dir: /app
-    volumes:
-      - ./:/app:cached
-    command: bash -c "pip install -r requirements.txt && streamlit run app.py --server.port=8501 --server.address=0.0.0.0"
+  # Main Application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: legalassist-app
     ports:
       - "8501:8501"
+      - "8000:8000"
+      - "9090:9090"
     environment:
-      - STREAMLIT_SERVER_ENABLE_CORS=false
-      - DATABASE_URL=postgresql://postgres:postgres@db:5432/legalassist
+      - DATABASE_URL=postgresql://legal_user:secure_password@postgres:5432/legalassist_db
       - REDIS_URL=redis://redis:6379/0
-    depends_on:
-      - db
-      - redis
-
-  worker:
-    image: python:3.11-slim
-    working_dir: /app
-    volumes:
-      - ./:/app:cached
-    command: bash -c "pip install -r requirements.txt && python scheduler.py"
-    environment:
-      - DATABASE_URL=postgresql://postgres:postgres@db:5432/legalassist
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
+      - SENDGRID_API_KEY=${SENDGRID_API_KEY}
+      - JAEGER_AGENT_HOST=jaeger
+      - JAEGER_AGENT_PORT=6831
+      - PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus
       - LOG_LEVEL=INFO
-    depends_on:
-      - db
-
-  db:
-    image: postgres:15
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: legalassist
+      - ENVIRONMENT=development
     volumes:
-      - db_data:/var/lib/postgresql/data
+      - ./:/app
+      - /tmp/prometheus:/tmp/prometheus
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+    networks:
+      - legalassist-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: legalassist-postgres
+    environment:
+      - POSTGRES_USER=legal_user
+      - POSTGRES_PASSWORD=secure_password
+      - POSTGRES_DB=legalassist_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
+    networks:
+      - legalassist-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U legal_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
+  # Redis Cache
   redis:
-    image: redis:7
+    image: redis:7-alpine
+    container_name: legalassist-redis
     ports:
       - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - legalassist-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Prometheus Monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: legalassist-prometheus
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+    networks:
+      - legalassist-network
+    restart: unless-stopped
+    depends_on:
+      - app
+
+  # Grafana Dashboard
+  grafana:
+    image: grafana/grafana:latest
+    container_name: legalassist-grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_USER=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+    networks:
+      - legalassist-network
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+
+  # Jaeger Distributed Tracing
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: legalassist-jaeger
+    environment:
+      - COLLECTOR_ZIPKIN_HTTP_PORT=9411
+    ports:
+      - "6831:6831/udp"
+      - "16686:16686"
+      - "14268:14268"
+    networks:
+      - legalassist-network
+    restart: unless-stopped
+
+  # Elasticsearch for centralized logging
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.0.0
+    container_name: legalassist-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.enrollment.enabled=false
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    networks:
+      - legalassist-network
+    restart: unless-stopped
+
+  # Kibana for log visualization
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.0.0
+    container_name: legalassist-kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    networks:
+      - legalassist-network
+    depends_on:
+      - elasticsearch
+    restart: unless-stopped
+
+  # Filebeat for log shipping
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.0.0
+    container_name: legalassist-filebeat
+    user: root
+    volumes:
+      - ./observability/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: filebeat -e -strict.perms=false
+    networks:
+      - legalassist-network
+    depends_on:
+      - elasticsearch
+    restart: unless-stopped
 
 volumes:
-  db_data:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+  elasticsearch_data:
+
+networks:
+  legalassist-network:
+    driver: bridge
