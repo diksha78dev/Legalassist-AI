@@ -1,0 +1,317 @@
+name: Production Deployment & CI/CD
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+      - develop
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
+      - '*.md'
+  pull_request:
+    branches:
+      - main
+      - staging
+  schedule:
+    # Daily security scanning at 2 AM UTC
+    - cron: '0 2 * * *'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ==================== Testing & Code Quality ====================
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov pytest-mock responses
+      
+      - name: Run linting
+        run: |
+          pip install black flake8 mypy
+          black --check .
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+          flake8 . --count --exit-zero --max-complexity=10 --max-line-length=88 --statistics
+      
+      - name: Run type checking
+        run: mypy . --ignore-missing-imports
+        continue-on-error: true
+      
+      - name: Run tests with coverage
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_db
+          REDIS_URL: redis://localhost:6379/0
+        run: |
+          pytest tests/ -v --cov=. --cov-report=xml --cov-report=html
+      
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+
+  # ==================== Security Scanning ====================
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+      
+      - name: Upload Trivy results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-results.sarif'
+      
+      - name: Run Snyk security scan
+        uses: snyk/actions/python-3.10@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high
+        continue-on-error: true
+
+  # ==================== Build Docker Image ====================
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+      
+      - name: Log in to Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v4
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+      
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ==================== Deploy to Staging ====================
+  deploy-staging:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/staging' || github.ref == 'refs/heads/develop'
+    environment:
+      name: staging
+      url: https://staging.legalassist.example.com
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Configure kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'latest'
+      
+      - name: Deploy to staging cluster
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG_STAGING }}
+          IMAGE_TAG: ${{ needs.build.outputs.image-tag }}
+        run: |
+          mkdir -p $HOME/.kube
+          echo "$KUBE_CONFIG" | base64 -d > $HOME/.kube/config
+          helm upgrade --install legalassist k8s/helm/legalassist-ai \
+            --namespace staging \
+            --create-namespace \
+            --values k8s/helm/legalassist-ai/values-staging.yaml \
+            --set image.tag=$IMAGE_TAG \
+            --wait \
+            --timeout 5m
+      
+      - name: Wait for deployment
+        run: |
+          kubectl rollout status deployment/legalassist -n staging --timeout=5m
+      
+      - name: Run smoke tests
+        env:
+          APP_URL: https://staging.legalassist.example.com
+        run: |
+          pip install requests
+          python tests/smoke_tests.py
+
+  # ==================== Deploy to Production (Blue-Green) ====================
+  deploy-production:
+    needs: [build, deploy-staging]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment:
+      name: production
+      url: https://legalassist.example.com
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Configure kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'latest'
+      
+      - name: Deploy using Blue-Green strategy
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG_PRODUCTION }}
+          IMAGE_TAG: ${{ needs.build.outputs.image-tag }}
+        run: |
+          mkdir -p $HOME/.kube
+          echo "$KUBE_CONFIG" | base64 -d > $HOME/.kube/config
+          
+          # Determine active slot (blue or green)
+          ACTIVE_SLOT=$(kubectl get service legalassist-slot -n production -o jsonpath='{.spec.selector.slot}' 2>/dev/null || echo "blue")
+          INACTIVE_SLOT=$([ "$ACTIVE_SLOT" = "blue" ] && echo "green" || echo "blue")
+          
+          # Deploy to inactive slot
+          helm upgrade --install legalassist-$INACTIVE_SLOT k8s/helm/legalassist-ai \
+            --namespace production \
+            --values k8s/helm/legalassist-ai/values-production.yaml \
+            --set image.tag=$IMAGE_TAG \
+            --set podAnnotations.slot=$INACTIVE_SLOT \
+            --wait \
+            --timeout 10m
+          
+          # Run health checks
+          echo "Running health checks on $INACTIVE_SLOT deployment..."
+          for i in {1..30}; do
+            if helm test legalassist-$INACTIVE_SLOT -n production; then
+              echo "Health checks passed!"
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "Health checks failed!"
+              exit 1
+            fi
+            sleep 10
+          done
+          
+          # Switch traffic to inactive slot
+          kubectl patch service legalassist-slot -n production -p '{"spec":{"selector":{"slot":"'$INACTIVE_SLOT'"}}}'
+          
+          # Clean up old slot (optional: keep for quick rollback)
+          echo "Blue-Green deployment complete. New slot: $INACTIVE_SLOT"
+
+      - name: Verify production deployment
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG_PRODUCTION }}
+        run: |
+          mkdir -p $HOME/.kube
+          echo "$KUBE_CONFIG" | base64 -d > $HOME/.kube/config
+          kubectl get deployments -n production
+          kubectl get pods -n production
+
+      - name: Send deployment notification
+        if: success()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: 'Production deployment successful! Version: ${{ needs.build.outputs.image-tag }}'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+          fields: repo,message,commit,author
+
+      - name: Send failure notification
+        if: failure()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: 'Production deployment FAILED! Check logs immediately.'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK_CRITICAL }}
+          fields: repo,message,commit,author
+
+  # ==================== Post-Deployment Monitoring ====================
+  monitor:
+    needs: deploy-production
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Check metrics in Prometheus
+        env:
+          PROMETHEUS_URL: ${{ secrets.PROMETHEUS_URL }}
+        run: |
+          curl -s "$PROMETHEUS_URL/api/v1/targets" | grep -q "state\":\"up"
+          if [ $? -ne 0 ]; then
+            echo "Warning: Some targets are down"
+            exit 1
+          fi
+      
+      - name: Validate Grafana dashboards
+        env:
+          GRAFANA_URL: ${{ secrets.GRAFANA_URL }}
+          GRAFANA_TOKEN: ${{ secrets.GRAFANA_TOKEN }}
+        run: |
+          curl -s -H "Authorization: Bearer $GRAFANA_TOKEN" \
+            "$GRAFANA_URL/api/dashboards/home" | grep -q "dashboard"
