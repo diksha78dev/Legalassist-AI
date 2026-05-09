@@ -7,6 +7,7 @@ import os
 import hashlib
 import secrets
 import time
+import re
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple
@@ -52,6 +53,8 @@ def _is_development_mode() -> bool:
 JWT_SECRET = Config.get_jwt_secret()
 JWT_ALGORITHM = Config.JWT_ALGORITHM
 JWT_EXPIRY_HOURS = Config.JWT_EXPIRY_HOURS
+
+EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
 
 OTP_EXPIRY_MINUTES = Config.OTP_EXPIRY_MINUTES
 OTP_RATE_LIMIT_HOURS = 1
@@ -213,7 +216,7 @@ def request_otp(email: str) -> Tuple[bool, str]:
     Returns (success, message).
     """
     # Validate email format
-    if not email or "@" not in email or "." not in email:
+    if not email or not EMAIL_REGEX.match(email):
         return False, "Invalid email address"
 
     db = SessionLocal()
