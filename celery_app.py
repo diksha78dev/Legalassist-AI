@@ -181,13 +181,30 @@ def generate_report_task(
         self.update_state(state="PROGRESS", meta={"status": "Rendering output", "progress": 80})
         self.update_state(state="PROGRESS", meta={"status": "Finalizing report", "progress": 95})
         
-        # In production, call actual report generator
+        # Phase 1: call local report generator
+        from report_service import generate_report
+
+        report_id = str(uuid.uuid4())
+        generated = generate_report(
+            user_id=user_id,
+            case_id=case_id,
+            report_type=report_type,
+            include_remedies=True,
+            include_timeline=True,
+            format=format,
+            style="formal",
+            report_id=report_id,
+        )
+
         result = {
-            "report_id": str(uuid.uuid4()),
-            "file_url": f"https://storage.example.com/reports/{case_id}_{report_type}.{format}",
-            "file_size_bytes": 1024000,
-            "download_url": f"https://api.example.com/api/v1/reports/{case_id}/download"
+            "report_id": report_id,
+            "format": generated.format,
+            "file_path": str(generated.file_path),
+            "file_name": generated.file_name,
+            "mime_type": generated.mime_type,
+            "file_size_bytes": generated.file_size_bytes,
         }
+
         
         logger.info(
             "Report generation completed",
