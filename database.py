@@ -233,6 +233,26 @@ class UserFeedback(Base):
         return f"<UserFeedback(user_id={self.user_id}, appeal_outcome={self.appeal_outcome})>"
 
 
+class SimilarityFeedback(Base):
+    """Model for tracking similarity search relevance feedback"""
+    __tablename__ = "similarity_feedback"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(String(255), nullable=False, index=True)
+    query_signature = Column(String(512), nullable=False, index=True)
+    candidate_case_id = Column(Integer, ForeignKey("case_records.id", ondelete="CASCADE"), nullable=False, index=True)
+    relevance = Column(Boolean, nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+
+    candidate_case = relationship("CaseRecord")
+
+    def __repr__(self):
+        return (
+            f"<SimilarityFeedback(user_id={self.user_id}, candidate_case_id={self.candidate_case_id}, "
+            f"relevance={self.relevance})>"
+        )
+
+
 # ==================== New Models for Case History & Authentication ====================
 
 
@@ -701,6 +721,46 @@ def get_user_feedback(db: Session, user_id: int, limit: int = 50) -> List[UserFe
     return db.query(UserFeedback).filter(
         UserFeedback.user_id == user_id
     ).order_by(UserFeedback.created_at.desc()).limit(limit).all()
+
+
+def submit_similarity_feedback(
+    db: Session,
+    user_id: str,
+    candidate_case_id: int,
+    query_signature: str,
+    relevance: bool,
+) -> SimilarityFeedback:
+    """Persist feedback for a similarity search result"""
+    feedback = SimilarityFeedback(
+        user_id=str(user_id),
+        candidate_case_id=candidate_case_id,
+        query_signature=query_signature,
+        relevance=relevance,
+    )
+    db.add(feedback)
+    db.commit()
+    db.refresh(feedback)
+    return feedback
+
+
+def get_similarity_feedback(
+    db: Session,
+    user_id: Optional[str] = None,
+    query_signature: Optional[str] = None,
+    candidate_case_id: Optional[int] = None,
+    limit: int = 100,
+) -> List[SimilarityFeedback]:
+    """Get similarity feedback rows filtered by user, query, or candidate case"""
+    query = db.query(SimilarityFeedback)
+
+    if user_id is not None:
+        query = query.filter(SimilarityFeedback.user_id == str(user_id))
+    if query_signature is not None:
+        query = query.filter(SimilarityFeedback.query_signature == query_signature)
+    if candidate_case_id is not None:
+        query = query.filter(SimilarityFeedback.candidate_case_id == candidate_case_id)
+
+    return query.order_by(SimilarityFeedback.created_at.desc()).limit(limit).all()
 
 
 # ==================== User & Authentication Helper Functions ====================
