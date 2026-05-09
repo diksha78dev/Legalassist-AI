@@ -457,6 +457,31 @@ finally:
 
 # ==================== ABOUT ====================
 st.markdown("---")
+    # ==================== MODEL OPTIMIZATION ====================
+    st.subheader("🤖 Model Optimization & Feedback")
+
+    if st.button("Refresh model performance", key="refresh_models"):
+        try:
+            api_base = st.session_state.get("api_base_url", "http://localhost:8000").rstrip('/')
+            token = st.session_state.get("api_token", "")
+            headers = {"Authorization": f"Bearer {token}"} if token else {}
+            resp = requests.get(f"{api_base}/api/v1/models/performance", headers=headers, timeout=10)
+            resp.raise_for_status()
+            st.session_state.model_performance = resp.json()
+        except Exception as e:
+            st.error(f"Could not fetch model performance: {e}")
+
+    if "model_performance" in st.session_state:
+        perf = st.session_state.model_performance
+        items = perf.get("items", [])
+        if items:
+            df = pd.DataFrame(items)
+            df = df[["model_name", "task", "case_type", "jurisdiction", "samples", "accuracy"]]
+            st.dataframe(df, use_container_width=True)
+        else:
+            st.info("No model feedback collected yet.")
+
+    st.markdown("---")
 st.markdown("""
 ### About This Dashboard
 

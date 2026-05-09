@@ -233,6 +233,64 @@ class UserFeedback(Base):
         return f"<UserFeedback(user_id={self.user_id}, appeal_outcome={self.appeal_outcome})>"
 
 
+class ModelFeedback(Base):
+    """User feedback on model outputs for later training and evaluation"""
+    __tablename__ = "model_feedback"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(String(255), nullable=False, index=True)
+    model_name = Column(String(255), nullable=False, index=True)
+    task = Column(String(100), nullable=False, index=True)  # summary, remedy, appeal_estimate, etc.
+    case_id = Column(Integer, ForeignKey("case_records.id", ondelete="SET NULL"), nullable=True, index=True)
+    is_accurate = Column(Boolean, nullable=True, index=True)  # True=accurate, False=inaccurate, None=neutral
+    corrected_text = Column(Text, nullable=True)
+    feedback_notes = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+
+    case = relationship("CaseRecord")
+
+    def __repr__(self):
+        return f"<ModelFeedback(model={self.model_name}, task={self.task}, accurate={self.is_accurate})>"
+
+
+class ModelPerformance(Base):
+    """Aggregated model performance metrics (materialized/updated periodically)"""
+    __tablename__ = "model_performance"
+
+    id = Column(Integer, primary_key=True)
+    model_name = Column(String(255), nullable=False, index=True)
+    task = Column(String(100), nullable=False, index=True)
+    case_type = Column(String(100), nullable=True, index=True)
+    jurisdiction = Column(String(100), nullable=True, index=True)
+    samples = Column(Integer, default=0)
+    accurate_count = Column(Integer, default=0)
+    accuracy = Column(String(50), default="0%")
+    average_latency_ms = Column(Integer, nullable=True)
+    average_cost = Column(Integer, nullable=True)  # in cents or smallest currency unit
+    last_updated = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+
+    def __repr__(self):
+        return f"<ModelPerformance(model={self.model_name}, task={self.task}, accuracy={self.accuracy})>"
+
+
+class ModelRoutingRule(Base):
+    """Rule for routing tasks to specific models based on case attributes"""
+    __tablename__ = "model_routing_rule"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(255), nullable=False)
+    case_type = Column(String(100), nullable=True)
+    jurisdiction = Column(String(100), nullable=True)
+    min_case_value = Column(String(50), nullable=True)
+    task = Column(String(100), nullable=False)
+    preferred_model = Column(String(255), nullable=False)
+    approved = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+
+    def __repr__(self):
+        return f"<ModelRoutingRule(name={self.name}, task={self.task}, model={self.preferred_model})>"
+
+
 class SimilarityFeedback(Base):
     """Model for tracking similarity search relevance feedback"""
     __tablename__ = "similarity_feedback"
@@ -718,6 +776,71 @@ def get_user_feedback(db: Session, user_id: int, limit: int = 50) -> List[UserFe
     return db.query(UserFeedback).filter(
         UserFeedback.user_id == user_id
     ).order_by(UserFeedback.created_at.desc()).limit(limit).all()
+
+
+def submit_model_feedback(
+    db: Session,
+    user_id: str,
+    model_name: str,
+    task: str,
+    case_id: Optional[int] = None,
+    is_accurate: Optional[bool] = None,
+    corrected_text: Optional[str] = None,
+    feedback_notes: Optional[str] = None,
+) -> ModelFeedback:
+    """Persist model output feedback for training and evaluation"""
+    fb = ModelFeedback(
+        user_id=str(user_id),
+        model_name=model_name,
+        task=task,
+        case_id=case_id,
+        is_accurate=is_accurate,
+        corrected_text=corrected_text,
+        feedback_notes=feedback_notes,
+    )
+    db.add(fb)
+    db.commit()
+    db.refresh(fb)
+    return fb
+
+
+def aggregate_model_performance(db: Session, task: Optional[str] = None) -> List[ModelPerformance]:
+    """Compute simple model performance aggregates from `model_feedback` rows.
+
+    This is a lightweight aggregator used by the dashboard and can be run periodically.
+    Returns newly-created/updated ModelPerformance rows (in-memory list) but does NOT persist them automatically.
+    """
+    query = db.query(ModelFeedback)
+    if task:
+        query = query.filter(ModelFeedback.task == task)
+
+    rows = query.all()
+    stats = {}
+    for r in rows:
+        key = (r.model_name, r.task, getattr(r.case, "case_type", None), getattr(r.case, "jurisdiction", None))
+        if key not in stats:
+            stats[key] = {"samples": 0, "accurate": 0}
+        stats[key]["samples"] += 1
+        if r.is_accurate:
+            stats[key]["accurate"] += 1
+
+    results = []
+    for (model_name, task_name, case_type, jurisdiction), v in stats.items():
+        samples = v["samples"]
+        accurate = v["accurate"]
+        accuracy = f"{(accurate / samples * 100):.1f}%" if samples > 0 else "0%"
+        mp = ModelPerformance(
+            model_name=model_name,
+            task=task_name,
+            case_type=case_type,
+            jurisdiction=jurisdiction,
+            samples=samples,
+            accurate_count=accurate,
+            accuracy=accuracy,
+        )
+        results.append(mp)
+
+    return results
 
 
 def submit_similarity_feedback(

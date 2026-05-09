@@ -156,6 +156,35 @@ class SimilarityFeedbackResponse(BaseModel):
     feedback_id: int
 
 
+class ModelFeedbackRequest(BaseModel):
+    model_name: str
+    task: str
+    case_id: Optional[int] = None
+    is_accurate: Optional[bool] = None
+    corrected_text: Optional[str] = None
+    feedback_notes: Optional[str] = None
+
+
+class ModelFeedbackResponse(BaseModel):
+    success: bool
+    feedback_id: int
+    saved_at: datetime
+
+
+class ModelPerformanceItem(BaseModel):
+    model_name: str
+    task: str
+    case_type: Optional[str] = None
+    jurisdiction: Optional[str] = None
+    samples: int
+    accurate_count: int
+    accuracy: str
+
+
+class ModelPerformanceResponse(BaseModel):
+    items: List[ModelPerformanceItem]
+
+
 # ============================================================================
 # Case Timeline Models
 # ============================================================================
