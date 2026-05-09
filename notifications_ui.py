@@ -209,7 +209,7 @@ def page_manage_deadlines():
         if not user_pref:
             st.warning("⚠️ Please set up your notification preferences first!")
             if st.button("Go to Preferences"):
-                st.switch_page("pages/notifications.py")
+                st.switch_page("pages/3_Settings.py")
             return
 
         # Add new deadline
