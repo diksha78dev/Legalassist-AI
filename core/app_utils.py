@@ -93,13 +93,25 @@ def _extract_layout_text_from_tesseract_data(data: Dict[str, List[Any]]) -> str:
             conf = -1.0
         if conf < 0:
             continue
-        key = (data["page_num"][i], data["block_num"][i], data["par_num"][i], data["line_num"][i])
+        # Safely retrieve positional fields; skip token if any key is missing or index is out of range.
+        try:
+            key = (
+                data["page_num"][i],
+                data["block_num"][i],
+                data["par_num"][i],
+                data["line_num"][i],
+            )
+            left_val = data["left"][i]
+            top_val = data["top"][i]
+            width_val = data["width"][i]
+        except (KeyError, IndexError):
+            continue
         if key not in lines:
-            lines[key] = {"tokens": [], "left": data["left"][i], "top": data["top"][i], "right": data["left"][i] + data["width"][i]}
+            lines[key] = {"tokens": [], "left": left_val, "top": top_val, "right": left_val + width_val}
         lines[key]["tokens"].append(token)
-        lines[key]["left"] = min(lines[key]["left"], data["left"][i])
-        lines[key]["right"] = max(lines[key]["right"], data["left"][i] + data["width"][i])
-        lines[key]["top"] = min(lines[key]["top"], data["top"][i])
+        lines[key]["left"] = min(lines[key]["left"], left_val)
+        lines[key]["right"] = max(lines[key]["right"], left_val + width_val)
+        lines[key]["top"] = min(lines[key]["top"], top_val)
 
     grouped: Dict[int, List[Dict[str, Any]]] = {}
     for key, value in lines.items():
@@ -797,7 +809,7 @@ def get_remedies_advice(judgment_text, language, client=None):
             },
             {"role": "user", "content": prompt},
         ],
-        max_tokens=900,
+        max_tokens=Config.REMEDIES_MAX_TOKENS,
         temperature=0.1,
     )
 

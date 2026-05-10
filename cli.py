@@ -1,5 +1,6 @@
 import argparse
 import csv
+import hashlib
 import json
 import logging
 import structlog
@@ -53,6 +54,7 @@ except ModuleNotFoundError:
                 self._bar.set_description_str(description)
 from logging_config import configure_logging
 import core
+from config import Config
 
 # Make language detection deterministic.
 DetectorFactory.seed = 0
@@ -78,6 +80,17 @@ KNOWN_COURTS = {
 
 # Global semaphore for API concurrency control
 API_SEMAPHORE = threading.Semaphore(5)
+
+
+def _reinitialize_semaphore(concurrency: int) -> None:
+    """Replace the global API semaphore with a new one sized to *concurrency*.
+
+    Calling this before any worker threads are spawned ensures the correct
+    limit is applied regardless of whether execution entered through main()
+    or directly via process_command / batch_command (e.g. in tests).
+    """
+    global API_SEMAPHORE
+    API_SEMAPHORE = threading.Semaphore(concurrency)
 
 
 
@@ -243,7 +256,7 @@ def generate_summary(
         model=model,
         system_prompt="You are an expert legal simplification engine.",
         user_prompt=summary_prompt,
-        max_tokens=280,
+        max_tokens=Config.SUMMARY_MAX_TOKENS,
         temperature=0.05,
     )
     
@@ -257,7 +270,7 @@ def generate_summary(
             model=model,
             system_prompt="Strict multilingual rewriting engine.",
             user_prompt=retry_prompt,
-            max_tokens=260,
+            max_tokens=Config.SUMMARY_MAX_TOKENS,
             temperature=0.03,
         )
         retry_summary = (resp_retry.choices[0].message.content or "").strip()
@@ -288,7 +301,7 @@ def get_remedies(
         model=model,
         system_prompt="You are a helpful legal advisor. Answer questions about legal remedies in India.",
         user_prompt=remedies_prompt,
-        max_tokens=500,
+        max_tokens=Config.REMEDIES_MAX_TOKENS,
         temperature=0.1,
     )
     
@@ -577,6 +590,7 @@ def print_cost_summary(snapshot: Dict[str, float]) -> None:
 
 
 def process_command(args: argparse.Namespace) -> int:
+    _reinitialize_semaphore(args.concurrency)
     file_path = Path(args.file)
     if not file_path.exists() or file_path.suffix.lower() != ".pdf":
         raise CLIError(f"Invalid PDF file: {file_path}")
@@ -610,6 +624,7 @@ def process_command(args: argparse.Namespace) -> int:
 
 
 def batch_command(args: argparse.Namespace) -> int:
+    _reinitialize_semaphore(args.concurrency)
     folder = Path(args.folder)
     if not folder.exists() or not folder.is_dir():
         raise CLIError(f"Invalid folder: {folder}")
@@ -621,6 +636,10 @@ def batch_command(args: argparse.Namespace) -> int:
 
     output_path = Path(args.output)
     checkpoint_file = Path(args.checkpoint) if args.checkpoint else output_path.with_suffix(output_path.suffix + ".checkpoint.jsonl")
+
+    # Delete stale checkpoint BEFORE loading so --no-resume truly starts fresh.
+    if not args.resume and checkpoint_file.exists():
+        checkpoint_file.unlink()
 
     try:
         existing_records = load_checkpoint(checkpoint_file) if args.resume else []
@@ -635,9 +654,6 @@ def batch_command(args: argparse.Namespace) -> int:
     }
 
     to_process = [p for p in all_files if str(p.resolve()) not in done_success]
-
-    if not args.resume and checkpoint_file.exists():
-        checkpoint_file.unlink()
 
     LOGGER.info("batch_discovery", total_found=len(all_files), already_completed=len(done_success), pending=len(to_process))
 
