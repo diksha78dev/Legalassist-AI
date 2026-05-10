@@ -477,7 +477,7 @@ def main():
                             timeout=Config.LLM_TIMEOUT,
                         )
 
-                        if len(retry_summary_raw) > 0 and not english_leakage_detected(retry_summary_raw):
+                        if retry_summary_raw and len(retry_summary_raw) > 0 and not english_leakage_detected(retry_summary_raw):
                             # Apply structured parsing to retry summary as well
                             summary = parse_summary_bullets(retry_summary_raw)
 
