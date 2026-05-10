@@ -64,6 +64,11 @@ MAX_FILE_SIZE_MB = Config.MAX_FILE_SIZE_MB
 LEGAL_AID_DIRECTORY_PATH = Path(__file__).parent / "legal_aid_directory.json"
 
 
+def get_uploaded_file_hash(uploaded_file):
+    """Return a stable SHA256 hash for the uploaded file contents."""
+    return hashlib.sha256(uploaded_file.getbuffer()).hexdigest()
+
+
 @st.cache_data(show_spinner=False)
 def load_legal_aid_directory():
     """Load state-wise legal aid directory from JSON data file."""
@@ -409,7 +414,9 @@ def main():
         st.session_state.processed_file_hash = content_hash
         st.session_state.last_language = language
 
-    if uploaded_file and st.session_state.get("processed_file") == uploaded_file.name and st.session_state.get("last_language") == language:
+    current_hash = hashlib.md5(uploaded_file.getvalue()).hexdigest() if uploaded_file else None
+    is_same_file = st.session_state.get("processed_file") == uploaded_file.name and st.session_state.get("processed_file_hash") == current_hash
+    if uploaded_file and is_same_file and st.session_state.get("last_language") == language:
         if not client:
             st.error(ui["openrouter_not_configured"])
             return
@@ -668,6 +675,7 @@ def main():
                     # Show analytics if requested
                     if st.session_state.get("show_analytics"):
                         st.subheader("📊 Quick Analytics Preview")
+                        db = None
                         try:
                             from analytics_engine import AnalyticsAggregator
                             from database import CaseRecord
@@ -687,10 +695,11 @@ def main():
                                 st.write("📌 **Visit Analytics Dashboard for detailed insights** ➡️ [See Full Dashboard]()")
                             else:
                                 st.info("Analytics will be available as more cases are tracked.")
-                            
-                            db.close()
                         except Exception as e:
                             st.info("Analytics module not ready yet.")
+                        finally:
+                            if db is not None:
+                                db.close()
                     
                     # ===== FREE LEGAL HELP SECTION =====
                     st.markdown("---")
