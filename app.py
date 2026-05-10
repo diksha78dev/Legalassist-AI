@@ -2,6 +2,7 @@ import streamlit as st
 import openai
 from openai import OpenAI
 from pypdf import PdfReader
+import hashlib
 import logging
 import os
 import re
@@ -61,6 +62,11 @@ st.set_page_config(
 MAX_FILE_SIZE_MB = Config.MAX_FILE_SIZE_MB
 
 LEGAL_AID_DIRECTORY_PATH = Path(__file__).parent / "legal_aid_directory.json"
+
+
+def get_uploaded_file_hash(uploaded_file):
+    """Return a stable SHA256 hash for the uploaded file contents."""
+    return hashlib.sha256(uploaded_file.getbuffer()).hexdigest()
 
 
 @st.cache_data(show_spinner=False)
@@ -400,10 +406,14 @@ def main():
 
     generate_clicked = st.button("🚀 Generate Summary") if (uploaded_file and is_valid_pdf) else False
     if uploaded_file and generate_clicked:
-        st.session_state.processed_file = uploaded_file.name
+        current_file_hash = get_uploaded_file_hash(uploaded_file)
+        st.session_state.processed_file = current_file_hash
         st.session_state.last_language = language
 
-    if uploaded_file and st.session_state.get("processed_file") == uploaded_file.name and st.session_state.get("last_language") == language:
+    if uploaded_file:
+        current_file_hash = get_uploaded_file_hash(uploaded_file)
+
+    if uploaded_file and st.session_state.get("processed_file") == current_file_hash and st.session_state.get("last_language") == language:
         if not client:
             st.error(ui["openrouter_not_configured"])
             return
@@ -411,7 +421,8 @@ def main():
         with st.spinner(ui["processing"]):
             try:
                 # Only call LLM if we haven't processed this exact file/language combo
-                if st.session_state.get("last_processed") != f"{uploaded_file.name}_{language}":
+                file_cache_key = f"{current_file_hash}_{language}"
+                if st.session_state.get("last_processed") != file_cache_key:
                     raw_text = extract_text_from_pdf(uploaded_file)
                     safe_text = compress_text(raw_text)
 
@@ -470,7 +481,7 @@ def main():
                     st.session_state.raw_text = raw_text
                     st.session_state.summary = summary
                     st.session_state.remedies = remedies
-                    st.session_state.last_processed = f"{uploaded_file.name}_{language}"
+                    st.session_state.last_processed = file_cache_key
                 else:
                     # Load from session
                     raw_text = st.session_state.raw_text
