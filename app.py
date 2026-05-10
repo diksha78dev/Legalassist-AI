@@ -670,6 +670,7 @@ def main():
                     # Show analytics if requested
                     if st.session_state.get("show_analytics"):
                         st.subheader("📊 Quick Analytics Preview")
+                        db = None
                         try:
                             from analytics_engine import AnalyticsAggregator
                             from database import CaseRecord
@@ -689,10 +690,11 @@ def main():
                                 st.write("📌 **Visit Analytics Dashboard for detailed insights** ➡️ [See Full Dashboard]()")
                             else:
                                 st.info("Analytics will be available as more cases are tracked.")
-                            
-                            db.close()
                         except Exception as e:
                             st.info("Analytics module not ready yet.")
+                        finally:
+                            if db is not None:
+                                db.close()
                     
                     # ===== FREE LEGAL HELP SECTION =====
                     st.markdown("---")
