@@ -93,19 +93,25 @@ def _extract_layout_text_from_tesseract_data(data: Dict[str, List[Any]]) -> str:
             conf = -1.0
         if conf < 0:
             continue
-        # Safely retrieve positional fields; skip token if any key is missing or index is out of range.
-        try:
-            key = (
-                data["page_num"][i],
-                data["block_num"][i],
-                data["par_num"][i],
-                data["line_num"][i],
-            )
-            left_val = data["left"][i]
-            top_val = data["top"][i]
-            width_val = data["width"][i]
-        except (KeyError, IndexError):
-            continue
+        # Safely retrieve positional fields with fallbacks to avoid dropping valid text
+        p_list = data.get("page_num", [])
+        b_list = data.get("block_num", [])
+        pr_list = data.get("par_num", [])
+        l_list = data.get("line_num", [])
+        left_list = data.get("left", [])
+        top_list = data.get("top", [])
+        width_list = data.get("width", [])
+
+        p_num = p_list[i] if i < len(p_list) else 1
+        b_num = b_list[i] if i < len(b_list) else 1
+        pr_num = pr_list[i] if i < len(pr_list) else 1
+        l_num = l_list[i] if i < len(l_list) else 1
+        
+        left_val = left_list[i] if i < len(left_list) else 0
+        top_val = top_list[i] if i < len(top_list) else 0
+        width_val = width_list[i] if i < len(width_list) else 0
+
+        key = (p_num, b_num, pr_num, l_num)
         if key not in lines:
             lines[key] = {"tokens": [], "left": left_val, "top": top_val, "right": left_val + width_val}
         lines[key]["tokens"].append(token)
