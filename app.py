@@ -151,49 +151,48 @@ def render_remedies_section(remedies):
     st.markdown("---")
     st.markdown("## ⚖️ What Can You Do Now?")
     
-    with st.spinner("Analyzing your legal options..."):
-        try:
-            # Show warning if data is partial
-            if remedies.get("_is_partial"):
-                st.warning(remedies.get("_warning", "Note: Some information may be incomplete."))
+    try:
+        # Show warning if data is partial
+        if remedies.get("_is_partial"):
+            st.warning(remedies.get("_warning", "Note: Some information may be incomplete."))
+        
+        # Show each answer with clean layout
+        if remedies.get("what_happened"):
+            st.markdown("### 📝 What Happened?")
+            st.info(remedies["what_happened"])
+        
+        if remedies.get("can_appeal"):
+            st.markdown("### 🏛️ Can You Appeal?")
+            st.write(remedies["can_appeal"])
             
-            # Show each answer with clean layout
-            if remedies.get("what_happened"):
-                st.markdown("### 📝 What Happened?")
-                st.info(remedies["what_happened"])
-            
-            if remedies.get("can_appeal"):
-                st.markdown("### 🏛️ Can You Appeal?")
-                st.write(remedies["can_appeal"])
+            # Only show appeal details if they can appeal
+            if "yes" in remedies["can_appeal"].lower():
+                st.markdown("#### Appeal Details")
                 
-                # Only show appeal details if they can appeal
-                if "yes" in remedies["can_appeal"].lower():
-                    st.markdown("#### Appeal Details")
-                    
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        if remedies.get("appeal_days"):
-                            st.metric("Days to File Appeal", remedies["appeal_days"], delta_color="inverse")
-                        if remedies.get("appeal_court"):
-                            st.markdown(f"**Appeal to:** `{remedies['appeal_court']}`")
-                    
-                    with col2:
-                        if remedies.get("cost"):
-                            st.markdown(f"**Estimated Cost:** `{remedies['cost']}`")
-                        if remedies.get("deadline"):
-                            st.markdown(f"**Deadline Note:** {remedies['deadline']}")
-            
-            if remedies.get("first_action"):
-                st.markdown("### 🚀 What Should You Do First?")
-                st.success(f"**Action Plan:** {remedies['first_action']}")
-            
-            if remedies.get("deadline") and not remedies.get("can_appeal"):
-                st.markdown("### ⏰ Important Deadline")
-                st.warning(remedies["deadline"])
-            
-        except Exception as e:
-            st.error(f"Could not render remedies advice: {str(e)}")
-            logging.exception("Remedies rendering failed")
+                col1, col2 = st.columns(2)
+                with col1:
+                    if remedies.get("appeal_days"):
+                        st.metric("Days to File Appeal", remedies["appeal_days"], delta_color="inverse")
+                    if remedies.get("appeal_court"):
+                        st.markdown(f"**Appeal to:** `{remedies['appeal_court']}`")
+                
+                with col2:
+                    if remedies.get("cost"):
+                        st.markdown(f"**Estimated Cost:** `{remedies['cost']}`")
+                    if remedies.get("deadline"):
+                        st.markdown(f"**Deadline Note:** {remedies['deadline']}")
+        
+        if remedies.get("first_action"):
+            st.markdown("### 🚀 What Should You Do First?")
+            st.success(f"**Action Plan:** {remedies['first_action']}")
+        
+        if remedies.get("deadline") and not remedies.get("can_appeal"):
+            st.markdown("### ⏰ Important Deadline")
+            st.warning(remedies["deadline"])
+        
+    except Exception as e:
+        st.error(f"Could not render remedies advice: {str(e)}")
+        logging.exception("Remedies rendering failed")
 
 
 def render_save_to_case_section(user_id, raw_text, summary, remedies):
