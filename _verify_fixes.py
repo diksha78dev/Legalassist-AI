@@ -17,7 +17,7 @@ checks = {
         ('st.session_state.last_processed = cache_key', 'Cache key stored in session'),
     ],
     r'd:\Legal_Assist\Legalassist-AI\core\app_utils.py': [
-        ('except (KeyError, IndexError):', 'OCR KeyError guarded'),
+        ('p_list = data.get("page_num", [])', 'OCR KeyError guarded'),
         ('Config.REMEDIES_MAX_TOKENS', 'Remedies token limit config-driven in app_utils'),
     ],
 }

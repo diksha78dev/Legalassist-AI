@@ -691,10 +691,6 @@ def parse_remedies_response(response_text: str) -> Dict:
         # If JSON was thin, fall through to regex just in case
 
     # --- STEP 2: Fallback to regex-based line parsing ---
-    # Detect all numbered sections (flexible separators: . ) : -)
-        return remedies
-
-    # Detect all numbered sections (flexible separators: . ) : -)
     # Only match 1-2 digit numbers to avoid matching content like "5000-10000"
     pattern = r'^([1-9]\d?)\s*[.):‐-]\s*(.*?)$'
     sections = {}
