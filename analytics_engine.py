@@ -207,8 +207,8 @@ class AnalyticsCalculator:
     @staticmethod
     def calculate_appeal_success_rate(cases: list) -> float:
         """
-        Calculate the appeal success rate from a list of CaseRecord objects.
-        Cases without outcome_data or with appeal_filed=False are ignored.
+        Calculate the aggregate appeal success rate from a list of CaseRecord objects.
+        Cases without outcome_data or with appeal_filed=False are safely ignored.
         Returns a percentage (0.0–100.0), or 0.0 if no qualifying cases.
         """
         appeals_filed = 0
