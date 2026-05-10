@@ -290,6 +290,7 @@ def upload_case_document(
             db=db,
             case_id=case_id,
             document_type=document_type,
+            user_id=user_id,
             document_content=document_content,
             file_path=file_path,
             summary=summary,
