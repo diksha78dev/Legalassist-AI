@@ -20,6 +20,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Index,
 )
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
 import enum
 from contextlib import contextmanager
@@ -27,7 +28,9 @@ from config import Config
 
 # Database setup
 DATABASE_URL = Config.DATABASE_URL
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {})
+_db_url = make_url(DATABASE_URL)
+_is_sqlite = _db_url.get_backend_name() == "sqlite"
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if _is_sqlite else {})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, expire_on_commit=False, bind=engine)
 Base = declarative_base()
 
