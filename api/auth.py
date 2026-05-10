@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict
 import jwt
 from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthCredentials, OAuth2PasswordBearer
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, OAuth2PasswordBearer
 import secrets
 import hashlib
 
@@ -121,7 +121,7 @@ class CurrentUser:
 
 async def get_current_user(
     token: Optional[str] = Depends(oauth2_scheme),
-    http_auth: Optional[HTTPAuthCredentials] = Depends(security),
+    http_auth: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> CurrentUser:
     """Get current authenticated user"""
     

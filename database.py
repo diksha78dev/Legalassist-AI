@@ -18,6 +18,7 @@ from sqlalchemy import (
     Enum as SQLEnum,
     JSON,
     UniqueConstraint,
+    Index,
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
 import enum
@@ -233,25 +234,341 @@ class UserFeedback(Base):
         return f"<UserFeedback(user_id={self.user_id}, appeal_outcome={self.appeal_outcome})>"
 
 
+class ModelFeedback(Base):
+    """User feedback on model outputs for later training and evaluation"""
+    __tablename__ = "model_feedback"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(String(255), nullable=False, index=True)
+    model_name = Column(String(255), nullable=False, index=True)
+    task = Column(String(100), nullable=False, index=True)  # summary, remedy, appeal_estimate, etc.
+    case_id = Column(Integer, ForeignKey("case_records.id", ondelete="SET NULL"), nullable=True, index=True)
+    is_accurate = Column(Boolean, nullable=True, index=True)  # True=accurate, False=inaccurate, None=neutral
+    corrected_text = Column(Text, nullable=True)
+    feedback_notes = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+
+    case = relationship("CaseRecord")
+
+    def __repr__(self):
+        return f"<ModelFeedback(model={self.model_name}, task={self.task}, accurate={self.is_accurate})>"
+
+
+class ModelPerformance(Base):
+    """Aggregated model performance metrics (materialized/updated periodically)"""
+    __tablename__ = "model_performance"
+
+    id = Column(Integer, primary_key=True)
+    model_name = Column(String(255), nullable=False, index=True)
+    task = Column(String(100), nullable=False, index=True)
+    case_type = Column(String(100), nullable=True, index=True)
+    jurisdiction = Column(String(100), nullable=True, index=True)
+    samples = Column(Integer, default=0)
+    accurate_count = Column(Integer, default=0)
+    accuracy = Column(String(50), default="0%")
+    average_latency_ms = Column(Integer, nullable=True)
+    average_cost = Column(Integer, nullable=True)  # in cents or smallest currency unit
+    last_updated = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+
+    def __repr__(self):
+        return f"<ModelPerformance(model={self.model_name}, task={self.task}, accuracy={self.accuracy})>"
+
+
+class ModelRoutingRule(Base):
+    """Rule for routing tasks to specific models based on case attributes"""
+    __tablename__ = "model_routing_rule"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(255), nullable=False)
+    case_type = Column(String(100), nullable=True)
+    jurisdiction = Column(String(100), nullable=True)
+    min_case_value = Column(String(50), nullable=True)
+    task = Column(String(100), nullable=False)
+    preferred_model = Column(String(255), nullable=False)
+    approved = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+
+    def __repr__(self):
+        return f"<ModelRoutingRule(name={self.name}, task={self.task}, model={self.preferred_model})>"
+
+
+class SimilarityFeedback(Base):
+    """Model for tracking similarity search relevance feedback"""
+    __tablename__ = "similarity_feedback"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(String(255), nullable=False, index=True)
+    query_signature = Column(String(512), nullable=False, index=True)
+    candidate_case_id = Column(Integer, ForeignKey("case_records.id", ondelete="CASCADE"), nullable=False, index=True)
+    relevance = Column(Boolean, nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+
+    candidate_case = relationship("CaseRecord")
+
+    def __repr__(self):
+        return (
+            f"<SimilarityFeedback(user_id={self.user_id}, candidate_case_id={self.candidate_case_id}, "
+            f"relevance={self.relevance})>"
+        )
+
+
 # ==================== New Models for Case History & Authentication ====================
 
 
 class User(Base):
-    """Model for user authentication and profiles"""
+    """
+    ===========================================================================
+    User Model Definition
+    ===========================================================================
+    
+    This model handles all user authentication, authorization, and core profile
+    data within the system. It serves as the primary entity to which almost all
+    other domain objects are linked (e.g., Cases, Deadlines, Preferences).
+    
+    Why Indexing Matters Here:
+    ---------------------------------------------------------------------------
+    User lookups during authentication scale poorly with large datasets. An O(N)
+    sequential scan across the users table during a login or token verification
+    event creates a significant performance bottleneck and potential vector for
+    Denial of Service (DoS) attacks.
+    
+    By explicitly defining a dedicated database index on the `email` column 
+    using the SQLAlchemy `Index` construct, we ensure that database engines 
+    like PostgreSQL or MySQL utilize a B-Tree (or similar) index structure. 
+    This reduces query execution time for authentication-related lookups from 
+    O(N) down to O(log N). 
+    
+    This is critical because the `email` field is used as the primary lookup
+    key during the JWT validation process, the OTP generation process, and 
+    the user login flow.
+    
+    Attributes:
+    ---------------------------------------------------------------------------
+    id : int
+        The primary key for the user. Used as a foreign key in most tables.
+    
+    email : str
+        The user's email address. Must be unique across the system. This 
+        field is explicitly indexed to optimize authentication queries.
+        
+    created_at : datetime
+        Timestamp recording when the user was initially created in the system.
+        Stored in UTC.
+        
+    last_login : datetime
+        Timestamp of the user's most recent successful authentication event.
+        Useful for auditing, session invalidation, and analytics.
+        
+    is_verified : bool
+        Flag indicating whether the user has successfully completed the email
+        OTP verification process at least once. Unverified users may have
+        restricted access to system features.
+        
+    Relationships:
+    ---------------------------------------------------------------------------
+    cases : list[Case]
+        A collection of all legal cases associated with this user.
+        Cascade behavior ensures that when a user is deleted, all their cases
+        are orphaned and subsequently deleted.
+        
+    preferences : list[UserPreference]
+        The user's notification and system preferences.
+        Cascade behavior matches the cases relationship.
+        
+    ===========================================================================
+    """
+
     __tablename__ = "users"
 
-    id = Column(Integer, primary_key=True)
-    email = Column(String(255), unique=True, nullable=False, index=True)
-    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
-    last_login = Column(DateTime(timezone=True), nullable=True)
-    is_verified = Column(Boolean, default=True, nullable=False)
+    # -------------------------------------------------------------------------
+    # Table Arguments & Indexes
+    # -------------------------------------------------------------------------
+    # We use a dedicated Index construct here rather than just `index=True` on 
+    # the Column definition. This provides several benefits:
+    #
+    # 1. It explicitly names the index (ix_users_email), making migrations and 
+    #    database maintenance operations more predictable and traceable.
+    #
+    # 2. It allows for future expansion (e.g., adding partial indexes or 
+    #    composite indexes) without significantly altering the column definition
+    #    or requiring complex migration scripts down the line.
+    #
+    # 3. It serves as clear, self-documenting code that performance optimization
+    #    has been deliberately applied to this specific lookup path, which is
+    #    crucial for a high-throughput authentication system.
+    #
+    # 4. In PostgreSQL and other advanced databases, explicit index names 
+    #    prevent the engine from auto-generating opaque index names that can 
+    #    complicate performance tuning and query analysis.
+    # -------------------------------------------------------------------------
+    
+    __table_args__ = (
+        Index("ix_users_email", "email"),
+    )
 
-    # Relationships
-    cases = relationship("Case", back_populates="user", cascade="all, delete-orphan")
-    preferences = relationship("UserPreference", back_populates="user", cascade="all, delete-orphan")
+    # -------------------------------------------------------------------------
+    # Primary Key Definition
+    # -------------------------------------------------------------------------
+    # The surrogate primary key for the User model.
+    # We use an auto-incrementing integer for simplicity and performance,
+    # as integer joins are generally faster than UUID or string joins.
+    # -------------------------------------------------------------------------
+    
+    id = Column(
+        Integer, 
+        primary_key=True
+    )
 
-    def __repr__(self):
-        return f"<User(email={self.email})>"
+    # -------------------------------------------------------------------------
+    # Core User Identity Fields
+    # -------------------------------------------------------------------------
+    # Note: We remove `index=True` from this definition because we have
+    # explicitly defined the `Index` construct in `__table_args__` above.
+    #
+    # The `unique=True` constraint will still typically generate a unique
+    # constraint (and often a corresponding index) at the database level, 
+    # but our explicit Index ensures that our specific performance 
+    # requirements are met and documented.
+    # -------------------------------------------------------------------------
+    
+    email = Column(
+        String(255), 
+        unique=True, 
+        nullable=False
+    )
+
+    # -------------------------------------------------------------------------
+    # Audit & Tracking Timestamps
+    # -------------------------------------------------------------------------
+    # These fields are critical for security auditing, analytics, and 
+    # determining inactive accounts for potential data retention policies
+    # or targeted re-engagement campaigns.
+    # -------------------------------------------------------------------------
+    
+    created_at = Column(
+        DateTime(timezone=True), 
+        default=lambda: dt.datetime.now(dt.timezone.utc), 
+        nullable=False
+    )
+    
+    last_login = Column(
+        DateTime(timezone=True), 
+        nullable=True
+    )
+
+    # -------------------------------------------------------------------------
+    # Account Status Flags
+    # -------------------------------------------------------------------------
+    # Used to manage account lifecycle and access control.
+    # Unverified accounts may be periodically purged if they do not
+    # complete the onboarding flow within a designated timeframe.
+    # -------------------------------------------------------------------------
+    
+    is_verified = Column(
+        Boolean, 
+        default=True, 
+        nullable=False
+    )
+
+    # -------------------------------------------------------------------------
+    # ORM Relationships
+    # -------------------------------------------------------------------------
+    # We define bidirectional relationships with other core entities here.
+    # The `cascade="all, delete-orphan"` parameter is crucial for maintaining
+    # referential integrity and preventing orphaned records in the database
+    # if a user account is deleted (e.g., for GDPR compliance).
+    # -------------------------------------------------------------------------
+    
+    cases = relationship(
+        "Case", 
+        back_populates="user", 
+        cascade="all, delete-orphan"
+    )
+    
+    preferences = relationship(
+        "UserPreference", 
+        back_populates="user", 
+        cascade="all, delete-orphan"
+    )
+
+    # -------------------------------------------------------------------------
+    # Helper Methods & Properties
+    # -------------------------------------------------------------------------
+    # These utility functions encapsulate common operations related to the
+    # User model, keeping business logic clean and localized.
+    # -------------------------------------------------------------------------
+
+    def __repr__(self) -> str:
+        """
+        String representation of the User model.
+        Useful for debugging, logging, and interactive console sessions.
+        
+        Returns:
+            str: A formatted string containing the user's ID, email, and status.
+        """
+        return f"<User(id={self.id}, email='{self.email}', verified={self.is_verified})>"
+
+    def to_dict(self) -> dict:
+        """
+        Convert the User model to a dictionary representation.
+        Useful for API responses, JSON serialization, and caching.
+        
+        Note: This method deliberately excludes sensitive information
+        and related collections to prevent accidental data leaks or
+        N+1 query problems.
+        
+        Returns:
+            dict: A dictionary containing the user's core attributes.
+        """
+        return {
+            "id": self.id,
+            "email": self.email,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "last_login": self.last_login.isoformat() if self.last_login else None,
+            "is_verified": self.is_verified
+        }
+
+    @property
+    def has_logged_in(self) -> bool:
+        """
+        Check if the user has ever successfully logged into the system.
+        This can be used to determine if the user is a completely new
+        registration or a returning user.
+        
+        Returns:
+            bool: True if last_login is set, False otherwise.
+        """
+        return self.last_login is not None
+
+    def update_last_login(self) -> None:
+        """
+        Update the last_login timestamp to the current UTC time.
+        
+        This should be called during the authentication flow upon
+        successful verification of credentials or OTP.
+        
+        Note: This method modifies the object in memory but does NOT 
+        commit the transaction to the database. The caller is responsible 
+        for committing the active SQLAlchemy session.
+        """
+        self.last_login = dt.datetime.now(dt.timezone.utc)
+
+    def verify(self) -> None:
+        """
+        Mark the user account as verified.
+        
+        This is typically called after the user successfully enters
+        an OTP sent to their email address.
+        
+        Note: This method modifies the object in memory but does NOT 
+        commit the transaction to the database. The caller is responsible 
+        for committing the active SQLAlchemy session.
+        """
+        self.is_verified = True
+
+    # -------------------------------------------------------------------------
+    # End of User Model Definition
+    # -------------------------------------------------------------------------
 
 
 class OTPVerification(Base):
@@ -701,6 +1018,111 @@ def get_user_feedback(db: Session, user_id: int, limit: int = 50) -> List[UserFe
     return db.query(UserFeedback).filter(
         UserFeedback.user_id == user_id
     ).order_by(UserFeedback.created_at.desc()).limit(limit).all()
+
+
+def submit_model_feedback(
+    db: Session,
+    user_id: str,
+    model_name: str,
+    task: str,
+    case_id: Optional[int] = None,
+    is_accurate: Optional[bool] = None,
+    corrected_text: Optional[str] = None,
+    feedback_notes: Optional[str] = None,
+) -> ModelFeedback:
+    """Persist model output feedback for training and evaluation"""
+    fb = ModelFeedback(
+        user_id=str(user_id),
+        model_name=model_name,
+        task=task,
+        case_id=case_id,
+        is_accurate=is_accurate,
+        corrected_text=corrected_text,
+        feedback_notes=feedback_notes,
+    )
+    db.add(fb)
+    db.commit()
+    db.refresh(fb)
+    return fb
+
+
+def aggregate_model_performance(db: Session, task: Optional[str] = None) -> List[ModelPerformance]:
+    """Compute simple model performance aggregates from `model_feedback` rows.
+
+    This is a lightweight aggregator used by the dashboard and can be run periodically.
+    Returns newly-created/updated ModelPerformance rows (in-memory list) but does NOT persist them automatically.
+    """
+    query = db.query(ModelFeedback)
+    if task:
+        query = query.filter(ModelFeedback.task == task)
+
+    rows = query.all()
+    stats = {}
+    for r in rows:
+        key = (r.model_name, r.task, getattr(r.case, "case_type", None), getattr(r.case, "jurisdiction", None))
+        if key not in stats:
+            stats[key] = {"samples": 0, "accurate": 0}
+        stats[key]["samples"] += 1
+        if r.is_accurate:
+            stats[key]["accurate"] += 1
+
+    results = []
+    for (model_name, task_name, case_type, jurisdiction), v in stats.items():
+        samples = v["samples"]
+        accurate = v["accurate"]
+        accuracy = f"{(accurate / samples * 100):.1f}%" if samples > 0 else "0%"
+        mp = ModelPerformance(
+            model_name=model_name,
+            task=task_name,
+            case_type=case_type,
+            jurisdiction=jurisdiction,
+            samples=samples,
+            accurate_count=accurate,
+            accuracy=accuracy,
+        )
+        results.append(mp)
+
+    return results
+
+
+def submit_similarity_feedback(
+    db: Session,
+    user_id: str,
+    candidate_case_id: int,
+    query_signature: str,
+    relevance: bool,
+) -> SimilarityFeedback:
+    """Persist feedback for a similarity search result"""
+    feedback = SimilarityFeedback(
+        user_id=str(user_id),
+        candidate_case_id=candidate_case_id,
+        query_signature=query_signature,
+        relevance=relevance,
+    )
+    db.add(feedback)
+    db.commit()
+    db.refresh(feedback)
+    return feedback
+
+
+def get_similarity_feedback(
+    db: Session,
+    user_id: Optional[str] = None,
+    query_signature: Optional[str] = None,
+    candidate_case_id: Optional[int] = None,
+    limit: int = 100,
+) -> List[SimilarityFeedback]:
+    """Get similarity feedback rows filtered by user, query, or candidate case"""
+    query = db.query(SimilarityFeedback)
+
+    if user_id is not None:
+        query = query.filter(SimilarityFeedback.user_id == str(user_id))
+    if query_signature is not None:
+        query = query.filter(SimilarityFeedback.query_signature == query_signature)
+    if candidate_case_id is not None:
+        query = query.filter(SimilarityFeedback.candidate_case_id == candidate_case_id)
+
+    return query.order_by(SimilarityFeedback.created_at.desc()).limit(limit).all()
 
 
 # ==================== User & Authentication Helper Functions ====================
