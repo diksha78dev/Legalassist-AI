@@ -79,7 +79,8 @@ KNOWN_COURTS = {
 }
 
 # Global semaphore for API concurrency control
-API_SEMAPHORE = threading.Semaphore(5)
+_API_SEMAPHORE: Optional[threading.Semaphore] = None
+_SEMAPHORE_LOCK = threading.Lock()
 
 
 def _reinitialize_semaphore(concurrency: int) -> None:
@@ -89,8 +90,19 @@ def _reinitialize_semaphore(concurrency: int) -> None:
     limit is applied regardless of whether execution entered through main()
     or directly via process_command / batch_command (e.g. in tests).
     """
-    global API_SEMAPHORE
-    API_SEMAPHORE = threading.Semaphore(concurrency)
+    global _API_SEMAPHORE
+    with _SEMAPHORE_LOCK:
+        _API_SEMAPHORE = threading.Semaphore(concurrency)
+
+
+def get_api_semaphore() -> threading.Semaphore:
+    """Get the API semaphore, initializing it lazily with default concurrency if needed."""
+    global _API_SEMAPHORE
+    if _API_SEMAPHORE is None:
+        with _SEMAPHORE_LOCK:
+            if _API_SEMAPHORE is None:
+                _API_SEMAPHORE = threading.Semaphore(5)
+    return _API_SEMAPHORE
 
 
 
@@ -206,7 +218,7 @@ def _chat_completion(
     last_err = None
     for attempt in range(max_retries):
         try:
-            with API_SEMAPHORE:
+            with get_api_semaphore():
                 return client.chat.completions.create(
                     model=model,
                     messages=[
@@ -858,8 +870,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         logging.basicConfig(level=logging.INFO)
 
     # Initialize global semaphore with user-specified concurrency
-    global API_SEMAPHORE
-    API_SEMAPHORE = threading.Semaphore(args.concurrency)
+    _reinitialize_semaphore(args.concurrency)
 
     if getattr(args, "workers", 1) < 1:
         raise CLIError("--workers must be >= 1")
