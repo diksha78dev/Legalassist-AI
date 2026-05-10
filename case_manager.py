@@ -352,6 +352,9 @@ def _extract_days_from_text(text: str) -> Optional[int]:
     
     text = text.strip()
     
+    if text.isdigit():
+        return int(text)
+        
     # Primary pattern: digits followed by "day" or "days" (with optional space)
     # This is the most reliable pattern for our use case
     primary_match = re.search(r'(\d+)\s*days?\b', text, re.IGNORECASE)
