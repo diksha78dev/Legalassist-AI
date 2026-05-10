@@ -1,3 +1,4 @@
+import io
 from pypdf import PdfReader
 import pdfplumber
 import re
@@ -129,9 +130,21 @@ def extract_text_with_diagnostics(
         "confidence": None,
     }
 
-    # 1. Try pdfplumber (more robust for complex layouts)
+    # 1. Try pdfplumber (more robust for complex layouts).
+    # For file-like objects (e.g. Streamlit UploadedFile), read bytes and wrap
+    # in io.BytesIO first to guarantee a seekable stream, since not all upload
+    # implementations expose the full file-object interface that pdfplumber
+    # expects.  Path/str inputs are passed directly.
     try:
-        with pdfplumber.open(pdf_input) as pdf:
+        if isinstance(pdf_input, (str, Path)):
+            pdfplumber_input = pdf_input
+        else:
+            raw_bytes = _read_pdf_bytes(pdf_input)
+            if raw_bytes is None:
+                raise ValueError("Could not read bytes from the provided PDF input.")
+            pdfplumber_input = io.BytesIO(raw_bytes)
+
+        with pdfplumber.open(pdfplumber_input) as pdf:
             pages_text = []
             for page in pdf.pages:
                 page_text = page.extract_text(x_tolerance=3, y_tolerance=3)
@@ -143,7 +156,7 @@ def extract_text_with_diagnostics(
                 LOGGER.info("Extracted text using pdfplumber.")
                 return diagnostics
     except Exception as e:
-        LOGGER.warning(f"pdfplumber extraction failed or not available: {e}. Falling back to pypdf.")
+        LOGGER.warning(f"pdfplumber extraction failed: {e}. Falling back to pypdf.")
 
     # 2. Fallback to pypdf
     try:
