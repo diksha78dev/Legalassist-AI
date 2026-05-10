@@ -711,6 +711,7 @@ def batch_command(args: argparse.Namespace) -> int:
         }
 
         checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
+        interrupted = False
         with Progress(
             SpinnerColumn(),
             TextColumn("{task.description}"),
@@ -742,22 +743,49 @@ def batch_command(args: argparse.Namespace) -> int:
                     progress.advance(task_id, 1)
                     status = str(record.get("status"))
                     progress.update(task_id, description=f"last={status} cost_usd={tracker.snapshot()['total_cost_usd']:.4f}")
+            except KeyboardInterrupt:
+                # User pressed Ctrl+C — cancel futures that haven't started yet,
+                # then fall through to the finally block for a clean export.
+                interrupted = True
+                LOGGER.warning("batch_interrupted", completed=len(run_records), pending=len(futures) - len(run_records))
+                for f in futures:
+                    f.cancel()
             finally:
-                pass
+                # Always flush the checkpoint file before leaving the context so
+                # the on-disk state matches run_records regardless of how we exit.
+                try:
+                    cp_file.flush()
+                    os.fsync(cp_file.fileno())
+                except OSError:
+                    pass
 
+    # Export whatever was completed — covers both normal finish and interruption.
     all_records = existing_records + run_records
     csv_path, json_path = export_results(all_records, output_path, args.format)
 
     success_count = sum(1 for x in run_records if x.get("status") == "success")
     error_count = len(run_records) - success_count
 
-    LOGGER.info("batch_summary", processed=len(run_records), successful=success_count, failed=error_count)
+    if interrupted:
+        LOGGER.warning(
+            "batch_interrupted_export",
+            processed=len(run_records),
+            successful=success_count,
+            failed=error_count,
+            msg="Run was interrupted. Partial results exported. Re-run without --no-resume to continue.",
+        )
+    else:
+        LOGGER.info("batch_summary", processed=len(run_records), successful=success_count, failed=error_count)
+
     if args.format in {"csv", "both"}:
         LOGGER.info("wrote_file", path=str(csv_path), format="csv")
     if args.format in {"json", "both"}:
         LOGGER.info("wrote_file", path=str(json_path), format="json")
 
     print_cost_summary(tracker.snapshot())
+
+    if interrupted:
+        return 130  # Standard UNIX exit code for Ctrl+C termination
 
     return 0 if error_count == 0 else 2
 
