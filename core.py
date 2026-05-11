@@ -452,9 +452,10 @@ def _validate_court_name(value: Optional[str]) -> Optional[str]:
     normalized = cleaned.lower()
     if normalized in KNOWN_COURTS or any(court in normalized for court in KNOWN_COURTS):
         return cleaned
-    
-    # NEW: Log as warning and return None if not a known court
-    return None
+
+    # For non-English or unrecognized court names, preserve the original value
+    # rather than discarding it — trust the LLM output for unknown courts.
+    return cleaned
 
 def parse_remedies_response(response_text: str) -> Optional[Dict[str, Optional[str]]]:
     """
@@ -538,7 +539,7 @@ def parse_remedies_response(response_text: str) -> Optional[Dict[str, Optional[s
         normalized = _validate_court_name(orig)
         if normalized is None:
             LOGGER.warning("parse_remedies_response: unknown appeal_court: %s", orig)
-        remedies["appeal_court"] = normalized or ""
+        remedies["appeal_court"] = normalized or orig
     
     # Map 'cost_estimate' to 'cost' for app.py
     if remedies["cost_estimate"]:
