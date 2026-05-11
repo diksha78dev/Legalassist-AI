@@ -793,6 +793,11 @@ def _get_case_anonymization_secret() -> str:
 
     Primary source: CASE_ANONYMIZATION_SECRET env var.
     Fallback: contents of .jwt_secret (kept for local dev compatibility).
+
+    Raises RuntimeError if no non-empty secret can be resolved.  An empty
+    HMAC key produces deterministic, predictable outputs that undermine
+    anonymization guarantees, so we fail loudly rather than silently
+    degrading security.
     """
     secret = os.getenv("CASE_ANONYMIZATION_SECRET", "").strip()
     if secret:
@@ -806,13 +811,18 @@ def _get_case_anonymization_secret() -> str:
 
     if jwt_secret_path.exists():
         try:
-            return jwt_secret_path.read_text(encoding="utf-8").strip()
+            file_secret = jwt_secret_path.read_text(encoding="utf-8").strip()
+            if file_secret:
+                return file_secret
         except Exception:
             pass
 
-    # Last resort: no secret. This is insecure, but prevents runtime crashes.
-    # Prefer setting CASE_ANONYMIZATION_SECRET.
-    return ""
+    raise RuntimeError(
+        "CASE_ANONYMIZATION_SECRET is not configured. "
+        "Set the 'CASE_ANONYMIZATION_SECRET' environment variable to a strong, "
+        "randomly generated value. Using an empty HMAC key produces predictable "
+        "identifiers and must not be allowed."
+    )
 
 
 def _generate_anonymized_case_id(case_id: int, created_at: Any) -> str:
