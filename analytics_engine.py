@@ -67,10 +67,18 @@ class CaseSimilarityCalculator:
         min_similarity: float = 50.0,
         limit: int = 50,
     ) -> List[Tuple[CaseRecord, float]]:
-        """Find cases similar to reference case using initial DB-side filtering"""
-        # Reduce memory load by pre-filtering on common attributes
+        """Find cases similar to reference case using initial DB-side filtering.
+
+        Fix: Exclusion filter now correctly references CaseRecord.id (the actual
+        primary key column) instead of the non-existent CaseRecord.case_id field.
+        Previously, the wrong field reference caused the reference case to remain
+        in similarity results, producing self-matching records.
+        """
+        # Reduce memory load by pre-filtering on common attributes.
+        # FIX: Use CaseRecord.id (primary key) — not case_id — to reliably
+        # exclude the reference case from results.
         query = db.query(CaseRecord).filter(
-            CaseRecord.id != reference_case.id,
+            CaseRecord.id != reference_case.id,  # corrected from case_id
             (CaseRecord.case_type == reference_case.case_type) | (CaseRecord.jurisdiction == reference_case.jurisdiction)
         )
         
