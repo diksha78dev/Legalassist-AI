@@ -246,10 +246,10 @@ def render_save_to_case_section(user_id, raw_text, summary, remedies):
     with col2:
         st.markdown("### New Case")
         with st.expander("➕ Create & Save New Case"):
-            new_case_number = st.text_input("Case Number", placeholder="e.g. CA/123/2024")
-            new_case_title = st.text_input("Case Title (Optional)", placeholder="e.g. Sharma vs State")
+            new_case_number = st.text_input("Case Number", placeholder="e.g. CA/123/2024").strip()
+            new_case_title = st.text_input("Case Title (Optional)", placeholder="e.g. Sharma vs State").strip()
             new_case_type = st.selectbox("Type", ["civil", "criminal", "family", "other"])
-            new_jurisdiction = st.text_input("Jurisdiction", placeholder="e.g. Delhi High Court")
+            new_jurisdiction = st.text_input("Jurisdiction", placeholder="e.g. Delhi High Court").strip()
             
             if st.button("Create Case & Save Document", use_container_width=True):
                 if new_case_number and new_jurisdiction:
@@ -618,10 +618,10 @@ def main():
                                 
                         with col2:
                             with st.expander("➕ Or Create New Case"):
-                                new_case_number = st.text_input("Case Number")
-                                new_case_title = st.text_input("Case Title (Optional)")
+                                new_case_number = st.text_input("Case Number").strip()
+                                new_case_title = st.text_input("Case Title (Optional)").strip()
                                 new_case_type = st.selectbox("Type", ["civil", "criminal", "family", "other"])
-                                new_jurisdiction = st.text_input("Jurisdiction", placeholder="e.g. Delhi High Court")
+                                new_jurisdiction = st.text_input("Jurisdiction", placeholder="e.g. Delhi High Court").strip()
                                 if st.button("Create & Save"):
                                     if new_case_number and new_jurisdiction:
                                         new_case = create_new_case(
