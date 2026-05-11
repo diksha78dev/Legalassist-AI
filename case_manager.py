@@ -442,24 +442,20 @@ def _auto_create_deadlines_from_remedies(
             )
             return
         
-        # Calculate the deadline date
-        # Using timezone-aware datetime for consistency
+        # Calculate the deadline date as a timezone-aware UTC datetime.
         current_time = datetime.now(timezone.utc)
         deadline_date = current_time + timedelta(days=days)
-        
-        # Normalize to naive datetime for database storage
-        # The database schema uses timezone-naive timestamps
-        naive_deadline = deadline_date.replace(tzinfo=None)
-        
-        # Check for existing pending deadlines to prevent duplicates
-        # We use a ±1 day tolerance to handle minor variations in deadline dates
-        # that might result from different processing times or timezone conversions
+
+        # Check for existing pending deadlines to prevent duplicates.
+        # Both sides of the comparison use timezone-aware datetimes so the
+        # ORM filter is consistent across SQLite and PostgreSQL.
+        # A ±1 day tolerance handles minor variations from different processing times.
         existing_deadline = db.query(CaseDeadline).filter(
             CaseDeadline.case_id == case_id,
             CaseDeadline.deadline_type == "appeal",
             CaseDeadline.is_completed == False,
-            CaseDeadline.deadline_date >= naive_deadline - timedelta(days=1),
-            CaseDeadline.deadline_date <= naive_deadline + timedelta(days=1)
+            CaseDeadline.deadline_date >= deadline_date - timedelta(days=1),
+            CaseDeadline.deadline_date <= deadline_date + timedelta(days=1)
         ).first()
         
         if existing_deadline:
