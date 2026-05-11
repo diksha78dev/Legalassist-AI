@@ -16,7 +16,7 @@ from core.app_utils import (
     _initialize_openai_client,
     extract_text_from_pdf,
     compress_text,
-    english_leakage_detected,
+    english_leakage_detected,  # Used to detect if output contains English in non-English text
     output_language_mismatch_detected,
     build_prompt,
     build_summary_prompt,
@@ -478,6 +478,7 @@ def main():
                         )
 
                         if len(retry_summary_raw) > 0 and not english_leakage_detected(retry_summary_raw):
+                            # english_leakage_detected is imported from core.app_utils (line 19)
                             # Apply structured parsing to retry summary as well
                             summary = parse_summary_bullets(retry_summary_raw)
 
