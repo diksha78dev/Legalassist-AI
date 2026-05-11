@@ -277,7 +277,9 @@ notification_service = NotificationService()
 
 
 def is_reminder_time_for_user(user_timezone: str, reminder_hour: int = 8) -> bool:
+
     """
+
     Check if current time matches the reminder hour in user's local timezone.
     
     Args:
@@ -403,6 +405,7 @@ def check_and_send_reminders():
             # Check if it's currently 8 AM in the user's local timezone
             if not is_reminder_time_for_user(user_preference.timezone):
                 logger.debug(
+
                     f"Not 8 AM yet in user's timezone",
                     user_id=deadline.user_id,
                     user_timezone=user_preference.timezone,

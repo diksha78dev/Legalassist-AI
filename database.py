@@ -95,8 +95,17 @@ class UserPreference(Base):
     notify_10_days = Column(Boolean, default=True)
     notify_3_days = Column(Boolean, default=True)
     notify_1_day = Column(Boolean, default=True)
+
+    # Holiday-aware reminder engine (MVP)
+    holiday_aware_reminders = Column(Boolean, default=False)
+    holiday_country = Column(String(255), nullable=True)  # e.g., "IN" (optional in MVP)
+    holiday_region = Column(String(255), nullable=True)   # e.g., "MH" / state/province (optional in MVP)
+    # JSON array of ISO dates: ["2026-01-26", "2026-03-29", ...]
+    holiday_calendar_json = Column(Text, nullable=True)
+
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+
 
     # Relationships
     user = relationship("User", back_populates="preferences")
@@ -422,16 +431,27 @@ def create_or_update_user_preference(
     phone_number: Optional[str] = None,
     notification_channel: NotificationChannel = NotificationChannel.BOTH,
     timezone: str = "UTC",
+    # Holiday-aware reminder engine (MVP)
+    holiday_aware_reminders: bool = False,
+    holiday_country: Optional[str] = None,
+    holiday_region: Optional[str] = None,
+    holiday_calendar_json: Optional[str] = None,
 ) -> UserPreference:
     """Create or update user notification preferences"""
     pref = db.query(UserPreference).filter(UserPreference.user_id == user_id).first()
-    
+
     if pref:
         pref.email = email
         pref.phone_number = phone_number
         pref.notification_channel = notification_channel
         pref.timezone = timezone
+        # Holiday-aware reminder engine (MVP)
+        pref.holiday_aware_reminders = holiday_aware_reminders
+        pref.holiday_country = holiday_country
+        pref.holiday_region = holiday_region
+        pref.holiday_calendar_json = holiday_calendar_json
         pref.updated_at = dt.datetime.now(dt.timezone.utc)
+
     else:
         pref = UserPreference(
             user_id=user_id,
@@ -439,7 +459,13 @@ def create_or_update_user_preference(
             phone_number=phone_number,
             notification_channel=notification_channel,
             timezone=timezone,
+            # Holiday-aware reminder engine (MVP)
+            holiday_aware_reminders=holiday_aware_reminders,
+            holiday_country=holiday_country,
+            holiday_region=holiday_region,
+            holiday_calendar_json=holiday_calendar_json,
         )
+
         db.add(pref)
     
     db.commit()
