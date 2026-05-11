@@ -687,7 +687,9 @@ def main():
                                 with col1:
                                     st.metric("Total Cases Tracked", summary["total_cases_processed"])
                                 with col2:
-                                    st.metric("Appeals Success Rate", f"{AnalyticsAggregator.get_regional_trends(db)[0]['appeal_success_rate'] if AnalyticsAggregator.get_regional_trends(db) else 'N/A'}%")
+                                    regional_trends = AnalyticsAggregator.get_regional_trends(db)
+                                    appeal_rate = f"{regional_trends[0]['appeal_success_rate']}%" if regional_trends else 'N/A'
+                                    st.metric("Appeals Success Rate", appeal_rate)
                                 with col3:
                                     st.metric("Appeals Filed", summary["appeals_filed"])
                                 
