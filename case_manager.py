@@ -504,19 +504,19 @@ def _auto_create_deadlines_from_remedies(
             f"{deadline_date.strftime('%Y-%m-%d')} ({days} days from now). "
             f"Source: document {document_id}"
         )
-        
-        # Commit the transaction
-        db.commit()
-        
+        # Do not commit here — transaction boundaries are owned by the calling
+        # function (upload_case_document).  All writes are staged via flush()
+        # and will be committed atomically by the parent workflow.
+
     except Exception as e:
-        # Log the full error with context for debugging
+        # Log the full error with context for debugging and re-raise so the
+        # parent session owner can decide whether to rollback.
         logger.error(
             f"Error auto-creating deadlines for case {case_id}: {str(e)}. "
             f"Remedies: {remedies}. Document ID: {document_id}",
             exc_info=True  # Include full traceback for debugging
         )
-        # Rollback the transaction to prevent partial data writes
-        db.rollback()
+        raise
 
 
 def get_document_content(document_id: int) -> Optional[str]:
