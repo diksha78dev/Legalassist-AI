@@ -699,7 +699,8 @@ def main():
                                 with col3:
                                     st.metric("Appeals Filed", summary["appeals_filed"])
                                 
-                                st.write("📌 **Visit Analytics Dashboard for detailed insights** ➡️ [See Full Dashboard]()")
+                                if st.button("📊 View Full Dashboard", use_container_width=True, key="full_dashboard"):
+                                    st.switch_page("pages/1_Analytics_Dashboard.py")
                             else:
                                 st.info("Analytics will be available as more cases are tracked.")
                         except Exception as e:
