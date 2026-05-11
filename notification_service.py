@@ -62,7 +62,7 @@ class SMSClient:
 
     def __init__(self):
         self.account_sid = Config.TWILIO_ACCOUNT_SID
-        self.auth_token = Config.TWILIO_AUTH_TOKEN
+        self.auth_token = Config.get_twilio_auth_token()
         self.from_number = Config.TWILIO_FROM_NUMBER
 
         if not all([self.account_sid, self.auth_token, self.from_number]):
@@ -108,7 +108,7 @@ class EmailClient:
     """Wrapper for SendGrid email client"""
 
     def __init__(self):
-        self.api_key = Config.SENDGRID_API_KEY
+        self.api_key = Config.get_sendgrid_api_key()
         self.from_email = Config.SENDGRID_FROM_EMAIL
 
         if not self.api_key:

@@ -2,7 +2,7 @@ from typing import List, Dict, Optional, Tuple
 from datetime import datetime, timezone
 from sqlalchemy import func, case as sql_case
 from sqlalchemy.orm import Session
-from database import CaseRecord, CaseOutcome, CaseAnalytics, UserFeedback
+from database import CaseRecord, CaseOutcome, CaseAnalytics, UserFeedback, SimilarityFeedback
 import hashlib
 from collections import Counter
 import logging
@@ -68,7 +68,7 @@ class CaseSimilarityCalculator:
         """Find cases similar to reference case using initial DB-side filtering"""
         # Reduce memory load by pre-filtering on common attributes
         query = db.query(CaseRecord).filter(
-            CaseRecord.case_id != reference_case.case_id,
+            CaseRecord.id != reference_case.id,
             (CaseRecord.case_type == reference_case.case_type) | (CaseRecord.jurisdiction == reference_case.jurisdiction)
         )
         
@@ -83,6 +83,32 @@ class CaseSimilarityCalculator:
         
         similarities.sort(key=lambda x: x[1], reverse=True)
         return similarities[:limit]
+
+    @staticmethod
+    def get_feedback_adjustment(
+        db: Session,
+        candidate_case: CaseRecord,
+        user_id: Optional[str] = None,
+        query_signature: Optional[str] = None,
+    ) -> float:
+        """Return a small ranking adjustment from historical similarity feedback."""
+        query = db.query(SimilarityFeedback).filter(
+            SimilarityFeedback.candidate_case_id == candidate_case.id,
+        )
+
+        if user_id is not None:
+            query = query.filter(SimilarityFeedback.user_id == str(user_id))
+        if query_signature is not None:
+            query = query.filter(SimilarityFeedback.query_signature == query_signature)
+
+        feedback_rows = query.limit(50).all()
+        if not feedback_rows:
+            return 0.0
+
+        positive_count = sum(1 for row in feedback_rows if row.relevance)
+        negative_count = len(feedback_rows) - positive_count
+        raw_delta = (positive_count - negative_count) / max(len(feedback_rows), 1)
+        return max(-0.03, min(0.03, raw_delta * 0.03))
 
 
 class AnalyticsCalculator:
@@ -202,6 +228,29 @@ class AnalyticsCalculator:
             "total_cases": total,
             "case_type_stats": type_stats,
         }
+
+
+    @staticmethod
+    def calculate_appeal_success_rate(cases: list) -> float:
+        """
+        Calculate the aggregate appeal success rate from a list of CaseRecord objects.
+        Cases without outcome_data or with appeal_filed=False are safely ignored.
+        Returns a percentage (0.0–100.0), or 0.0 if no qualifying cases.
+        """
+        appeals_filed = 0
+        appeals_won = 0
+        for case in cases:
+            outcome_data = getattr(case, "outcome_data", None)
+            if outcome_data is None:
+                continue
+            if not getattr(outcome_data, "appeal_filed", False):
+                continue
+            appeals_filed += 1
+            if getattr(outcome_data, "appeal_success", False):
+                appeals_won += 1
+        if appeals_filed == 0:
+            return 0.0
+        return round((appeals_won / appeals_filed) * 100, 1)
 
 
 class AppealProbabilityEstimator:

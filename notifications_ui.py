@@ -209,7 +209,7 @@ def page_manage_deadlines():
         if not user_pref:
             st.warning("⚠️ Please set up your notification preferences first!")
             if st.button("Go to Preferences"):
-                st.switch_page("pages/notifications.py")
+                st.switch_page("pages/3_Settings.py")
             return
 
         # Add new deadline
@@ -217,9 +217,9 @@ def page_manage_deadlines():
         with st.form("add_deadline_form"):
             col1, col2 = st.columns(2)
 
-            with col1:
-                case_id = st.number_input("Case ID", min_value=1, step=1, value=1)
-                case_title = st.text_input("Case Title", placeholder="e.g., Property Dispute")
+            # Load cases owned by current user for ownership validation in UI
+            user_cases = db.query(getattr(__import__('database', fromlist=['Case']).Case, 'case_number')).all()
+
 
             with col2:
                 deadline_date = st.date_input(

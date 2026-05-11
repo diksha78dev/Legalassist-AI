@@ -1,0 +1,189 @@
+# Docker Compose for Legalassist-AI REST API Stack
+# Run with: docker-compose -f docker-compose-api.yml up -d
+
+version: '3.8'
+
+services:
+  # ========================================================================
+  # FastAPI Application
+  # ========================================================================
+  
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: legalassist-api
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/legalassist
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - JWT_SECRET_KEY=your-secret-key-change-in-production
+      - API_KEY_ENABLED=true
+      - ENABLE_WEBSOCKET=true
+      - CORS_ORIGINS=["http://localhost:3000", "http://localhost:8501", "http://localhost:8000"]
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./api:/app/api
+      - ./celery_app.py:/app/celery_app.py
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+    networks:
+      - legalassist-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+  
+  # ========================================================================
+  # Celery Worker
+  # ========================================================================
+  
+  celery-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: legalassist-celery-worker
+    environment:
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/legalassist
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./api:/app/api
+      - ./celery_app.py:/app/celery_app.py
+    command: celery -A celery_app worker --loglevel=info --concurrency=4
+    networks:
+      - legalassist-network
+  
+  # ========================================================================
+  # Celery Beat (Scheduled Tasks)
+  # ========================================================================
+  
+  celery-beat:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: legalassist-celery-beat
+    environment:
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/legalassist
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./api:/app/api
+      - ./celery_app.py:/app/celery_app.py
+    command: celery -A celery_app beat --loglevel=info
+    networks:
+      - legalassist-network
+  
+  # ========================================================================
+  # Flower (Celery Monitoring)
+  # ========================================================================
+  
+  flower:
+    image: mher/flower:2.0.2
+    container_name: legalassist-flower
+    ports:
+      - "5555:5555"
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+    depends_on:
+      - redis
+      - celery-worker
+    networks:
+      - legalassist-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5555/api/tasks"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  
+  # ========================================================================
+  # PostgreSQL Database
+  # ========================================================================
+  
+  postgres:
+    image: postgres:15-alpine
+    container_name: legalassist-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=legalassist
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - legalassist-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  
+  # ========================================================================
+  # Redis Cache & Message Broker
+  # ========================================================================
+  
+  redis:
+    image: redis:7-alpine
+    container_name: legalassist-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - legalassist-network
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  
+  # ========================================================================
+  # API Documentation (Swagger UI)
+  # ========================================================================
+  
+  api-docs:
+    image: swaggerapi/swagger-ui:latest
+    container_name: legalassist-api-docs
+    ports:
+      - "8001:8080"
+    environment:
+      - SWAGGER_JSON=/app/openapi.json
+      - BASE_URL=/api-docs
+      - URL=http://localhost:8000/openapi.json
+    depends_on:
+      - api
+    networks:
+      - legalassist-network
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  legalassist-network:
+    driver: bridge

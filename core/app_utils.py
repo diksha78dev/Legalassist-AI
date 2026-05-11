@@ -93,13 +93,31 @@ def _extract_layout_text_from_tesseract_data(data: Dict[str, List[Any]]) -> str:
             conf = -1.0
         if conf < 0:
             continue
-        key = (data["page_num"][i], data["block_num"][i], data["par_num"][i], data["line_num"][i])
+        # Safely retrieve positional fields with fallbacks to avoid dropping valid text
+        p_list = data.get("page_num", [])
+        b_list = data.get("block_num", [])
+        pr_list = data.get("par_num", [])
+        l_list = data.get("line_num", [])
+        left_list = data.get("left", [])
+        top_list = data.get("top", [])
+        width_list = data.get("width", [])
+
+        p_num = p_list[i] if i < len(p_list) else 1
+        b_num = b_list[i] if i < len(b_list) else 1
+        pr_num = pr_list[i] if i < len(pr_list) else 1
+        l_num = l_list[i] if i < len(l_list) else 1
+        
+        left_val = left_list[i] if i < len(left_list) else 0
+        top_val = top_list[i] if i < len(top_list) else 0
+        width_val = width_list[i] if i < len(width_list) else 0
+
+        key = (p_num, b_num, pr_num, l_num)
         if key not in lines:
-            lines[key] = {"tokens": [], "left": data["left"][i], "top": data["top"][i], "right": data["left"][i] + data["width"][i]}
+            lines[key] = {"tokens": [], "left": left_val, "top": top_val, "right": left_val + width_val}
         lines[key]["tokens"].append(token)
-        lines[key]["left"] = min(lines[key]["left"], data["left"][i])
-        lines[key]["right"] = max(lines[key]["right"], data["left"][i] + data["width"][i])
-        lines[key]["top"] = min(lines[key]["top"], data["top"][i])
+        lines[key]["left"] = min(lines[key]["left"], left_val)
+        lines[key]["right"] = max(lines[key]["right"], left_val + width_val)
+        lines[key]["top"] = min(lines[key]["top"], top_val)
 
     grouped: Dict[int, List[Dict[str, Any]]] = {}
     for key, value in lines.items():
@@ -673,10 +691,6 @@ def parse_remedies_response(response_text: str) -> Dict:
         # If JSON was thin, fall through to regex just in case
 
     # --- STEP 2: Fallback to regex-based line parsing ---
-    # Detect all numbered sections (flexible separators: . ) : -)
-        return remedies
-
-    # Detect all numbered sections (flexible separators: . ) : -)
     # Only match 1-2 digit numbers to avoid matching content like "5000-10000"
     pattern = r'^([1-9]\d?)\s*[.):‐-]\s*(.*?)$'
     sections = {}
@@ -797,7 +811,7 @@ def get_remedies_advice(judgment_text, language, client=None):
             },
             {"role": "user", "content": prompt},
         ],
-        max_tokens=900,
+        max_tokens=Config.REMEDIES_MAX_TOKENS,
         temperature=0.1,
     )
 

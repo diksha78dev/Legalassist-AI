@@ -1,5 +1,6 @@
 import argparse
 import csv
+import hashlib
 import json
 import logging
 import structlog
@@ -53,6 +54,7 @@ except ModuleNotFoundError:
                 self._bar.set_description_str(description)
 from logging_config import configure_logging
 import core
+from config import Config
 
 # Make language detection deterministic.
 DetectorFactory.seed = 0
@@ -77,7 +79,41 @@ KNOWN_COURTS = {
 }
 
 # Global semaphore for API concurrency control
-API_SEMAPHORE = threading.Semaphore(5)
+_API_SEMAPHORE: Optional[threading.Semaphore] = None
+_SEMAPHORE_LOCK = threading.Lock()
+
+
+def _reinitialize_semaphore(concurrency: int) -> None:
+    """Replace the global API semaphore with a new one sized to *concurrency*.
+
+    Calling this before any worker threads are spawned ensures the correct
+    limit is applied regardless of whether execution entered through main()
+    or directly via process_command / batch_command (e.g. in tests).
+    """
+    global _API_SEMAPHORE
+    with _SEMAPHORE_LOCK:
+        _API_SEMAPHORE = threading.Semaphore(concurrency)
+
+
+def get_api_semaphore() -> threading.Semaphore:
+    """Get the API semaphore, initializing it lazily with default concurrency if needed."""
+    global _API_SEMAPHORE
+    if _API_SEMAPHORE is None:
+        with _SEMAPHORE_LOCK:
+            if _API_SEMAPHORE is None:
+                _API_SEMAPHORE = threading.Semaphore(5)
+    return _API_SEMAPHORE
+
+
+def _reinitialize_semaphore(concurrency: int) -> None:
+    """Replace the global API semaphore with a new one sized to *concurrency*.
+
+    Calling this before any worker threads are spawned ensures the correct
+    limit is applied regardless of whether execution entered through main()
+    or directly via process_command / batch_command (e.g. in tests).
+    """
+    global API_SEMAPHORE
+    API_SEMAPHORE = threading.Semaphore(concurrency)
 
 
 
@@ -193,7 +229,7 @@ def _chat_completion(
     last_err = None
     for attempt in range(max_retries):
         try:
-            with API_SEMAPHORE:
+            with get_api_semaphore():
                 return client.chat.completions.create(
                     model=model,
                     messages=[
@@ -243,7 +279,7 @@ def generate_summary(
         model=model,
         system_prompt="You are an expert legal simplification engine.",
         user_prompt=summary_prompt,
-        max_tokens=280,
+        max_tokens=Config.SUMMARY_MAX_TOKENS,
         temperature=0.05,
     )
     
@@ -257,7 +293,7 @@ def generate_summary(
             model=model,
             system_prompt="Strict multilingual rewriting engine.",
             user_prompt=retry_prompt,
-            max_tokens=260,
+            max_tokens=Config.SUMMARY_MAX_TOKENS,
             temperature=0.03,
         )
         retry_summary = (resp_retry.choices[0].message.content or "").strip()
@@ -288,7 +324,7 @@ def get_remedies(
         model=model,
         system_prompt="You are a helpful legal advisor. Answer questions about legal remedies in India.",
         user_prompt=remedies_prompt,
-        max_tokens=500,
+        max_tokens=Config.REMEDIES_MAX_TOKENS,
         temperature=0.1,
     )
     
@@ -577,6 +613,7 @@ def print_cost_summary(snapshot: Dict[str, float]) -> None:
 
 
 def process_command(args: argparse.Namespace) -> int:
+    _reinitialize_semaphore(args.concurrency)
     file_path = Path(args.file)
     if not file_path.exists() or file_path.suffix.lower() != ".pdf":
         raise CLIError(f"Invalid PDF file: {file_path}")
@@ -610,6 +647,7 @@ def process_command(args: argparse.Namespace) -> int:
 
 
 def batch_command(args: argparse.Namespace) -> int:
+    _reinitialize_semaphore(args.concurrency)
     folder = Path(args.folder)
     if not folder.exists() or not folder.is_dir():
         raise CLIError(f"Invalid folder: {folder}")
@@ -621,6 +659,10 @@ def batch_command(args: argparse.Namespace) -> int:
 
     output_path = Path(args.output)
     checkpoint_file = Path(args.checkpoint) if args.checkpoint else output_path.with_suffix(output_path.suffix + ".checkpoint.jsonl")
+
+    # Delete stale checkpoint BEFORE loading so --no-resume truly starts fresh.
+    if not args.resume and checkpoint_file.exists():
+        checkpoint_file.unlink()
 
     try:
         existing_records = load_checkpoint(checkpoint_file) if args.resume else []
@@ -635,9 +677,6 @@ def batch_command(args: argparse.Namespace) -> int:
     }
 
     to_process = [p for p in all_files if str(p.resolve()) not in done_success]
-
-    if not args.resume and checkpoint_file.exists():
-        checkpoint_file.unlink()
 
     LOGGER.info("batch_discovery", total_found=len(all_files), already_completed=len(done_success), pending=len(to_process))
 
@@ -672,6 +711,7 @@ def batch_command(args: argparse.Namespace) -> int:
         }
 
         checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
+        interrupted = False
         with Progress(
             SpinnerColumn(),
             TextColumn("{task.description}"),
@@ -703,22 +743,49 @@ def batch_command(args: argparse.Namespace) -> int:
                     progress.advance(task_id, 1)
                     status = str(record.get("status"))
                     progress.update(task_id, description=f"last={status} cost_usd={tracker.snapshot()['total_cost_usd']:.4f}")
+            except KeyboardInterrupt:
+                # User pressed Ctrl+C — cancel futures that haven't started yet,
+                # then fall through to the finally block for a clean export.
+                interrupted = True
+                LOGGER.warning("batch_interrupted", completed=len(run_records), pending=len(futures) - len(run_records))
+                for f in futures:
+                    f.cancel()
             finally:
-                pass
+                # Always flush the checkpoint file before leaving the context so
+                # the on-disk state matches run_records regardless of how we exit.
+                try:
+                    cp_file.flush()
+                    os.fsync(cp_file.fileno())
+                except OSError:
+                    pass
 
+    # Export whatever was completed — covers both normal finish and interruption.
     all_records = existing_records + run_records
     csv_path, json_path = export_results(all_records, output_path, args.format)
 
     success_count = sum(1 for x in run_records if x.get("status") == "success")
     error_count = len(run_records) - success_count
 
-    LOGGER.info("batch_summary", processed=len(run_records), successful=success_count, failed=error_count)
+    if interrupted:
+        LOGGER.warning(
+            "batch_interrupted_export",
+            processed=len(run_records),
+            successful=success_count,
+            failed=error_count,
+            msg="Run was interrupted. Partial results exported. Re-run without --no-resume to continue.",
+        )
+    else:
+        LOGGER.info("batch_summary", processed=len(run_records), successful=success_count, failed=error_count)
+
     if args.format in {"csv", "both"}:
         LOGGER.info("wrote_file", path=str(csv_path), format="csv")
     if args.format in {"json", "both"}:
         LOGGER.info("wrote_file", path=str(json_path), format="json")
 
     print_cost_summary(tracker.snapshot())
+
+    if interrupted:
+        return 130  # Standard UNIX exit code for Ctrl+C termination
 
     return 0 if error_count == 0 else 2
 
@@ -842,8 +909,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         logging.basicConfig(level=logging.INFO)
 
     # Initialize global semaphore with user-specified concurrency
-    global API_SEMAPHORE
-    API_SEMAPHORE = threading.Semaphore(args.concurrency)
+    _reinitialize_semaphore(args.concurrency)
 
     if getattr(args, "workers", 1) < 1:
         raise CLIError("--workers must be >= 1")

@@ -1,0 +1,103 @@
+# Production Environment Values
+replicaCount: 3
+
+image:
+  repository: ghcr.io/yourusername/legalassist-ai
+  tag: latest
+  pullPolicy: IfNotPresent
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 65
+  targetMemoryUtilizationPercentage: 75
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  hosts:
+    - host: legalassist.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: legalassist-tls
+      hosts:
+        - legalassist.example.com
+
+postgresql:
+  auth:
+    password: ${DB_PASSWORD}  # Use external secret management
+  primary:
+    persistence:
+      size: 50Gi
+    resources:
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+      requests:
+        cpu: 500m
+        memory: 512Mi
+
+redis:
+  auth:
+    password: ${REDIS_PASSWORD}  # Use external secret management
+  master:
+    persistence:
+      size: 10Gi
+    resources:
+      limits:
+        cpu: 500m
+        memory: 512Mi
+      requests:
+        cpu: 250m
+        memory: 256Mi
+
+prometheus:
+  enabled: true
+  retention: 90d
+  storageSize: 100Gi
+
+grafana:
+  enabled: true
+  adminPassword: ${GRAFANA_PASSWORD}
+
+env:
+  - name: ENVIRONMENT
+    value: production
+  - name: LOG_LEVEL
+    value: INFO
+  - name: ENABLE_PROFILING
+    value: "false"
+  - name: SENTRY_DSN
+    value: ${SENTRY_DSN}
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - legalassist-ai
+          topologyKey: kubernetes.io/hostname

@@ -1,0 +1,57 @@
+# Dockerfile for FastAPI Application
+# Multi-stage build optimized for production
+
+FROM python:3.10-slim as builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create virtual environment
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy requirements
+COPY requirements-api.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements-api.txt
+
+# ========================================================================
+# Runtime stage
+# ========================================================================
+
+FROM python:3.10-slim
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN useradd -m -u 1000 appuser
+
+# Copy virtual environment from builder
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Set working directory
+WORKDIR /app
+
+# Copy application code
+COPY --chown=appuser:appuser api/ /app/api/
+COPY --chown=appuser:appuser celery_app.py /app/
+COPY --chown=appuser:appuser .env.* /app/
+COPY --chown=appuser:appuser config.py /app/
+
+# Switch to non-root user
+USER appuser
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:8000/api/v1/health || exit 1
+
+# Default command
+CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]

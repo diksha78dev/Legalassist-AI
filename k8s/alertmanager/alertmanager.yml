@@ -1,0 +1,96 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: slack-critical
+  group_by: [alertname, cluster, service]
+  group_wait: 10s
+  group_interval: 10s
+  repeat_interval: 4h
+  
+  routes:
+    # Critical alerts - immediate Slack notification
+    - match:
+        severity: critical
+      receiver: slack-critical
+      continue: true
+      group_wait: 0s
+      repeat_interval: 1h
+    
+    # Warning alerts - batched Slack notification
+    - match:
+        severity: warning
+      receiver: slack-warning
+      group_wait: 30s
+      repeat_interval: 6h
+    
+    # Error alerts - PagerDuty escalation
+    - match:
+        severity: critical
+        alertname: ServiceDown
+      receiver: pagerduty-critical
+      continue: true
+      group_wait: 0s
+
+receivers:
+  # Slack receivers
+  - name: slack-critical
+    slack_configs:
+      - api_url: ${SLACK_WEBHOOK_CRITICAL}
+        channel: '#alerts-critical'
+        title: 'Critical Alert'
+        text: '{{ range .Alerts }}{{ .Annotations.summary }}\n{{ .Annotations.description }}\n{{ end }}'
+        send_resolved: true
+        color: '{{ if eq .Status "firing" }}danger{{ else }}good{{ end }}'
+        short_fields: true
+
+  - name: slack-warning
+    slack_configs:
+      - api_url: ${SLACK_WEBHOOK_WARNING}
+        channel: '#alerts-warnings'
+        title: 'Warning Alert'
+        text: '{{ range .Alerts }}{{ .Annotations.summary }}\n{{ .Annotations.description }}\n{{ end }}'
+        send_resolved: true
+        color: 'warning'
+        short_fields: true
+
+  # PagerDuty receiver
+  - name: pagerduty-critical
+    pagerduty_configs:
+      - service_key: ${PAGERDUTY_SERVICE_KEY}
+        description: '{{ .GroupLabels.alertname }}: {{ .Alerts.Firing | len }} firing'
+        details:
+          firing: '{{ range .Alerts.Firing }}{{ .Labels.instance }} {{ .Annotations.summary }}\n{{ end }}'
+
+  # Email receiver (optional)
+  - name: email-ops
+    email_configs:
+      - to: 'ops-team@example.com'
+        from: 'alerts@legalassist.example.com'
+        smarthost: 'smtp.gmail.com:587'
+        auth_username: '{{ env "ALERTMANAGER_EMAIL_USER" }}'
+        auth_password: '{{ env "ALERTMANAGER_EMAIL_PASSWORD" }}'
+        headers:
+          Subject: 'Alert: {{ .GroupLabels.alertname }}'
+
+inhibit_rules:
+  # Suppress warning if critical alert exists
+  - source_match:
+      severity: critical
+    target_match:
+      severity: warning
+    equal: [alertname, cluster, service]
+  
+  # Suppress info if warning/critical exists
+  - source_match:
+      severity: warning
+    target_match:
+      severity: info
+    equal: [alertname, cluster, service]
+  
+  # Don't alert if service is being scheduled for maintenance
+  - source_match:
+      alertname: MaintenanceWindow
+    target_match_re:
+      alertname: .*
+    equal: [cluster]

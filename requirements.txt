@@ -30,6 +30,7 @@ bcrypt>=4.1.0
 # Testing
 pytest-mock>=3.12.0
 responses>=0.24.0
+pytest-cov>=4.1.0
 
 # Analytics & Visualization
 pandas>=2.0.0
@@ -45,3 +46,50 @@ sentence-transformers>=2.2.2
 
 # Audio & Accessibility
 gTTS>=2.5.1
+
+# ==================== Observability & Monitoring ====================
+# Prometheus Metrics
+prometheus-client>=0.17.0
+
+# Structured Logging
+structlog>=24.1.0
+python-json-logger>=2.0.0
+
+# Distributed Tracing
+jaeger-client>=4.8.0
+opentelemetry-api>=1.20.0
+opentelemetry-sdk>=1.20.0
+opentelemetry-exporter-prometheus>=0.41b0
+opentelemetry-exporter-jaeger-thrift>=1.20.0
+opentelemetry-instrumentation-flask>=0.41b0
+opentelemetry-instrumentation-requests>=0.41b0
+opentelemetry-instrumentation-sqlalchemy>=0.41b0
+opentelemetry-instrumentation-redis>=0.41b0
+
+# Elasticsearch & Log Aggregation
+elasticsearch>=8.0.0
+
+# Production Server (for Prometheus metrics endpoint)
+gunicorn>=21.0.0
+Flask>=3.0.0
+
+# Code Quality & Security
+black>=23.0.0
+flake8>=6.0.0
+mypy>=1.0.0
+bandit>=1.7.0
+
+# Performance Profiling
+memory-profiler>=0.61.0
+py-spy>=0.3.14
+
+# HTTP client with retries
+requests>=2.31.0
+tenacity>=8.2.0
+
+# Configuration Management
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+
+# Kubernetes Python Client (for operators/controllers)
+kubernetes>=28.0.0
