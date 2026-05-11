@@ -164,6 +164,23 @@ async def get_current_user(
     )
 
 
+async def get_current_user_optional(
+    token: Optional[str] = Depends(oauth2_scheme),
+    http_auth: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> Optional[CurrentUser]:
+    """Get current user without raising on missing credentials.
+
+    Returns the authenticated CurrentUser when valid credentials are present,
+    or None for unauthenticated requests.  Use this dependency wherever the
+    caller must handle anonymous traffic gracefully (e.g. rate-limit key
+    generation) rather than enforcing authentication.
+    """
+    try:
+        return await get_current_user(token=token, http_auth=http_auth)
+    except HTTPException:
+        return None
+
+
 async def get_admin_user(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
     """Verify user is admin"""
     if user.role != "admin":
