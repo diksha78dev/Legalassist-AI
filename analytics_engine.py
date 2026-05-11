@@ -126,7 +126,7 @@ class AnalyticsCalculator:
         """Calculate judge-specific statistics using aggregates"""
         stats = db.query(
             func.count(CaseRecord.id).label('total'),
-            func.sum(sql_case((CaseRecord.outcome.ilike(winning_outcome), 1), else_=0)).label('wins'),
+            func.sum(sql_case((CaseRecord.outcome == winning_outcome, 1), else_=0)).label('wins'),
             func.sum(sql_case((CaseOutcome.appeal_filed == True, 1), else_=0)).label('appeals'),
             func.sum(sql_case(((CaseOutcome.appeal_filed == True) & (CaseOutcome.appeal_success == True), 1), else_=0)).label('appeal_wins')
         ).join(CaseOutcome, CaseRecord.id == CaseOutcome.case_id, isouter=True).filter(
