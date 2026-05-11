@@ -102,15 +102,21 @@ def get_or_create_case_for_document(
 ) -> Optional[Case]:
     """
     Get existing case or create new one for document upload.
+
+    The returned Case object is expunged from the session before the session
+    is closed, so all already-loaded scalar attributes remain accessible to
+    the caller without raising DetachedInstanceError.
     """
     db = SessionLocal()
     try:
         if existing_case_id:
             case = get_case_by_id(db, existing_case_id)
             if case and case.user_id == user_id:
+                db.expunge(case)
                 return case
 
-        # Create new case
+        # Create new case — create_new_case manages its own session internally,
+        # so the object it returns is already detached. No expunge needed here.
         if new_case_number:
             case = create_new_case(
                 user_id=user_id,
