@@ -4,6 +4,8 @@ from sqlalchemy import func, case as sql_case
 from sqlalchemy.orm import Session
 from database import CaseRecord, CaseOutcome, CaseAnalytics, UserFeedback, SimilarityFeedback
 import hashlib
+import hmac
+import os
 from collections import Counter
 import logging
 
@@ -453,5 +455,28 @@ class AnalyticsAggregator:
 
 # Utility function to anonymize case ID
 def generate_anonymous_case_id(case_data: str) -> str:
-    """Generate anonymous case ID from case data"""
-    return hashlib.sha256(case_data.encode()).hexdigest()[:16]
+    """Generate an anonymous case ID from case data using HMAC-SHA256.
+
+    Raw SHA-256 without a secret key is deterministic and vulnerable to
+    precomputation and correlation attacks.  HMAC-SHA256 binds the output
+    to a server-side secret so identical inputs produce unpredictable
+    identifiers across environments.
+
+    The secret is read from the CASE_ANONYMIZATION_SECRET environment
+    variable (same source used by case_manager._get_case_anonymization_secret).
+    Raises RuntimeError if the secret is not configured, consistent with the
+    project-wide policy of failing loudly rather than silently degrading
+    anonymization strength.
+    """
+    secret = os.getenv("CASE_ANONYMIZATION_SECRET", "").strip()
+    if not secret:
+        raise RuntimeError(
+            "CASE_ANONYMIZATION_SECRET is not configured. "
+            "Set this environment variable to a strong random value before "
+            "generating anonymous case identifiers."
+        )
+    return hmac.new(
+        secret.encode("utf-8"),
+        case_data.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()[:16]
