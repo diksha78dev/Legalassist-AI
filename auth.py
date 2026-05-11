@@ -90,12 +90,15 @@ def send_otp_email(email: str, otp: str) -> bool:
         from_email = os.getenv("SENDGRID_FROM_EMAIL", "noreply@legalassist.ai")
 
         if not api_key:
-            logger.warning("SendGrid API key not configured - using masked OTP logging")
             if _is_debug_or_testing_mode():
+                logger.warning("SendGrid API key not configured - using masked OTP logging for debug/test mode")
                 logger.debug(f"OTP for {email}: [MASKED-{otp[:2]}***{otp[-1]}]")
-            else:
-                logger.warning(f"OTP requested for {email} (email delivery skipped - missing config)")
-            return True  # Return True in development mode
+                return True  # Simulate success only in explicit debug/testing environments
+            logger.error(
+                f"SendGrid API key not configured — OTP delivery failed for {email}. "
+                "Set SENDGRID_API_KEY to enable email authentication."
+            )
+            return False
 
         sg = sendgrid.SendGridAPIClient(api_key=api_key)
 
