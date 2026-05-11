@@ -44,6 +44,12 @@ from config import Config
 init_db()
 
 # ==================== Logging Setup ====================
+# CENTRALIZED LOGGING CONFIGURATION
+# This is the single, authoritative logging setup point for the entire application.
+# All modules (scheduler, database, auth, etc.) use logging.getLogger(__name__)
+# and get their logs handled by this configuration.
+# NOTE: Other modules (scheduler.py, etc.) are imported BEFORE this point,
+# but they do NOT call logging.basicConfig() to avoid duplicate handlers.
 logging.basicConfig(
     level=Config.LOG_LEVEL,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
