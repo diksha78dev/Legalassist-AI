@@ -297,6 +297,7 @@ class NotificationService:
             status=status,
             message_id=message_id,
             error_message=error,
+            message_preview=message,
         )
 
         return NotificationResult(
@@ -332,6 +333,7 @@ class NotificationService:
             status=status,
             message_id=message_id,
             error_message=error,
+            message_preview=html_content,
         )
 
         return NotificationResult(
