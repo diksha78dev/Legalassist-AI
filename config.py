@@ -130,6 +130,9 @@ class Config:
         """Return the SendGrid API key, retrieved on demand to limit exposure."""
         return str(_get_val("SENDGRID_API_KEY", "") or "")
 
+    # --- Application URLs ---
+    BASE_URL = _get_val("BASE_URL", "https://legalassist.ai")
+
     @classmethod
     def is_development(cls):
         return cls.APP_ENV in ("dev", "development", "local") or cls.DEBUG or cls.TESTING
