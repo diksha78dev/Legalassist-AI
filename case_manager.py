@@ -32,6 +32,8 @@ from database import (
     create_case_document,
     create_timeline_event,
     update_case_status,
+    create_attachment,
+    get_attachments_for_case,
 )
 
 logger = logging.getLogger(__name__)
@@ -204,6 +206,19 @@ def get_case_detail(user_id: int, case_id: int) -> Optional[Dict[str, Any]]:
             for doc in documents
         ]
 
+        # Get attachments
+        attachments = get_attachments_for_case(db, case_id)
+        attachments_list = [
+            {
+                "id": a.id,
+                "original_filename": a.original_filename,
+                "uploaded_at": a.uploaded_at.isoformat(),
+                "size_bytes": a.size_bytes,
+                "content_type": a.content_type,
+            }
+            for a in attachments
+        ]
+
         # Get timeline
         timeline = get_case_timeline(db, case_id)
         timeline_list = [
@@ -252,6 +267,7 @@ def get_case_detail(user_id: int, case_id: int) -> Optional[Dict[str, Any]]:
             "timeline": timeline_list,
             "deadlines": deadlines_list,
             "remedies": remedies,
+            "attachments": attachments_list,
         }
 
     except Exception as e:
@@ -315,6 +331,66 @@ def upload_case_document(
 
     except Exception as e:
         logger.error(f"Error uploading document: {str(e)}")
+        return None
+    finally:
+        db.close()
+
+
+def upload_case_attachment(
+    user_id: int,
+    case_id: int,
+    file_bytes: bytes,
+    filename: str,
+    content_type: Optional[str] = None,
+    deadline_id: Optional[int] = None,
+) -> Optional[dict]:
+    """
+    Save an attachment file to disk and register it in the DB.
+    Returns attachment dict on success.
+    """
+    from core.storage import save_attachment
+
+    db = SessionLocal()
+    try:
+        case = get_case_by_id(db, case_id)
+        if not case or case.user_id != user_id:
+            logger.error(f"Case {case_id} not found or not owned by user {user_id}")
+            return None
+
+        # Save file to storage
+        stored_path, size = save_attachment(file_bytes, filename)
+
+        att = create_attachment(
+            db=db,
+            user_id=user_id,
+            original_filename=filename,
+            stored_path=stored_path,
+            content_type=content_type,
+            size_bytes=size,
+            case_id=case_id,
+            deadline_id=deadline_id,
+        )
+
+        # Timeline event
+        create_timeline_event(
+            db=db,
+            case_id=case_id,
+            event_type="attachment_uploaded",
+            description=f"Attachment uploaded: {filename}",
+            metadata={"attachment_id": att.id, "deadline_id": deadline_id},
+        )
+
+        db.refresh(att)
+        return {
+            "id": att.id,
+            "original_filename": att.original_filename,
+            "stored_path": att.stored_path,
+            "size_bytes": att.size_bytes,
+            "uploaded_at": att.uploaded_at.isoformat(),
+        }
+
+    except Exception as e:
+        logger.error(f"Error uploading attachment: {str(e)}", exc_info=True)
         return None
     finally:
         db.close()
