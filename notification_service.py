@@ -37,7 +37,9 @@ from database import (
     CaseDeadline,
     log_notification,
     has_notification_been_sent,
+    get_notification_template_for_user,
 )
+from core.template_renderer import render_template, validate_template, TemplateValidationError
 
 # Import debug mode helper
 def _is_debug_or_testing_mode() -> bool:
@@ -283,7 +285,29 @@ class NotificationService:
                 error="No phone number configured",
             )
 
-        message = self.build_sms_message(deadline.case_title, days_left, deadline.deadline_date)
+        # Try per-user template first
+        message = None
+        try:
+            tmpl = get_notification_template_for_user(db, deadline.user_id)
+            if tmpl and tmpl.sms_template:
+                values = {
+                    "case_title": deadline.case_title,
+                    "case_number": getattr(deadline, "case_id", ""),
+                    "deadline_date": deadline.deadline_date.strftime("%d %b %Y") if deadline.deadline_date else "",
+                    "days_left": days_left,
+                    "court": "",
+                    "deadline_type": deadline.deadline_type,
+                    "deadline_description": deadline.description or "",
+                    "link": f"https://legalassist.ai/cases/{deadline.case_id}",
+                }
+                message = render_template(tmpl.sms_template, values)
+        except TemplateValidationError as e:
+            logger.warning("User SMS template invalid, falling back to default: %s", str(e))
+        except Exception:
+            logger.exception("Error rendering user SMS template; falling back to default")
+
+        if message is None:
+            message = self.build_sms_message(deadline.case_title, days_left, deadline.deadline_date)
         success, message_id, error = self.sms_client.send_sms(user_preference.phone_number, message)
 
         status = NotificationStatus.SENT if success else NotificationStatus.FAILED
@@ -316,7 +340,33 @@ class NotificationService:
         days_left: int,
     ) -> NotificationResult:
         """Send email reminder for a deadline"""
-        subject, html_content = self.build_email_message(deadline, days_left)
+        # Try per-user template first
+        subject = None
+        html_content = None
+        try:
+            tmpl = get_notification_template_for_user(db, deadline.user_id)
+            if tmpl and (tmpl.email_html_template or tmpl.email_subject_template):
+                values = {
+                    "case_title": deadline.case_title,
+                    "case_number": getattr(deadline, "case_id", ""),
+                    "deadline_date": deadline.deadline_date.strftime("%d %B %Y") if deadline.deadline_date else "",
+                    "days_left": days_left,
+                    "court": "",
+                    "deadline_type": deadline.deadline_type,
+                    "deadline_description": deadline.description or "",
+                    "link": f"https://legalassist.ai/cases/{deadline.case_id}",
+                }
+                if tmpl.email_subject_template:
+                    subject = render_template(tmpl.email_subject_template, values)
+                if tmpl.email_html_template:
+                    html_content = render_template(tmpl.email_html_template, values)
+        except TemplateValidationError as e:
+            logger.warning("User email template invalid, falling back to default: %s", str(e))
+        except Exception:
+            logger.exception("Error rendering user email template; falling back to default")
+
+        if subject is None or html_content is None:
+            subject, html_content = self.build_email_message(deadline, days_left)
         success, message_id, error = self.email_client.send_email(
             user_preference.email, subject, html_content
         )
