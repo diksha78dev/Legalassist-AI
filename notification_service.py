@@ -158,6 +158,7 @@ class NotificationService:
     def __init__(self):
         self.sms_client = SMSClient()
         self.email_client = EmailClient()
+        self.base_url = Config.BASE_URL.rstrip('/')
 
     def build_sms_message(self, case_title: str, days_left: int, deadline_date: datetime) -> str:
         """Build SMS reminder message"""
@@ -247,7 +248,7 @@ class NotificationService:
                     </div>
 
                     <div style="text-align: center;">
-                        <a href="https://legalassist.ai/cases/{deadline.case_id}" class="cta-button">
+                        <a href="{self.base_url}/cases/{deadline.case_id}" class="cta-button">
                             View Case Dashboard
                         </a>
                     </div>
@@ -255,7 +256,7 @@ class NotificationService:
                 <div class="footer">
                     <p>This is an automated notification from your LegalAssist AI account.<br>
                     Missing deadlines can lead to dismissal of your case. Please consult with your legal counsel immediately.</p>
-                    <p>Manage your <a href="https://legalassist.ai/settings">Notification Preferences</a></p>
+                    <p>Manage your <a href="{self.base_url}/settings">Notification Preferences</a></p>
                 </div>
             </div>
         </body>
