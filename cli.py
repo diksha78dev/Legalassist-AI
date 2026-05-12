@@ -225,7 +225,11 @@ def _chat_completion(
     max_tokens: int,
     temperature: float,
     max_retries: int = 5,
+    timeout: float = None,
 ):
+    if timeout is None:
+        timeout = Config.LLM_TIMEOUT
+    
     last_err = None
     for attempt in range(max_retries):
         try:
@@ -238,6 +242,7 @@ def _chat_completion(
                     ],
                     max_tokens=max_tokens,
                     temperature=temperature,
+                    timeout=timeout,
                 )
         except RateLimitError as e:
             last_err = e
