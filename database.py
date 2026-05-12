@@ -131,6 +131,7 @@ class NotificationLog(Base):
     days_before = Column(Integer, nullable=False)  # 30, 10, 3, or 1 day reminder
     message_id = Column(String(255), nullable=True)  # From Twilio or SendGrid
     error_message = Column(Text, nullable=True)
+    message_preview = Column(Text, nullable=True)
     sent_at = Column(DateTime(timezone=True), nullable=True)
     delivered_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
@@ -883,6 +884,7 @@ def log_notification(
     status: NotificationStatus = NotificationStatus.PENDING,
     message_id: Optional[str] = None,
     error_message: Optional[str] = None,
+    message_preview: Optional[str] = None,
 ) -> NotificationLog:
     """Log a notification attempt"""
     log = NotificationLog(
@@ -894,6 +896,7 @@ def log_notification(
         status=status,
         message_id=message_id,
         error_message=error_message,
+        message_preview=message_preview,
         sent_at=dt.datetime.now(dt.timezone.utc) if status != NotificationStatus.PENDING else None,
     )
     db.add(log)
