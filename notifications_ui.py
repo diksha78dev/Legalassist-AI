@@ -5,8 +5,11 @@ Integrate these into the main app.py or use as a separate page.
 
 import streamlit as st
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Optional, List
 import logging
+import pandas as pd
+import plotly.express as px
+import io
 
 # Initialize logger
 logger = logging.getLogger(__name__)
@@ -499,6 +502,164 @@ def page_notification_history():
 
 
 
+def page_bulk_import():
+    """Page: Bulk import deadlines from CSV"""
+    apply_custom_css()
+    st.title("📥 Bulk Import Deadlines")
+    st.markdown("Upload a CSV file with your case deadlines. Required columns: `case_title`, `deadline_date`, `deadline_type` (optional: `description`, `case_id`)")
+
+    # Sample CSV download
+    sample_df = pd.DataFrame({
+        "case_title": ["State vs. Smith", "Doe Estate"],
+        "deadline_date": ["2026-06-15", "2026-07-20"],
+        "deadline_type": ["Filing", "Hearing"],
+        "description": ["Submit final brief", "Probate hearing"],
+        "case_id": [101, 102]
+    })
+    
+    csv = sample_df.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        "📥 Download Sample CSV Template",
+        data=csv,
+        file_name="deadline_template.csv",
+        mime="text/csv",
+    )
+
+    uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
+    
+    if uploaded_file is not None:
+        try:
+            df = pd.read_csv(uploaded_file)
+            st.write("### Preview of Uploaded Data")
+            st.dataframe(df.head())
+
+            if st.button("🚀 Process and Import Deadlines", use_container_width=True):
+                db = SessionLocal()
+                user_id = get_user_id()
+                count = 0
+                errors = []
+                
+                progress_bar = st.progress(0)
+                for i, row in df.iterrows():
+                    try:
+                        # Basic validation
+                        if pd.isna(row.get('case_title')) or pd.isna(row.get('deadline_date')):
+                            errors.append(f"Row {i+1}: Missing required fields")
+                            continue
+                        
+                        # Parse date
+                        d_date = pd.to_datetime(row['deadline_date']).to_pydatetime()
+                        d_date = d_date.replace(tzinfo=timezone.utc)
+                        
+                        create_case_deadline(
+                            db=db,
+                            user_id=int(user_id),
+                            case_id=int(row.get('case_id', 0)),
+                            case_title=str(row['case_title']),
+                            deadline_date=d_date,
+                            deadline_type=str(row.get('deadline_type', 'Other')).lower(),
+                            description=str(row.get('description', '')) if not pd.isna(row.get('description')) else None
+                        )
+                        count += 1
+                    except Exception as e:
+                        errors.append(f"Row {i+1}: {str(e)}")
+                    
+                    progress_bar.progress((i + 1) / len(df))
+                
+                db.commit()
+                db.close()
+                
+                if count > 0:
+                    st.success(f"✅ Successfully imported {count} deadlines!")
+                if errors:
+                    st.warning(f"⚠️ Encountered {len(errors)} errors during import.")
+                    with st.expander("View Error Details"):
+                        for err in errors:
+                            st.write(f"- {err}")
+                
+                if count > 0:
+                    st.balloons()
+
+        except Exception as e:
+            st.error(f"Error reading CSV: {str(e)}")
+
+
+def page_analytics():
+    """Page: Deadline and Notification Analytics"""
+    apply_custom_css()
+    st.title("📊 Analytics Dashboard")
+    
+    db = SessionLocal()
+    try:
+        user_id = get_user_id()
+        
+        # Get deadlines for charts
+        deadlines = get_user_deadlines(db, int(user_id))
+        
+        if not deadlines:
+            st.info("No data available yet. Add some deadlines to see analytics!")
+            return
+
+        # 1. Deadline Status Overview
+        st.subheader("🗓️ Deadline Distribution")
+        
+        data = []
+        for d in deadlines:
+            days = d.days_until_deadline()
+            status = "Completed" if d.is_completed else ("Critical (<=3d)" if days <= 3 else ("Upcoming" if days <= 10 else "Scheduled"))
+            data.append({
+                "Case": d.case_title,
+                "Type": d.deadline_type.title(),
+                "Days Left": days,
+                "Status": status
+            })
+        
+        df = pd.DataFrame(data)
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            fig_status = px.pie(df, names='Status', title='Deadline Status', color_discrete_sequence=px.colors.qualitative.Pastel)
+            st.plotly_chart(fig_status, use_container_width=True)
+            
+        with col2:
+            fig_type = px.bar(df.groupby('Type').size().reset_index(name='Count'), x='Type', y='Count', title='Deadlines by Type', color='Type')
+            st.plotly_chart(fig_type, use_container_width=True)
+
+        # 2. Notification Delivery Performance
+        st.divider()
+        st.subheader("📬 Delivery Performance")
+        
+        notifications = get_notification_history(db, int(user_id), limit=200)
+        if notifications:
+            notif_data = []
+            for n in notifications:
+                notif_data.append({
+                    "Date": n.created_at.date(),
+                    "Status": n.status.value.capitalize(),
+                    "Channel": n.channel.value.upper()
+                })
+            
+            ndf = pd.DataFrame(notif_data)
+            
+            col3, col4 = st.columns(2)
+            
+            with col3:
+                fig_notif_status = px.pie(ndf, names='Status', title='Notification Success Rate', 
+                                         color='Status', color_discrete_map={'Sent': '#4CAF50', 'Failed': '#F44336', 'Pending': '#FFC107'})
+                st.plotly_chart(fig_notif_status, use_container_width=True)
+                
+            with col4:
+                daily_notifs = ndf.groupby(['Date', 'Status']).size().reset_index(name='Count')
+                fig_timeline = px.line(daily_notifs, x='Date', y='Count', color='Status', title='Notification Timeline')
+                st.plotly_chart(fig_timeline, use_container_width=True)
+        else:
+            st.info("Notification history is empty.")
+
+    finally:
+        db.close()
+
+
 # Export for use in main app
 if __name__ == "__main__":
     st.set_page_config(page_title="Deadline Reminders", layout="wide")
@@ -506,11 +667,15 @@ if __name__ == "__main__":
     # Sidebar navigation
     page = st.sidebar.radio(
         "Select Page",
-        ["Manage Deadlines", "Notification History", "Preferences"],
+        ["Manage Deadlines", "Bulk Import", "Analytics", "Notification History", "Preferences"],
     )
 
     if page == "Manage Deadlines":
         page_manage_deadlines()
+    elif page == "Bulk Import":
+        page_bulk_import()
+    elif page == "Analytics":
+        page_analytics()
     elif page == "Notification History":
         page_notification_history()
     elif page == "Preferences":
