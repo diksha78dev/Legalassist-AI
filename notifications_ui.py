@@ -6,6 +6,25 @@ Integrate these into the main app.py or use as a separate page.
 import streamlit as st
 from datetime import datetime, timezone, timedelta
 from typing import Optional
+import logging
+
+# Initialize logger
+logger = logging.getLogger(__name__)
+
+def apply_custom_css():
+    """Apply custom CSS to prevent long notification text from overflowing UI containers."""
+    st.markdown(
+        """
+        <style>
+        /* Fix for extremely long notification text messages overflowing UI containers */
+        .stMarkdown, .stText, .stCaption, [data-testid="stVerticalBlock"], .stContainer {
+            word-wrap: break-word !important;
+            overflow-wrap: break-word !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 from database import (
     SessionLocal,
@@ -50,6 +69,7 @@ def get_user_id() -> int:
 
 def page_notification_preferences():
     """Page: User Notification Preferences"""
+    apply_custom_css()
     st.title("⚙️ Notification Preferences")
 
     db = SessionLocal()
@@ -258,9 +278,6 @@ def page_notification_preferences():
     finally:
         db.close()
 
-    finally:
-        db.close()
-
     # Info section
     st.divider()
     st.info(
@@ -279,6 +296,7 @@ def page_notification_preferences():
 
 def page_manage_deadlines():
     """Page: Add and manage case deadlines"""
+    apply_custom_css()
     st.title("📅 Case Deadlines")
 
     db = SessionLocal()
@@ -409,6 +427,7 @@ def page_manage_deadlines():
 
 def page_notification_history():
     """Page: View notification delivery history"""
+    apply_custom_css()
     st.title("📬 Notification History")
 
     db = SessionLocal()
@@ -478,10 +497,6 @@ def page_notification_history():
         db.close()
 
 
-# Logging for debugging
-import logging
-
-logger = logging.getLogger(__name__)
 
 
 # Export for use in main app
