@@ -71,6 +71,7 @@ class CaseDeadline(Base):
     # Relationships
     case = relationship("Case", back_populates="deadlines")
     notifications = relationship("NotificationLog", back_populates="deadline", cascade="all, delete-orphan")
+    attachments = relationship("Attachment", back_populates="deadline", cascade="all, delete-orphan")
 
     def days_until_deadline(self) -> int:
         """Calculate days remaining until deadline"""
@@ -665,6 +666,7 @@ class Case(Base):
     documents = relationship("CaseDocument", back_populates="case", cascade="all, delete-orphan", order_by="CaseDocument.uploaded_at")
     deadlines = relationship("CaseDeadline", back_populates="case", cascade="all, delete-orphan")
     timeline_events = relationship("CaseTimeline", back_populates="case", cascade="all, delete-orphan")
+    attachments = relationship("Attachment", back_populates="case", cascade="all, delete-orphan", order_by="Attachment.uploaded_at")
 
     def __repr__(self):
         return f"<Case(case_number={self.case_number}, status={self.status})>"
@@ -688,6 +690,28 @@ class CaseDocument(Base):
 
     def __repr__(self):
         return f"<CaseDocument(case_id={self.case_id}, type={self.document_type})>"
+
+
+class Attachment(Base):
+    """Model for storing uploaded attachments/evidence linked to cases or deadlines"""
+    __tablename__ = "attachments"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=True, index=True)
+    deadline_id = Column(Integer, ForeignKey("case_deadlines.id", ondelete="CASCADE"), nullable=True, index=True)
+    original_filename = Column(String(255), nullable=False)
+    stored_path = Column(String(1024), nullable=False)  # Absolute path on disk
+    content_type = Column(String(255), nullable=True)
+    size_bytes = Column(Integer, nullable=True)
+    uploaded_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+
+    # Relationships
+    case = relationship("Case", back_populates="attachments")
+    deadline = relationship("CaseDeadline", back_populates="attachments")
+
+    def __repr__(self):
+        return f"<Attachment(id={self.id}, user_id={self.user_id}, filename={self.original_filename})>"
 
 
 class CaseTimeline(Base):
@@ -1451,6 +1475,53 @@ def update_case_document(
         db.commit()
         db.refresh(doc)
     return doc
+
+
+def create_attachment(
+    db: Session,
+    user_id: int,
+    original_filename: str,
+    stored_path: str,
+    content_type: Optional[str] = None,
+    size_bytes: Optional[int] = None,
+    case_id: Optional[int] = None,
+    deadline_id: Optional[int] = None,
+) -> "Attachment":
+    """Create a new attachment record linked to a case or deadline"""
+    att = Attachment(
+        user_id=user_id,
+        case_id=case_id,
+        deadline_id=deadline_id,
+        original_filename=original_filename,
+        stored_path=stored_path,
+        content_type=content_type,
+        size_bytes=size_bytes,
+    )
+    db.add(att)
+    db.commit()
+    db.refresh(att)
+    return att
+
+
+def get_attachments_for_case(db: Session, case_id: int):
+    return db.query(Attachment).filter(Attachment.case_id == case_id).order_by(Attachment.uploaded_at.desc()).all()
+
+
+def get_attachments_for_deadline(db: Session, deadline_id: int):
+    return db.query(Attachment).filter(Attachment.deadline_id == deadline_id).order_by(Attachment.uploaded_at.desc()).all()
+
+
+def get_attachment_by_id(db: Session, attachment_id: int):
+    return db.query(Attachment).filter(Attachment.id == attachment_id).first()
+
+
+def delete_attachment(db: Session, attachment_id: int) -> bool:
+    att = db.query(Attachment).filter(Attachment.id == attachment_id).first()
+    if not att:
+        return False
+    db.delete(att)
+    db.commit()
+    return True
 
 
 # ==================== Case Timeline Helper Functions ====================
