@@ -16,7 +16,7 @@ from core.app_utils import (
     _initialize_openai_client,
     extract_text_from_pdf,
     compress_text,
-    english_leakage_detected,
+    english_leakage_detected,  # Used to detect if output contains English in non-English text
     output_language_mismatch_detected,
     build_prompt,
     build_summary_prompt,
@@ -44,6 +44,12 @@ from config import Config
 init_db()
 
 # ==================== Logging Setup ====================
+# CENTRALIZED LOGGING CONFIGURATION
+# This is the single, authoritative logging setup point for the entire application.
+# All modules (scheduler, database, auth, etc.) use logging.getLogger(__name__)
+# and get their logs handled by this configuration.
+# NOTE: Other modules (scheduler.py, etc.) are imported BEFORE this point,
+# but they do NOT call logging.basicConfig() to avoid duplicate handlers.
 logging.basicConfig(
     level=Config.LOG_LEVEL,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -246,10 +252,10 @@ def render_save_to_case_section(user_id, raw_text, summary, remedies):
     with col2:
         st.markdown("### New Case")
         with st.expander("➕ Create & Save New Case"):
-            new_case_number = st.text_input("Case Number", placeholder="e.g. CA/123/2024")
-            new_case_title = st.text_input("Case Title (Optional)", placeholder="e.g. Sharma vs State")
+            new_case_number = st.text_input("Case Number", placeholder="e.g. CA/123/2024").strip()
+            new_case_title = st.text_input("Case Title (Optional)", placeholder="e.g. Sharma vs State").strip()
             new_case_type = st.selectbox("Type", ["civil", "criminal", "family", "other"])
-            new_jurisdiction = st.text_input("Jurisdiction", placeholder="e.g. Delhi High Court")
+            new_jurisdiction = st.text_input("Jurisdiction", placeholder="e.g. Delhi High Court").strip()
             
             if st.button("Create Case & Save Document", use_container_width=True):
                 if new_case_number and new_jurisdiction:
@@ -618,10 +624,10 @@ def main():
                                 
                         with col2:
                             with st.expander("➕ Or Create New Case"):
-                                new_case_number = st.text_input("Case Number")
-                                new_case_title = st.text_input("Case Title (Optional)")
+                                new_case_number = st.text_input("Case Number").strip()
+                                new_case_title = st.text_input("Case Title (Optional)").strip()
                                 new_case_type = st.selectbox("Type", ["civil", "criminal", "family", "other"])
-                                new_jurisdiction = st.text_input("Jurisdiction", placeholder="e.g. Delhi High Court")
+                                new_jurisdiction = st.text_input("Jurisdiction", placeholder="e.g. Delhi High Court").strip()
                                 if st.button("Create & Save"):
                                     if new_case_number and new_jurisdiction:
                                         new_case = create_new_case(
@@ -687,11 +693,14 @@ def main():
                                 with col1:
                                     st.metric("Total Cases Tracked", summary["total_cases_processed"])
                                 with col2:
-                                    st.metric("Appeals Success Rate", f"{AnalyticsAggregator.get_regional_trends(db)[0]['appeal_success_rate'] if AnalyticsAggregator.get_regional_trends(db) else 'N/A'}%")
+                                    regional_trends = AnalyticsAggregator.get_regional_trends(db)
+                                    appeal_rate = f"{regional_trends[0]['appeal_success_rate']}%" if regional_trends else 'N/A'
+                                    st.metric("Appeals Success Rate", appeal_rate)
                                 with col3:
                                     st.metric("Appeals Filed", summary["appeals_filed"])
                                 
-                                st.write("📌 **Visit Analytics Dashboard for detailed insights** ➡️ [See Full Dashboard]()")
+                                if st.button("📊 View Full Dashboard", use_container_width=True, key="full_dashboard"):
+                                    st.switch_page("pages/1_Analytics_Dashboard.py")
                             else:
                                 st.info("Analytics will be available as more cases are tracked.")
                         except Exception as e:

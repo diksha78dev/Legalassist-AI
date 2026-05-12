@@ -32,6 +32,8 @@ from database import (
     create_case_document,
     create_timeline_event,
     update_case_status,
+    create_attachment,
+    get_attachments_for_case,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,6 +55,13 @@ def create_new_case(
     """
     db = SessionLocal()
     try:
+        # Normalize inputs by trimming whitespace
+        case_number = case_number.strip()
+        jurisdiction = jurisdiction.strip()
+        case_type = case_type.strip()
+        if title:
+            title = title.strip()
+        
         # Check if case number already exists for this user
         existing = db.query(Case).filter(
             Case.user_id == user_id,
@@ -102,15 +111,21 @@ def get_or_create_case_for_document(
 ) -> Optional[Case]:
     """
     Get existing case or create new one for document upload.
+
+    The returned Case object is expunged from the session before the session
+    is closed, so all already-loaded scalar attributes remain accessible to
+    the caller without raising DetachedInstanceError.
     """
     db = SessionLocal()
     try:
         if existing_case_id:
             case = get_case_by_id(db, existing_case_id)
             if case and case.user_id == user_id:
+                db.expunge(case)
                 return case
 
-        # Create new case
+        # Create new case — create_new_case manages its own session internally,
+        # so the object it returns is already detached. No expunge needed here.
         if new_case_number:
             case = create_new_case(
                 user_id=user_id,
@@ -204,6 +219,19 @@ def get_case_detail(user_id: int, case_id: int) -> Optional[Dict[str, Any]]:
             for doc in documents
         ]
 
+        # Get attachments
+        attachments = get_attachments_for_case(db, case_id)
+        attachments_list = [
+            {
+                "id": a.id,
+                "original_filename": a.original_filename,
+                "uploaded_at": a.uploaded_at.isoformat(),
+                "size_bytes": a.size_bytes,
+                "content_type": a.content_type,
+            }
+            for a in attachments
+        ]
+
         # Get timeline
         timeline = get_case_timeline(db, case_id)
         timeline_list = [
@@ -252,6 +280,7 @@ def get_case_detail(user_id: int, case_id: int) -> Optional[Dict[str, Any]]:
             "timeline": timeline_list,
             "deadlines": deadlines_list,
             "remedies": remedies,
+            "attachments": attachments_list,
         }
 
     except Exception as e:
@@ -316,6 +345,66 @@ def upload_case_document(
 
     except Exception as e:
         logger.error(f"Error uploading document: {str(e)}")
+        return None
+    finally:
+        db.close()
+
+
+def upload_case_attachment(
+    user_id: int,
+    case_id: int,
+    file_bytes: bytes,
+    filename: str,
+    content_type: Optional[str] = None,
+    deadline_id: Optional[int] = None,
+) -> Optional[dict]:
+    """
+    Save an attachment file to disk and register it in the DB.
+    Returns attachment dict on success.
+    """
+    from core.storage import save_attachment
+
+    db = SessionLocal()
+    try:
+        case = get_case_by_id(db, case_id)
+        if not case or case.user_id != user_id:
+            logger.error(f"Case {case_id} not found or not owned by user {user_id}")
+            return None
+
+        # Save file to storage
+        stored_path, size = save_attachment(file_bytes, filename)
+
+        att = create_attachment(
+            db=db,
+            user_id=user_id,
+            original_filename=filename,
+            stored_path=stored_path,
+            content_type=content_type,
+            size_bytes=size,
+            case_id=case_id,
+            deadline_id=deadline_id,
+        )
+
+        # Timeline event
+        create_timeline_event(
+            db=db,
+            case_id=case_id,
+            event_type="attachment_uploaded",
+            description=f"Attachment uploaded: {filename}",
+            metadata={"attachment_id": att.id, "deadline_id": deadline_id},
+        )
+
+        db.refresh(att)
+        return {
+            "id": att.id,
+            "original_filename": att.original_filename,
+            "stored_path": att.stored_path,
+            "size_bytes": att.size_bytes,
+            "uploaded_at": att.uploaded_at.isoformat(),
+        }
+
+    except Exception as e:
+        logger.error(f"Error uploading attachment: {str(e)}", exc_info=True)
         return None
     finally:
         db.close()
@@ -442,24 +531,20 @@ def _auto_create_deadlines_from_remedies(
             )
             return
         
-        # Calculate the deadline date
-        # Using timezone-aware datetime for consistency
+        # Calculate the deadline date as a timezone-aware UTC datetime.
         current_time = datetime.now(timezone.utc)
         deadline_date = current_time + timedelta(days=days)
-        
-        # Normalize to naive datetime for database storage
-        # The database schema uses timezone-naive timestamps
-        naive_deadline = deadline_date.replace(tzinfo=None)
-        
-        # Check for existing pending deadlines to prevent duplicates
-        # We use a ±1 day tolerance to handle minor variations in deadline dates
-        # that might result from different processing times or timezone conversions
+
+        # Check for existing pending deadlines to prevent duplicates.
+        # Both sides of the comparison use timezone-aware datetimes so the
+        # ORM filter is consistent across SQLite and PostgreSQL.
+        # A ±1 day tolerance handles minor variations from different processing times.
         existing_deadline = db.query(CaseDeadline).filter(
             CaseDeadline.case_id == case_id,
             CaseDeadline.deadline_type == "appeal",
             CaseDeadline.is_completed == False,
-            CaseDeadline.deadline_date >= naive_deadline - timedelta(days=1),
-            CaseDeadline.deadline_date <= naive_deadline + timedelta(days=1)
+            CaseDeadline.deadline_date >= deadline_date - timedelta(days=1),
+            CaseDeadline.deadline_date <= deadline_date + timedelta(days=1)
         ).first()
         
         if existing_deadline:
@@ -501,19 +586,19 @@ def _auto_create_deadlines_from_remedies(
             f"{deadline_date.strftime('%Y-%m-%d')} ({days} days from now). "
             f"Source: document {document_id}"
         )
-        
-        # Commit the transaction
-        db.commit()
-        
+        # Do not commit here — transaction boundaries are owned by the calling
+        # function (upload_case_document).  All writes are staged via flush()
+        # and will be committed atomically by the parent workflow.
+
     except Exception as e:
-        # Log the full error with context for debugging
+        # Log the full error with context for debugging and re-raise so the
+        # parent session owner can decide whether to rollback.
         logger.error(
             f"Error auto-creating deadlines for case {case_id}: {str(e)}. "
             f"Remedies: {remedies}. Document ID: {document_id}",
             exc_info=True  # Include full traceback for debugging
         )
-        # Rollback the transaction to prevent partial data writes
-        db.rollback()
+        raise
 
 
 def get_document_content(document_id: int) -> Optional[str]:
@@ -873,6 +958,11 @@ def _get_case_anonymization_secret() -> str:
 
     Primary source: CASE_ANONYMIZATION_SECRET env var.
     Fallback: contents of .jwt_secret (kept for local dev compatibility).
+
+    Raises RuntimeError if no non-empty secret can be resolved.  An empty
+    HMAC key produces deterministic, predictable outputs that undermine
+    anonymization guarantees, so we fail loudly rather than silently
+    degrading security.
     """
     secret = os.getenv("CASE_ANONYMIZATION_SECRET", "").strip()
     if secret:
@@ -886,13 +976,18 @@ def _get_case_anonymization_secret() -> str:
 
     if jwt_secret_path.exists():
         try:
-            return jwt_secret_path.read_text(encoding="utf-8").strip()
+            file_secret = jwt_secret_path.read_text(encoding="utf-8").strip()
+            if file_secret:
+                return file_secret
         except Exception:
             pass
 
-    # Last resort: no secret. This is insecure, but prevents runtime crashes.
-    # Prefer setting CASE_ANONYMIZATION_SECRET.
-    return ""
+    raise RuntimeError(
+        "CASE_ANONYMIZATION_SECRET is not configured. "
+        "Set the 'CASE_ANONYMIZATION_SECRET' environment variable to a strong, "
+        "randomly generated value. Using an empty HMAC key produces predictable "
+        "identifiers and must not be allowed."
+    )
 
 
 def _generate_anonymized_case_id(case_id: int, created_at: Any) -> str:
