@@ -49,22 +49,41 @@ def render_timeline_section(timeline: list):
         st.info("No timeline events yet. Upload a document to start tracking.")
         return
 
-    # Sort by date descending (most recent first)
-    sorted_timeline = sorted(timeline, key=lambda x: x["event_date"], reverse=True)
+    # Sort by date descending (most recent first). Support both old and new timeline formats.
+    sorted_timeline = sorted(timeline, key=lambda x: x.get("timestamp") or x.get("event_date") or "", reverse=True)
 
     for event in sorted_timeline:
-        icon = get_timeline_icon(event["event_type"])
-        event_date = datetime.fromisoformat(event["event_date"])
-        date_str = event_date.strftime("%d %b %Y, %H:%M")
+        ev_type = event.get("type") or event.get("event_type")
+        icon = get_timeline_icon(ev_type)
+        ts = event.get("timestamp") or event.get("event_date") or ""
+        try:
+            event_date = datetime.fromisoformat(ts)
+            date_str = event_date.strftime("%d %b %Y, %H:%M")
+        except Exception:
+            date_str = ts
+
+        desc = event.get("description", "")
+
+        # Build HTML block; include message preview for notifications
+        msg_preview_html = ""
+        if event.get("source") == "notification":
+            mp = event.get("message_preview")
+            if mp:
+                # If the preview looks like HTML, render as HTML inside an expander
+                if bool(mp.strip().startswith("<")):
+                    msg_preview_html = f"<div style=\"margin-top:8px;\"><details><summary>Rendered Message Preview</summary>{mp}</details></div>"
+                else:
+                    safe_text = html.escape(str(mp))
+                    msg_preview_html = f"<div style=\"margin-top:8px;\"><details><summary>Rendered Message Preview</summary><pre style=\"white-space:pre-wrap;\">{safe_text}</pre></details></div>"
 
         with st.container():
             st.markdown(
                 f"""
                 <div class="timeline-item">
                     <div class="timeline-date">{date_str}</div>
-                    <div>{icon} <strong>{event["event_type"].replace("_", " ").title()}</strong></div>
-                    <div style="margin-top: 8px;">{html.escape(str(event.get("description", "")))}</div>
-
+                    <div>{icon} <strong>{ev_type.replace("_", " ").title()}</strong></div>
+                    <div style="margin-top: 8px;">{html.escape(str(desc))}</div>
+                    {msg_preview_html}
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -467,7 +486,6 @@ def main():
 
     case = case_data["case"]
     documents = case_data["documents"]
-    timeline = case_data["timeline"]
     deadlines = case_data["deadlines"]
     remedies = case_data.get("remedies")
 
