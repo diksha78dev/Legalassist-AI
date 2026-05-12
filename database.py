@@ -208,6 +208,23 @@ class CaseAnalytics(Base):
         return f"<CaseAnalytics(jurisdiction={self.jurisdiction}, appeal_success_rate={self.appeal_success_rate})>"
 
 
+class NotificationTemplate(Base):
+    """Per-user notification templates for SMS and Email"""
+    __tablename__ = "notification_templates"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
+    sms_template = Column(Text, nullable=True)
+    email_subject_template = Column(String(255), nullable=True)
+    email_html_template = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+
+    # Relationship back to user is optional
+    def __repr__(self):
+        return f"<NotificationTemplate(user_id={self.user_id})>"
+
+
 class UserFeedback(Base):
     """Model for tracking user feedback on case outcomes"""
     __tablename__ = "user_feedback"
@@ -912,6 +929,38 @@ def get_case_by_number(db: Session, user_id: int, case_number: str) -> Optional[
         Case.user_id == user_id,
         Case.case_number == case_number,
     ).first()
+
+def get_notification_template_for_user(db: Session, user_id: int) -> Optional["NotificationTemplate"]:
+    return db.query(NotificationTemplate).filter(NotificationTemplate.user_id == user_id).first()
+
+def create_or_update_notification_template(
+    db: Session,
+    user_id: int,
+    sms_template: Optional[str] = None,
+    email_subject_template: Optional[str] = None,
+    email_html_template: Optional[str] = None,
+):
+    tmpl = db.query(NotificationTemplate).filter(NotificationTemplate.user_id == user_id).first()
+    if tmpl:
+        if sms_template is not None:
+            tmpl.sms_template = sms_template
+        if email_subject_template is not None:
+            tmpl.email_subject_template = email_subject_template
+        if email_html_template is not None:
+            tmpl.email_html_template = email_html_template
+        tmpl.updated_at = dt.datetime.now(dt.timezone.utc)
+    else:
+        tmpl = NotificationTemplate(
+            user_id=user_id,
+            sms_template=sms_template,
+            email_subject_template=email_subject_template,
+            email_html_template=email_html_template,
+        )
+        db.add(tmpl)
+
+    db.commit()
+    db.refresh(tmpl)
+    return tmpl
 
 
 def update_case_status(db: Session, case_id: int, status: CaseStatus) -> Optional[Case]:
