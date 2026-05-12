@@ -90,12 +90,15 @@ def send_otp_email(email: str, otp: str) -> bool:
         from_email = os.getenv("SENDGRID_FROM_EMAIL", "noreply@legalassist.ai")
 
         if not api_key:
-            logger.warning("SendGrid API key not configured - using masked OTP logging")
             if _is_debug_or_testing_mode():
+                logger.warning("SendGrid API key not configured - using masked OTP logging for debug/test mode")
                 logger.debug(f"OTP for {email}: [MASKED-{otp[:2]}***{otp[-1]}]")
-            else:
-                logger.warning(f"OTP requested for {email} (email delivery skipped - missing config)")
-            return True  # Return True in development mode
+                return True  # Simulate success only in explicit debug/testing environments
+            logger.error(
+                f"SendGrid API key not configured — OTP delivery failed for {email}. "
+                "Set SENDGRID_API_KEY to enable email authentication."
+            )
+            return False
 
         sg = sendgrid.SendGridAPIClient(api_key=api_key)
 
@@ -598,29 +601,30 @@ def revoke_jwt_token(token: str) -> bool:
         
     try:
         # =====================================================================
-        # DECODING FOR REVOCATION (NO EXPIRATION CHECK)
+        # DECODING FOR REVOCATION (SIGNATURE VERIFIED, EXPIRATION SKIPPED)
         # =====================================================================
-        # We need to extract the `jti` and `exp` claims to add them to our 
-        # database blacklist. 
-        # 
-        # Crucially, we set `verify_exp=False` here. Why? 
-        # Because if a user tries to log out using a token that has *just* 
-        # expired a few seconds ago, we still want to successfully extract 
-        # its JTI and ensure it's blacklisted (or just silently succeed). 
-        # If we didn't disable the exp check, jwt.decode would throw an error, 
-        # preventing the logout flow from completing gracefully.
-        # 
-        # However, we STILL enforce `issuer` and `audience` checks to ensure 
-        # we aren't wasting database resources blacklisting foreign tokens.
+        # We need to extract the `jti` and `exp` claims to add them to our
+        # database blacklist.
+        #
+        # verify_exp=False: allows revoking tokens that expired moments ago,
+        # so the logout flow completes gracefully even for just-expired sessions.
+        #
+        # verify_signature=True (explicit): the HMAC signature MUST still be
+        # validated against JWT_SECRET.  Without this, an attacker could submit
+        # a forged token with an arbitrary jti and pollute the revocation store.
+        # PyJWT's behaviour when only verify_exp is set can vary across versions,
+        # so we make the signature requirement unambiguous here.
+        #
+        # issuer and audience checks remain enforced to reject foreign tokens.
         # =====================================================================
-        
+
         payload = jwt.decode(
-            jwt=token, 
-            key=JWT_SECRET, 
+            jwt=token,
+            key=JWT_SECRET,
             algorithms=[JWT_ALGORITHM],
             issuer=JWT_ISSUER,
             audience=JWT_AUDIENCE,
-            options={"verify_exp": False}  # Bypass expiration check specifically for logout
+            options={"verify_exp": False, "verify_signature": True},
         )
         
         jti = payload.get("jti")
