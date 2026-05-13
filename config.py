@@ -77,6 +77,10 @@ class Config:
     
     # --- Database Settings ---
     DATABASE_URL = _get_val("DATABASE_URL", "sqlite:///./legalassist.db")
+
+    # --- Backend API Settings ---
+    API_BASE_URL = _get_val("API_BASE_URL", "")
+    API_REQUEST_TIMEOUT_SECONDS = float(_get_val("API_REQUEST_TIMEOUT_SECONDS", "5.0"))
     
     # --- Authentication (JWT & OTP) ---
     JWT_ALGORITHM = "HS256"

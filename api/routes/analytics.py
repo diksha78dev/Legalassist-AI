@@ -2,12 +2,18 @@
 Analytics Endpoints
 GET /api/v1/analytics/costs - User cost breakdown
 GET /api/v1/analytics/overview - User analytics overview
+GET /api/v1/analytics/dashboard - Dashboard summary for the Streamlit frontend
 """
 from fastapi import APIRouter, Depends
-from api.models import CostBreakdown, AnalyticsResponse
+from sqlalchemy.orm import Session
+
+from api.models import CostBreakdown, AnalyticsResponse, DashboardSummaryResponse
 from api.auth import get_current_user, CurrentUser
 import structlog
 from datetime import datetime
+
+from analytics_engine import AnalyticsAggregator
+from database import get_db
 
 router = APIRouter(prefix="/api/v1/analytics", tags=["analytics"])
 logger = structlog.get_logger(__name__)
@@ -97,6 +103,18 @@ async def get_analytics_overview(
         ],
         "generated_at": datetime.utcnow().isoformat()
     }
+
+
+@router.get(
+    "/dashboard",
+    response_model=DashboardSummaryResponse,
+    summary="Get dashboard summary"
+)
+def get_dashboard_summary(db: Session = Depends(get_db)) -> DashboardSummaryResponse:
+    """Get the dashboard summary used by the Streamlit home analytics view."""
+
+    summary = AnalyticsAggregator.get_dashboard_summary(db)
+    return DashboardSummaryResponse(**summary)
 
 
 @router.get(
