@@ -9,10 +9,13 @@ from celery.result import AsyncResult
 import structlog
 
 from api.config import get_settings
+from observability.integration import initialize_observability_for_environment
+from observability.instrumentation import traced_operation, capture_exception, bind_request_context, clear_request_context
 
 
 settings = get_settings()
 logger = structlog.get_logger(__name__)
+initialize_observability_for_environment()
 
 
 # ============================================================================
@@ -106,56 +109,71 @@ def analyze_document_task(
     user_id: str,
     document_id: str,
     text: str,
-    document_type: str = "unknown"
+    document_type: str = "unknown",
+    request_id: str | None = None,
 ) -> dict:
     """Async task to analyze document"""
     try:
-        self.update_state(
-            state="PROGRESS",
-            meta={
-                "status": "Extracting text",
-                "progress": 25
+        bind_request_context(request_id=request_id or self.request.id, user_id=user_id)
+        with traced_operation(
+            "celery.analyze_document",
+            {
+                "task.id": self.request.id,
+                "user.id": user_id,
+                "document.id": document_id,
+                "document.type": document_type,
+                "request.id": request_id or self.request.id,
+            },
+        ):
+            self.update_state(
+                state="PROGRESS",
+                meta={
+                    "status": "Extracting text",
+                    "progress": 25
+                }
+            )
+
+            logger.info(
+                "Starting document analysis",
+                task_id=self.request.id,
+                user_id=user_id,
+                document_id=document_id
+            )
+
+            # Simulate processing steps
+            self.update_state(state="PROGRESS", meta={"status": "Analyzing content", "progress": 50})
+            self.update_state(state="PROGRESS", meta={"status": "Extracting remedies", "progress": 75})
+            self.update_state(state="PROGRESS", meta={"status": "Finalizing results", "progress": 90})
+
+            # In production, call actual analysis engine
+            result = {
+                "document_id": document_id,
+                "summary": "Document analysis completed successfully",
+                "remedies": [],
+                "deadlines": [],
+                "obligations": [],
+                "confidence_score": 0.85,
+                "analysis_time_seconds": 10.5
             }
-        )
-        
-        logger.info(
-            "Starting document analysis",
-            task_id=self.request.id,
-            user_id=user_id,
-            document_id=document_id
-        )
-        
-        # Simulate processing steps
-        self.update_state(state="PROGRESS", meta={"status": "Analyzing content", "progress": 50})
-        self.update_state(state="PROGRESS", meta={"status": "Extracting remedies", "progress": 75})
-        self.update_state(state="PROGRESS", meta={"status": "Finalizing results", "progress": 90})
-        
-        # In production, call actual analysis engine
-        result = {
-            "document_id": document_id,
-            "summary": "Document analysis completed successfully",
-            "remedies": [],
-            "deadlines": [],
-            "obligations": [],
-            "confidence_score": 0.85,
-            "analysis_time_seconds": 10.5
-        }
-        
-        logger.info(
-            "Document analysis completed",
-            task_id=self.request.id,
-            document_id=document_id
-        )
-        
-        return result
-    
+
+            logger.info(
+                "Document analysis completed",
+                task_id=self.request.id,
+                document_id=document_id
+            )
+
+            return result
+
     except Exception as e:
+        capture_exception(e, task_id=self.request.id, user_id=user_id, document_id=document_id)
         logger.error(
             "Document analysis failed",
             task_id=self.request.id,
             error=str(e)
         )
         raise
+    finally:
+        clear_request_context()
 
 
 @celery_app.task(bind=True, name="generate_report")

@@ -38,6 +38,7 @@ from database import init_db, SessionLocal, get_db, DocumentType, db_session
 from scheduler import start_scheduler
 from auth import init_auth_session, require_auth, get_current_user_id, get_current_user_email, logout_user
 from case_manager import get_user_cases_summary, upload_case_document, create_new_case, get_case_detail
+from observability.integration import initialize_observability_for_environment
 
 # Initialize database
 from config import Config
@@ -54,6 +55,7 @@ logging.basicConfig(
     level=Config.LOG_LEVEL,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
+initialize_observability_for_environment()
 
 # ==================== App Config ====================
 st.set_page_config(

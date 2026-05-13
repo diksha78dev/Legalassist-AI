@@ -5,6 +5,7 @@ GET /api/v1/analyze/{job_id} - Check analysis job status
 """
 import uuid
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status, Depends
+from fastapi import Request
 from api.models import DocumentAnalysisRequest, DocumentAnalysisSummary, AnalysisJobResponse
 from api.auth import get_current_user, CurrentUser
 from celery_app import analyze_document_task, TaskStatus
@@ -22,6 +23,7 @@ logger = structlog.get_logger(__name__)
 )
 async def analyze_document(
     request: DocumentAnalysisRequest,
+    http_request: Request,
     current_user: CurrentUser = Depends(get_current_user)
 ) -> AnalysisJobResponse:
     """
@@ -60,7 +62,8 @@ async def analyze_document(
         user_id=current_user.user_id,
         document_id=document_id,
         text=text,
-        document_type=request.document_type
+        document_type=request.document_type,
+        request_id=getattr(http_request.state, "request_id", None),
     )
     
     return AnalysisJobResponse(
