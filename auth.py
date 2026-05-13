@@ -10,7 +10,7 @@ import time
 import re
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Any
 import logging
 from config import Config
 
@@ -34,7 +34,6 @@ from database import (
     is_token_revoked,
     cleanup_expired_revoked_tokens,
     User,
-    OTPVerification,  # Added to fix NameError in request_otp rate limiting
 )
 
 logger = logging.getLogger(__name__)
@@ -57,8 +56,6 @@ JWT_EXPIRY_HOURS = Config.JWT_EXPIRY_HOURS
 EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
 
 OTP_EXPIRY_MINUTES = Config.OTP_EXPIRY_MINUTES
-OTP_RATE_LIMIT_HOURS = 1
-OTP_RATE_LIMIT_MAX = 3  # Max OTP requests per email per hour
 
 # OTP Verification Security - Failed Attempt Lockout
 OTP_MAX_FAILED_ATTEMPTS = int(os.getenv("OTP_MAX_FAILED_ATTEMPTS", "5"))  # Max failed verification attempts
@@ -142,7 +139,7 @@ def send_otp_email(email: str, otp: str) -> bool:
         return False
 
 
-def _handle_test_account_bypass(db: SessionLocal, email: str, now: datetime) -> Tuple[bool, str]:
+def _handle_test_account_bypass(db: Any, email: str, now: datetime) -> Tuple[bool, str]:
     """
     Handles automated OTP bypass for designated test accounts in non-production environments.
     
@@ -237,23 +234,16 @@ def request_otp(email: str) -> Tuple[bool, str]:
             # consistent UI behavior and avoid leaking bypass status.
             return True, "OTP sent to your email"
 
-        rate_limit_start = now - timedelta(hours=OTP_RATE_LIMIT_HOURS)
-
-        recent_otps = db.query(OTPVerification).filter(
-            OTPVerification.email == email,
-            OTPVerification.created_at >= rate_limit_start,
-        ).count()
-
-        if recent_otps >= OTP_RATE_LIMIT_MAX:
-            return False, "Too many OTP requests. Please try again in an hour."
-
         # Generate OTP
         otp = generate_otp()
         otp_hash = _hash_otp(otp)
         expires_at = now + timedelta(minutes=OTP_EXPIRY_MINUTES)
 
         # Store OTP
-        create_otp_verification(db, email, otp_hash, expires_at)
+        try:
+            create_otp_verification(db, email, otp_hash, expires_at)
+        except ValueError as exc:
+            return False, str(exc)
 
         # Send OTP email
         email_sent = send_otp_email(email, otp)

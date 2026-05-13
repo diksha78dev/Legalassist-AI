@@ -74,6 +74,9 @@ class Config:
     MAX_FILE_SIZE_MB = _get_int_env("MAX_FILE_SIZE_MB", 25)
     WARN_FILE_SIZE_MB = _get_int_env("WARN_FILE_SIZE_MB", 10)
     TEXT_COMPRESSION_LIMIT = _get_int_env("TEXT_COMPRESSION_LIMIT", 6000)
+
+    # --- Redis / Async Infrastructure ---
+    REDIS_URL = _get_val("REDIS_URL", "redis://localhost:6379/0")
     
     # --- Database Settings ---
     DATABASE_URL = _get_val("DATABASE_URL", "sqlite:///./legalassist.db")
