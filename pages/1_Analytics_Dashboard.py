@@ -16,6 +16,7 @@ from analytics_engine import (
     AnalyticsCalculator,
     AnalyticsAggregator,
     CaseSimilarityCalculator,
+    PredictiveAnalyticsEngine,
 )
 import logging
 
@@ -301,6 +302,137 @@ try:
 
     st.markdown("---")
 
+    # ==================== PREDICTIVE INSIGHTS ====================
+    st.subheader("🤖 Predictive Insights")
+    st.markdown("Use historical data to estimate appeal success, timing, costs, and the best filing strategy.")
+
+    observed_case_types = sorted(set(case.case_type for case in all_cases if case.case_type)) or ["general"]
+    selected_case_type = st.selectbox(
+        "Case Type",
+        observed_case_types,
+        key="prediction_case_type",
+    )
+
+    selected_case_jurisdiction = st.selectbox(
+        "Jurisdiction",
+        jurisdictions if jurisdictions else ["US"],
+        key="prediction_jurisdiction",
+    )
+
+    pred_col1, pred_col2, pred_col3 = st.columns(3)
+    with pred_col1:
+        prediction_court = st.text_input("Court name (optional)", key="prediction_court")
+        prediction_plaintiff = st.selectbox(
+            "Plaintiff type",
+            ["", "individual", "organization", "government"],
+            key="prediction_plaintiff",
+        )
+    with pred_col2:
+        prediction_judge = st.text_input("Judge name (optional)", key="prediction_judge")
+        prediction_defendant = st.selectbox(
+            "Defendant type",
+            ["", "individual", "organization", "government"],
+            key="prediction_defendant",
+        )
+    with pred_col3:
+        prediction_case_value = st.selectbox(
+            "Case value (optional)",
+            ["", "<1L", "1-5L", "5-10L", ">10L"],
+            key="prediction_case_value",
+        )
+        prediction_summary = st.text_area(
+            "Key arguments or summary (optional)",
+            key="prediction_summary",
+            height=120,
+            placeholder="Briefly describe the legal issue, key arguments, or precedent you want matched.",
+        )
+
+    if st.button("Generate predictive insights", type="primary", key="generate_predictions"):
+        try:
+            st.session_state.case_prediction_pack = PredictiveAnalyticsEngine.build_case_prediction_pack(
+                db,
+                case_type=selected_case_type,
+                jurisdiction=selected_case_jurisdiction,
+                court_name=prediction_court or None,
+                judge_name=prediction_judge or None,
+                plaintiff_type=prediction_plaintiff or None,
+                defendant_type=prediction_defendant or None,
+                case_value=prediction_case_value or None,
+                case_summary=prediction_summary or None,
+            )
+        except Exception as exc:
+            st.error(f"Could not generate predictive insights: {exc}")
+
+    if "case_prediction_pack" in st.session_state:
+        prediction_pack = st.session_state.case_prediction_pack
+
+        appeal = prediction_pack["appeal_success"]
+        timeline = prediction_pack["timeline"]
+        cost = prediction_pack["cost"]
+        recommendations = prediction_pack["recommendations"]
+
+        metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+        with metric_col1:
+            st.metric("Appeal success", f"{appeal['predicted_success_rate']:.1f}%")
+        with metric_col2:
+            st.metric("Timeline", f"{timeline['estimated_total_days']} days")
+        with metric_col3:
+            st.metric("Estimated cost", cost["estimated_cost_range"])
+        with metric_col4:
+            st.metric("Confidence", appeal["confidence"].title())
+
+        st.progress(min(max(appeal["predicted_success_rate"] / 100.0, 0.0), 1.0), text="Predicted appeal success probability")
+
+        if timeline["deadline_risk"] in {"high", "medium"}:
+            st.warning(
+                f"Deadline risk is {timeline['deadline_risk'].upper()}. Recommended filing window: {timeline['deadline_window_days']} days."
+            )
+        else:
+            st.info(
+                f"Estimated filing window: {timeline['deadline_window_days']} days. Risk level: {timeline['deadline_risk'].replace('_', ' ').title()}."
+            )
+
+        details_col1, details_col2 = st.columns(2)
+        with details_col1:
+            st.subheader("Timeline breakdown")
+            stage_df = pd.DataFrame([
+                {"Stage": "Filing preparation", "Days": timeline["stages"]["filing_preparation_days"]},
+                {"Stage": "Admission", "Days": timeline["stages"]["admission_days"]},
+                {"Stage": "Hearings", "Days": timeline["stages"]["hearing_days"]},
+                {"Stage": "Decision", "Days": timeline["stages"]["decision_days"]},
+            ])
+            st.dataframe(stage_df, use_container_width=True, hide_index=True)
+
+        with details_col2:
+            st.subheader("Recommendation")
+            st.write(f"**Best judge:** {recommendations['recommended_judge'] or 'No ranked judge yet'}")
+            st.write(f"**Best court:** {recommendations['recommended_court'] or 'No ranked court yet'}")
+            st.write(f"**Prediction source:** {appeal['source']}")
+            st.write(f"**Evidence base:** {appeal['sample_count']} appeal records")
+            st.info(appeal["reasoning"])
+
+        if recommendations["top_judges"]:
+            st.subheader("Top judges and courts")
+            judge_df = pd.DataFrame(recommendations["top_judges"])
+            if not judge_df.empty:
+                judge_df = judge_df.rename(columns={"judge_name": "Judge"})
+                st.dataframe(judge_df, use_container_width=True, hide_index=True)
+
+            court_df = pd.DataFrame(recommendations["top_courts"])
+            if not court_df.empty:
+                court_df = court_df.rename(columns={"court_name": "Court"})
+                st.dataframe(court_df, use_container_width=True, hide_index=True)
+
+        if prediction_pack["similar_cases"]:
+            st.subheader("Similar case precedents")
+            similar_df = pd.DataFrame(prediction_pack["similar_cases"])
+            if not similar_df.empty:
+                similar_df = similar_df[["case_number", "title", "jurisdiction", "case_type", "relevance_score", "appeal_filed", "appeal_success"]]
+                similar_df.columns = ["Case", "Title", "Jurisdiction", "Type", "Relevance", "Appeal filed", "Appeal success"]
+                st.dataframe(similar_df, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+
     # ==================== SIMILAR CASE SEARCH ====================
     st.subheader("🔍 Find Similar Cases")
 
@@ -455,33 +587,32 @@ except Exception as e:
 finally:
     db.close()
 
-# ==================== ABOUT ====================
+# ==================== MODEL OPTIMIZATION ====================
 st.markdown("---")
-    # ==================== MODEL OPTIMIZATION ====================
-    st.subheader("🤖 Model Optimization & Feedback")
+st.subheader("🤖 Model Optimization & Feedback")
 
-    if st.button("Refresh model performance", key="refresh_models"):
-        try:
-            api_base = st.session_state.get("api_base_url", "http://localhost:8000").rstrip('/')
-            token = st.session_state.get("api_token", "")
-            headers = {"Authorization": f"Bearer {token}"} if token else {}
-            resp = requests.get(f"{api_base}/api/v1/models/performance", headers=headers, timeout=10)
-            resp.raise_for_status()
-            st.session_state.model_performance = resp.json()
-        except Exception as e:
-            st.error(f"Could not fetch model performance: {e}")
+if st.button("Refresh model performance", key="refresh_models"):
+    try:
+        api_base = st.session_state.get("api_base_url", "http://localhost:8000").rstrip('/')
+        token = st.session_state.get("api_token", "")
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        resp = requests.get(f"{api_base}/api/v1/models/performance", headers=headers, timeout=10)
+        resp.raise_for_status()
+        st.session_state.model_performance = resp.json()
+    except Exception as e:
+        st.error(f"Could not fetch model performance: {e}")
 
-    if "model_performance" in st.session_state:
-        perf = st.session_state.model_performance
-        items = perf.get("items", [])
-        if items:
-            df = pd.DataFrame(items)
-            df = df[["model_name", "task", "case_type", "jurisdiction", "samples", "accuracy"]]
-            st.dataframe(df, use_container_width=True)
-        else:
-            st.info("No model feedback collected yet.")
+if "model_performance" in st.session_state:
+    perf = st.session_state.model_performance
+    items = perf.get("items", [])
+    if items:
+        df = pd.DataFrame(items)
+        df = df[["model_name", "task", "case_type", "jurisdiction", "samples", "accuracy"]]
+        st.dataframe(df, use_container_width=True)
+    else:
+        st.info("No model feedback collected yet.")
 
-    st.markdown("---")
+st.markdown("---")
 st.markdown("""
 ### About This Dashboard
 
@@ -489,7 +620,7 @@ This analytics dashboard aggregates anonymized case data to provide:
 - **Outcome Tracking**: Monitor case success rates by type and jurisdiction
 - **Judge Analytics**: See how specific judges perform on appeals
 - **Regional Trends**: Compare appeal success rates across different courts
-- **Informed Decisions**: Help users understand their appeal chances
+- **Predictive Insights**: Estimate appeal success, timeline, cost, and filing strategy
 
 All data is anonymized and aggregated to protect user privacy.
 """)
