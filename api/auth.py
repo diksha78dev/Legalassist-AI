@@ -125,10 +125,6 @@ async def get_current_user(
 ) -> CurrentUser:
     """Get current authenticated user"""
     
-    if not settings.AUTH_ENABLED:
-        # Development mode - no auth required
-        return CurrentUser("dev-user", "dev@example.com", "admin")
-    
     # Try JWT token first
     if token:
         try:
