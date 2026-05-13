@@ -27,6 +27,8 @@ from celery.result import AsyncResult
 
 # Import project settings for fallback and other configurations
 from api.config import get_settings
+from observability.integration import initialize_observability_for_environment
+from observability.instrumentation import traced_operation, capture_exception, bind_request_context, clear_request_context
 
 # ============================================================================
 # INITIALIZATION & LOGGING
@@ -37,6 +39,7 @@ settings = get_settings()
 
 # Initialize the structured logger for consistent logging across tasks
 logger = structlog.get_logger(__name__)
+initialize_observability_for_environment()
 
 
 # ============================================================================
@@ -299,6 +302,8 @@ def analyze_document_task(
         )
         # Re-raise the exception to trigger Celery's retry mechanism
         raise
+    finally:
+        clear_request_context()
 
 
 @celery_app.task(bind=True, name="generate_report")
