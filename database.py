@@ -751,6 +751,173 @@ class CaseTimeline(Base):
         return f"<CaseTimeline(case_id={self.case_id}, event_type={self.event_type})>"
 
 
+# ==================== Case Search & Precedent Matching Models ====================
+
+
+class CaseEmbedding(Base):
+    """Model for storing semantic embeddings of cases for similarity search"""
+    __tablename__ = "case_embeddings"
+
+    id = Column(Integer, primary_key=True)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    document_id = Column(Integer, ForeignKey("case_documents.id", ondelete="SET NULL"), nullable=True)
+    
+    # Embedding vector (stored as JSON array for SQLite compatibility)
+    embedding_vector = Column(Text, nullable=False)  # JSON-encoded list of floats
+    embedding_model = Column(String(255), default="text-embedding-3-small")  # Model used to generate
+    embedding_dimension = Column(Integer, default=1536)
+    
+    # Metadata for filtering
+    case_type = Column(String(255), nullable=False, index=True)
+    jurisdiction = Column(String(255), nullable=False, index=True)
+    outcome = Column(String(255), nullable=True, index=True)  # plaintiff_won, defendant_won, settlement, etc.
+    
+    # Timestamps
+    indexed_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+
+    # Relationships
+    case = relationship("Case")
+    document = relationship("CaseDocument")
+
+    def __repr__(self):
+        return f"<CaseEmbedding(case_id={self.case_id}, model={self.embedding_model})>"
+
+
+class CaseIssue(Base):
+    """Model for tracking legal issues/topics extracted from cases"""
+    __tablename__ = "case_issues"
+
+    id = Column(Integer, primary_key=True)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    # Issue details
+    issue_name = Column(String(255), nullable=False, index=True)  # e.g., "wrongful termination", "property dispute"
+    issue_description = Column(Text, nullable=True)
+    issue_category = Column(String(255), nullable=True, index=True)  # civil, criminal, family, labor, etc.
+    
+    # Confidence score (0-1) from extraction model
+    confidence_score = Column(String(50), default="1.0")  # JSON-safe string
+    
+    # Metadata
+    extracted_from_document = Column(Integer, ForeignKey("case_documents.id", ondelete="SET NULL"), nullable=True)
+    extraction_method = Column(String(255), default="llm")  # llm, keyword, manual
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+
+    # Relationships
+    case = relationship("Case")
+    document = relationship("CaseDocument")
+    arguments = relationship("CaseArgument", back_populates="issue", cascade="all, delete-orphan")
+
+    __table_args__ = (UniqueConstraint("case_id", "issue_name", name="uq_case_issue"),)
+
+    def __repr__(self):
+        return f"<CaseIssue(case_id={self.case_id}, issue={self.issue_name})>"
+
+
+class CaseArgument(Base):
+    """Model for tracking legal arguments used in cases"""
+    __tablename__ = "case_arguments"
+
+    id = Column(Integer, primary_key=True)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    issue_id = Column(Integer, ForeignKey("case_issues.id", ondelete="CASCADE"), nullable=True)
+    
+    # Argument details
+    argument_text = Column(Text, nullable=False)  # The actual argument made
+    argument_type = Column(String(255), nullable=True, index=True)  # witness_testimony, precedent_citation, legal_principle, etc.
+    
+    # Whether the argument succeeded in this case
+    argument_succeeded = Column(Boolean, nullable=True)  # True=won, False=lost, None=unknown
+    
+    # Supporting evidence
+    supporting_evidence = Column(Text, nullable=True)  # Quote or reference from judgment
+    citation_references = Column(JSON, nullable=True)  # List of law citations
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+
+    # Relationships
+    case = relationship("Case")
+    issue = relationship("CaseIssue", back_populates="arguments")
+
+    def __repr__(self):
+        return f"<CaseArgument(case_id={self.case_id}, type={self.argument_type})>"
+
+
+class KnowledgeGraphEdge(Base):
+    """Model for building a knowledge graph: Case → Issue → Argument → Outcome"""
+    __tablename__ = "knowledge_graph_edges"
+
+    id = Column(Integer, primary_key=True)
+    
+    # Source: Issue
+    issue_id = Column(Integer, ForeignKey("case_issues.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    # Edge: Argument
+    argument_id = Column(Integer, ForeignKey("case_arguments.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    # Target: Outcome
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    outcome = Column(String(255), nullable=False, index=True)  # plaintiff_won, defendant_won, settlement, etc.
+    
+    # Weight: How strongly the argument led to this outcome (frequency + confidence)
+    weight = Column(String(50), default="1.0")  # String for JSON safety
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+
+    # Relationships
+    issue = relationship("CaseIssue")
+    argument = relationship("CaseArgument")
+    case = relationship("Case")
+
+    __table_args__ = (UniqueConstraint("issue_id", "argument_id", "case_id", name="uq_graph_edge"),)
+
+    def __repr__(self):
+        return f"<KnowledgeGraphEdge(issue={self.issue_id}, argument={self.argument_id}, outcome={self.outcome})>"
+
+
+class PrecedentMatch(Base):
+    """Model for storing precedent matching results for quick lookup"""
+    __tablename__ = "precedent_matches"
+
+    id = Column(Integer, primary_key=True)
+    
+    # Case that's being analyzed
+    query_case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    # Similar precedent case
+    precedent_case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    # Matching type
+    match_type = Column(String(255), nullable=False, index=True)  # similar_case, precedent_with_winning_argument, etc.
+    
+    # Similarity score (0-1)
+    similarity_score = Column(String(50), default="0.0")  # String for JSON safety
+    
+    # Reason for match
+    match_reason = Column(Text, nullable=True)  # "Similar issues", "Winning argument", etc.
+    
+    # Metadata about the match
+    shared_issues = Column(JSON, nullable=True)  # List of shared issue names
+    shared_arguments = Column(JSON, nullable=True)  # List of matching argument texts
+    precedent_outcome = Column(String(255), nullable=True)  # Outcome in precedent case
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=True)  # Cache expiration
+
+    # Relationships
+    query_case = relationship("Case", foreign_keys=[query_case_id])
+    precedent_case = relationship("Case", foreign_keys=[precedent_case_id])
+
+    __table_args__ = (UniqueConstraint("query_case_id", "precedent_case_id", "match_type", name="uq_precedent_match"),)
+
+    def __repr__(self):
+        return f"<PrecedentMatch(query={self.query_case_id}, precedent={self.precedent_case_id}, type={self.match_type})>"
+
+
 # Database initialization
 def init_db():
     """Create all tables"""
