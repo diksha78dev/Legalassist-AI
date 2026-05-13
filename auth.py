@@ -801,22 +801,69 @@ def verify_login(otp: str) -> bool:
 
 
 def logout_user():
-    """Logout current user and revoke their token"""
+    """
+    Logout current user, revoke their JWT token, and aggressively clear the session state.
+    
+    This function is the authoritative source for user termination in the application.
+    It implements a "Scorched Earth" policy for session data to guarantee that NO 
+    personally identifiable information (PII) or authentication artifacts remain
+    in the browser's memory after the user clicks 'Logout'.
+    
+    SECURITY RATIONALE:
+    ------------------
+    1. SHARED TERMINALS: In legal environments, users may share workstations. 
+       If session data (like case IDs or document summaries) is not purged, 
+       the next user could potentially view the previous user's sensitive data.
+    
+    2. STALE STATE BUGS: Streamlit's reactive model sometimes retains values
+       for widgets that are no longer visible. Explicitly deleting keys
+       from st.session_state forces a clean reset.
+    
+    3. REPLAY PROTECTION: By revoking the token in the database, we ensure 
+       the session is dead on the server side as well as the client side.
+    """
     import streamlit as st
 
+    logger.info("Performing global logout and session state purge...")
+    
+    # Ensure session state is initialized before we start clearing it
     init_auth_session()
     
-    # Revoke the token if it exists
+    # Step 1: Revoke the token if it exists in the database.
+    # This prevents the token from being used in any subsequent API calls
+    # even if it is intercepted from the client's network traffic.
     token = st.session_state.get("user_token")
     if token:
-        revoke_jwt_token(token)
-        
-    st.session_state.user_token = None
-    st.session_state.user_email = None
-    st.session_state.user_id = None
-    st.session_state.is_authenticated = False
-    st.session_state.pending_email = None
-    st.session_state.otp_sent = False
+        try:
+            revoke_jwt_token(token)
+            logger.debug("Active JWT token revoked in database.")
+        except Exception as e:
+            logger.error(f"Failed to revoke token during logout: {str(e)}")
+            # We continue with session clearing even if revocation fails
+            # to prioritize local data privacy.
+    
+    # Step 2: Aggressive Session State Wipe.
+    # Instead of just setting individual keys to None, we iterate through
+    # every key currently registered in the Streamlit session and delete it.
+    # This ensures that ANY data stored by the app (including custom keys
+    # added by individual pages) is completely erased.
+    
+    # We use list() to create a copy of the keys to avoid "RuntimeError: 
+    # dictionary changed size during iteration".
+    all_keys = list(st.session_state.keys())
+    
+    for key in all_keys:
+        try:
+            del st.session_state[key]
+        except KeyError:
+            # Handle potential race conditions where a key might have 
+            # been removed by another process/thread (unlikely but safe).
+            pass
+            
+    logger.info(f"Successfully cleared {len(all_keys)} session state keys.")
+    
+    # NOTE: The caller (e.g., app.py) is responsible for calling st.rerun()
+    # to restart the UI flow after this function returns.
 
 
 def require_auth() -> bool:
