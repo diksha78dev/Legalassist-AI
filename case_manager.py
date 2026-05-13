@@ -626,6 +626,9 @@ def add_manual_deadline(
     description: Optional[str] = None,
 ) -> Optional[CaseDeadline]:
     """Add a manual deadline to a case"""
+    if deadline_date.tzinfo is None:
+        deadline_date = deadline_date.replace(tzinfo=timezone.utc)
+    
     db = SessionLocal()
     try:
         # Verify case ownership
