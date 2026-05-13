@@ -16,6 +16,7 @@ from api.middleware import (
     error_handling_middleware,
     logging_middleware
 )
+from api.limiter import cleanup_limiter
 from observability.integration import initialize_observability_for_environment
 from observability.instrumentation import get_metrics
 
@@ -120,6 +121,7 @@ def create_app() -> FastAPI:
     @app.on_event("shutdown")
     async def shutdown_event():
         """Cleanup on shutdown"""
+        await cleanup_limiter()
         logger.info("API Shutting down")
     
     # ========================================================================
