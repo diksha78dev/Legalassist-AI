@@ -271,6 +271,17 @@ class AnalyticsResponse(BaseModel):
     generated_at: datetime
 
 
+class DashboardSummaryResponse(BaseModel):
+    """Dashboard summary for frontend consumers."""
+    total_cases_processed: int
+    appeals_filed: int
+    appeal_rate_percent: float
+    plaintiff_wins: int
+    defendant_wins: int
+    settlements: int
+    dismissals: int
+
+
 # ============================================================================
 # Deadline Models
 # ============================================================================

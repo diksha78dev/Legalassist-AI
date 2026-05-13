@@ -11,13 +11,14 @@ import plotly.graph_objects as go
 import requests
 from datetime import datetime
 
-from database import SessionLocal, get_db, CaseRecord, CaseOutcome
+from database import SessionLocal, CaseRecord, CaseOutcome
 from analytics_engine import (
     AnalyticsCalculator,
     AnalyticsAggregator,
     CaseSimilarityCalculator,
     PredictiveAnalyticsEngine,
 )
+from services.analytics_gateway import get_dashboard_summary
 import logging
 
 logger = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ try:
     # ==================== SUMMARY METRICS ====================
     st.subheader("📈 Overall Statistics")
     
-    summary = AnalyticsAggregator.get_dashboard_summary(db)
+    summary = get_dashboard_summary(db)
     
     col1, col2, col3, col4 = st.columns(4)
     
