@@ -116,33 +116,22 @@ class Config:
         """
         Resolve JWT secret securely.
         
-        Order of precedence:
-        1. Environment variable or Streamlit secret 'JWT_SECRET'
-        2. File-based secret in '.jwt_secret' (legacy/local development)
+        JWT_SECRET must be provided via environment variable or Streamlit secrets.
+        File-based secrets are no longer supported for security.
         
-        NOTE: Automatic generation and writing of .jwt_secret has been disabled 
-        for security in all environments.
+        Raises:
+            RuntimeError: If JWT_SECRET is not configured in environment variables.
         """
         secret = str(_get_val("JWT_SECRET", "")).strip()
         if secret:
             return secret
-            
-        secret_file = PROJECT_ROOT / ".jwt_secret"
-        if secret_file.exists():
-            try:
-                file_secret = secret_file.read_text(encoding="utf-8").strip()
-                if file_secret:
-                    return file_secret
-            except Exception as e:
-                logger.warning(f"Failed to read .jwt_secret file: {e}")
         
-        # We no longer auto-generate secrets to prevent insecure fallback.
-        # This forces explicit configuration which is a security best practice.
         env_name = cls.APP_ENV.upper()
         raise RuntimeError(
             f"JWT_SECRET is not configured for the {env_name} environment. "
             "For security, secrets must be explicitly provided via the 'JWT_SECRET' "
-            "environment variable or a manually created '.jwt_secret' file in the root."
+            "environment variable. Consider using AWS Secrets Manager or HashiCorp Vault "
+            "for production secret management."
         )
 
     # --- Notification Settings (SMS) ---
