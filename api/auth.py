@@ -47,7 +47,7 @@ def verify_token(token: str) -> Dict:
         payload = jwt.decode(
             token,
             settings.JWT_SECRET_KEY,
-            algorithms=[settings.JWT_ALGORITHM]
+            algorithms=["HS256"]
         )
         return payload
     except jwt.ExpiredSignatureError:
