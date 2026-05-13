@@ -47,7 +47,7 @@ def verify_token(token: str) -> Dict:
         payload = jwt.decode(
             token,
             settings.JWT_SECRET_KEY,
-            algorithms=[settings.JWT_ALGORITHM]
+            algorithms=["HS256"]
         )
         return payload
     except jwt.ExpiredSignatureError:
@@ -124,10 +124,6 @@ async def get_current_user(
     http_auth: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> CurrentUser:
     """Get current authenticated user"""
-    
-    if not settings.AUTH_ENABLED:
-        # Development mode - no auth required
-        return CurrentUser("dev-user", "dev@example.com", "admin")
     
     # Try JWT token first
     if token:
