@@ -54,6 +54,11 @@ class Config:
     OPENROUTER_BASE_URL = _get_val("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
     OPENROUTER_API_KEY = _get_val("OPENROUTER_API_KEY", "")
     
+    # --- Embedding Model Settings ---
+    OPENAI_API_KEY = _get_val("OPENAI_API_KEY", "")
+    EMBEDDING_MODEL = _get_val("EMBEDDING_MODEL", "text-embedding-3-small")
+    EMBEDDING_DIMENSION = _get_int_env("EMBEDDING_DIMENSION", 1536)
+    
     # LLM Hyperparameters
     SUMMARY_MAX_TOKENS = _get_int_env("SUMMARY_MAX_TOKENS", 280)
     REMEDIES_MAX_TOKENS = _get_int_env("REMEDIES_MAX_TOKENS", 900)

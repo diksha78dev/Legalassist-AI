@@ -283,6 +283,194 @@ def send_notification_task(
             notification_type=notification_type
         )
         
+        return {"status": "sent", "message_id": str(uuid.uuid4())}
+    except Exception as e:
+        logger.error("Notification failed", error=str(e))
+        raise
+
+
+# ============================================================================
+# Case Search & Precedent Matching Tasks
+# ============================================================================
+
+@celery_app.task(bind=True, name="index_case_embeddings", autoretry_for=(Exception,), retry_kwargs={'max_retries': 2})
+def index_case_embeddings(self, case_id: int, force_regenerate: bool = False) -> dict:
+    """Async task to index a case with embeddings for semantic search"""
+    try:
+        from database import SessionLocal
+        from core.embedding_engine import EmbeddingEngine
+        
+        self.update_state(state="PROGRESS", meta={"status": "Generating embedding", "progress": 50})
+        
+        db = SessionLocal()
+        try:
+            embedding_engine = EmbeddingEngine()
+            embedding_obj = embedding_engine.embed_case(
+                db=db,
+                case_id=case_id,
+                force_regenerate=force_regenerate,
+            )
+            
+            if embedding_obj:
+                self.update_state(state="PROGRESS", meta={"status": "Indexing complete", "progress": 100})
+                return {
+                    "status": "success",
+                    "case_id": case_id,
+                    "embedding_model": embedding_obj.embedding_model,
+                }
+            else:
+                return {"status": "failed", "case_id": case_id, "error": "Failed to generate embedding"}
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error("Case indexing failed", case_id=case_id, error=str(e))
+        raise
+
+
+@celery_app.task(bind=True, name="index_all_cases_embeddings")
+def index_all_cases_embeddings(self, limit: Optional[int] = None) -> dict:
+    """Batch index all cases for semantic search"""
+    try:
+        from database import SessionLocal, Case
+        from core.embedding_engine import EmbeddingEngine
+        
+        db = SessionLocal()
+        try:
+            # Get all cases without embeddings
+            query = db.query(Case).all()
+            if limit:
+                query = query[:limit]
+            
+            total = len(query)
+            indexed = 0
+            failed = 0
+            
+            embedding_engine = EmbeddingEngine()
+            
+            for i, case in enumerate(query):
+                try:
+                    embedding_obj = embedding_engine.embed_case(db, case.id)
+                    if embedding_obj:
+                        indexed += 1
+                    else:
+                        failed += 1
+                except Exception as e:
+                    logger.error(f"Failed to index case {case.id}: {str(e)}")
+                    failed += 1
+                
+                # Update progress
+                if (i + 1) % 10 == 0:
+                    progress = int((i + 1) / total * 100)
+                    self.update_state(state="PROGRESS", meta={
+                        "status": f"Indexed {i+1}/{total}",
+                        "progress": progress,
+                        "indexed": indexed,
+                        "failed": failed,
+                    })
+            
+            return {
+                "status": "completed",
+                "total_cases": total,
+                "indexed": indexed,
+                "failed": failed,
+            }
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error("Batch indexing failed", error=str(e))
+        raise
+
+
+@celery_app.task(bind=True, name="extract_case_knowledge")
+def extract_case_knowledge(self, case_id: int) -> dict:
+    """Extract issues, arguments, and build knowledge graph for a case"""
+    try:
+        from database import SessionLocal
+        from core.knowledge_graph import KnowledgeGraphBuilder
+        
+        db = SessionLocal()
+        try:
+            self.update_state(state="PROGRESS", meta={"status": "Extracting issues", "progress": 20})
+            
+            # Extract issues
+            issues = KnowledgeGraphBuilder.extract_issues_from_case(db, case_id)
+            
+            self.update_state(state="PROGRESS", meta={"status": "Extracting arguments", "progress": 40})
+            
+            # Extract arguments
+            arguments = KnowledgeGraphBuilder.extract_arguments_from_case(db, case_id)
+            
+            self.update_state(state="PROGRESS", meta={"status": "Building knowledge graph", "progress": 60})
+            
+            # Build graph edges
+            edges = KnowledgeGraphBuilder.build_graph_edges(db, case_id)
+            
+            self.update_state(state="PROGRESS", meta={"status": "Complete", "progress": 100})
+            
+            return {
+                "status": "success",
+                "case_id": case_id,
+                "issues_extracted": len(issues),
+                "arguments_extracted": len(arguments),
+                "edges_created": len(edges),
+            }
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error("Knowledge extraction failed", case_id=case_id, error=str(e))
+        raise
+
+
+@celery_app.task(bind=True, name="update_knowledge_graph")
+def update_knowledge_graph(self, limit: Optional[int] = 100) -> dict:
+    """Periodically update knowledge graph for all cases"""
+    try:
+        from database import SessionLocal, Case
+        from core.knowledge_graph import KnowledgeGraphBuilder
+        
+        db = SessionLocal()
+        try:
+            # Get recent cases
+            cases = db.query(Case).order_by(Case.updated_at.desc()).limit(limit).all()
+            
+            total = len(cases)
+            updated = 0
+            failed = 0
+            
+            for i, case in enumerate(cases):
+                try:
+                    KnowledgeGraphBuilder.extract_issues_from_case(db, case.id, override_existing=True)
+                    KnowledgeGraphBuilder.extract_arguments_from_case(db, case.id, override_existing=True)
+                    KnowledgeGraphBuilder.build_graph_edges(db, case.id)
+                    updated += 1
+                except Exception as e:
+                    logger.error(f"Failed to update case {case.id}: {str(e)}")
+                    failed += 1
+                
+                if (i + 1) % 10 == 0:
+                    progress = int((i + 1) / total * 100)
+                    self.update_state(state="PROGRESS", meta={
+                        "status": f"Updated {i+1}/{total}",
+                        "progress": progress,
+                    })
+            
+            return {
+                "status": "completed",
+                "total_cases": total,
+                "updated": updated,
+                "failed": failed,
+            }
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error("Graph update failed", error=str(e))
+        raise
+        )
+        
         # In production, send actual notification
         result = {
             "notification_id": str(uuid.uuid4()),
