@@ -1265,13 +1265,27 @@ def get_pending_otp(db: Session, email: str) -> Optional[OTPVerification]:
 
 
 def mark_otp_as_used(db: Session, otp_id: int) -> bool:
-    """Mark an OTP as used"""
-    otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
-    if otp:
-        otp.is_used = True
-        db.commit()
-        return True
-    return False
+    """
+    Mark an OTP as used to prevent reuse.
+    
+    Args:
+        db: Database session
+        otp_id: OTP record ID to mark as used
+    
+    Returns:
+        True if OTP was found and marked used, False otherwise
+    """
+    try:
+        otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
+        if otp:
+            otp.is_used = True
+            db.commit()
+            db.refresh(otp)
+            return True
+        return False
+    except Exception:
+        db.rollback()
+        return False
 
 
 def record_otp_failed_attempt(db: Session, otp_id: int, lockout_duration_minutes: int = 15, max_failed_attempts: int = 5) -> bool:
