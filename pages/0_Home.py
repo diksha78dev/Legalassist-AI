@@ -8,6 +8,8 @@ CHANGE: build_judgment_result_text now returns (plain_text, structured_dict).
 
 import streamlit as st
 import logging
+
+import routes
 import sys
 import os
 from config import Config
@@ -310,7 +312,7 @@ def render_page():
                         st.markdown("## 💬 Chat with Judgment")
                         st.info("Have specific questions about this document? You can ask our AI assistant.")
                         if st.button("💬 Open Interactive Chat", use_container_width=True):
-                            st.switch_page("pages/4_Chat.py")
+                            st.switch_page(routes.PAGE_CHAT)
 
                 except Exception as e:
                     err = str(e)

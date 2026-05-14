@@ -210,7 +210,7 @@ def render_save_to_case_section(user_id, raw_text, summary, remedies):
     if not require_auth():
         st.info("Log in to save this document, track deadlines, and view timeline history.")
         if st.button("Go to Login", key="login_to_save"):
-            st.switch_page("pages/0_Login.py")
+            st.switch_page(routes.PAGE_LOGIN)
         return
 
     cases = get_user_cases_summary(user_id, include_closed=False)
@@ -241,7 +241,7 @@ def render_save_to_case_section(user_id, raw_text, summary, remedies):
         
         if st.session_state.get("selected_case_id"):
             if st.button("🔍 View Case Details", key="view_existing_case", use_container_width=True):
-                st.switch_page("pages/2_Case_Details.py")
+                st.switch_page(routes.PAGE_CASE_DETAILS)
             
     with col2:
         st.markdown("### New Case")
@@ -298,10 +298,10 @@ def render_analytics_preview_section():
             st.session_state.show_analytics = True
     with act_col2:
         if st.button("🎯 Est. Chances", key="estimate_chances", use_container_width=True):
-            st.switch_page("pages/2_Appeal_Estimator.py")
+            st.switch_page(routes.PAGE_APPEAL_ESTIMATOR)
     with act_col3:
         if st.button("📝 Report Outcome", key="report_outcome", use_container_width=True):
-            st.switch_page("pages/3_Report_Outcome.py")
+            st.switch_page(routes.PAGE_REPORT_OUTCOME)
     
     # Detailed analytics preview
     if st.session_state.get("show_analytics"):
@@ -360,7 +360,7 @@ def main():
     else:
         st.sidebar.info("Not logged in. Log in to track cases and deadlines.")
         if st.sidebar.button("Go to Login"):
-            st.switch_page("pages/0_Login.py")
+            st.switch_page(routes.PAGE_LOGIN)
 
     st.title("⚡ LegalEase AI")
     client = get_client()
@@ -584,7 +584,7 @@ def main():
                     if not require_auth():
                         st.info("Log in to save this document, track deadlines, and view timeline history.")
                         if st.button("Go to Login", key="login_to_save"):
-                            st.switch_page("pages/0_Login.py")
+                            st.switch_page(routes.PAGE_LOGIN)
                     else:
                         user_id = get_current_user_id()
                         cases = get_user_cases_summary(user_id, include_closed=False)
@@ -614,7 +614,7 @@ def main():
                             
                             if st.session_state.get("selected_case_id"):
                                 if st.button("View Case Details", key="view_existing_case"):
-                                    st.switch_page("pages/2_Case_Details.py")
+                                    st.switch_page(routes.PAGE_CASE_DETAILS)
                                 
                         with col2:
                             with st.expander("➕ Or Create New Case"):

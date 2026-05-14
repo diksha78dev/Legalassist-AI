@@ -3,6 +3,7 @@ import logging
 
 from core.app_utils import get_client, RETRO_STYLING
 from core.rag_engine import LegalRAG
+import routes
 
 # Apply the same styling as other pages
 st.markdown(RETRO_STYLING, unsafe_allow_html=True)
@@ -19,7 +20,7 @@ def render_page():
     if "judgment_raw_text" not in st.session_state or not st.session_state.judgment_raw_text:
         st.warning("No judgment document found. Please go back to the Home page and upload a document first.")
         if st.button("⬅️ Back to Home"):
-            st.switch_page("pages/0_Home.py")
+            st.switch_page(routes.PAGE_HOME)
         return
 
     # Sidebar language preference
