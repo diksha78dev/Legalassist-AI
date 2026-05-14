@@ -4,6 +4,7 @@ Uses SQLAlchemy ORM with SQLite for persistence.
 """
 
 import datetime as dt
+import hashlib
 import logging
 from typing import Optional, List
 from sqlalchemy import (
@@ -26,6 +27,11 @@ import enum
 from contextlib import contextmanager
 from config import Config
 
+try:
+    import redis
+except ImportError:  # pragma: no cover - handled at runtime if Redis is unavailable
+    redis = None
+
 # Database setup
 DATABASE_URL = Config.DATABASE_URL
 _db_url = make_url(DATABASE_URL)
@@ -35,6 +41,18 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, expire_on_commit=
 Base = declarative_base()
 
 logger = logging.getLogger(__name__)
+auth_logger = logging.getLogger("auth.otp")
+
+_OTP_RATE_LIMIT_WINDOW_SECONDS = 60 * 60
+_OTP_RATE_LIMIT_SCRIPT = """
+local current = redis.call('INCR', KEYS[1])
+if current == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return current
+"""
+_otp_rate_limit_client = None
+_otp_rate_limit_script = None
 
 
 class NotificationStatus(str, enum.Enum):
@@ -1094,7 +1112,12 @@ def log_notification(
     error_message: Optional[str] = None,
     message_preview: Optional[str] = None,
 ) -> NotificationLog:
-    """Log a notification attempt"""
+    """Log a notification attempt.
+
+    NOTE: This helper does NOT commit the transaction. The caller is
+    responsible for committing or rolling back the session to avoid
+    partial commits (e.g., when used inside a larger business transaction).
+    """
     log = NotificationLog(
         deadline_id=deadline_id,
         user_id=user_id,
@@ -1108,7 +1131,8 @@ def log_notification(
         sent_at=dt.datetime.now(dt.timezone.utc) if status != NotificationStatus.PENDING else None,
     )
     db.add(log)
-    db.commit()
+    # flush so the newly-added object's PK and defaults are populated without committing
+    db.flush()
     db.refresh(log)
     return log
 
@@ -1392,6 +1416,40 @@ def update_user_last_login(db: Session, user_id: int) -> User:
     return user
 
 
+def _otp_rate_limit_key(email: str) -> str:
+    normalized_email = str(email).strip().lower()
+    digest = hashlib.sha256(normalized_email.encode("utf-8")).hexdigest()
+    return f"otp:rate:{digest}"
+
+
+def _get_otp_rate_limit_script():
+    global _otp_rate_limit_client, _otp_rate_limit_script
+
+    if _otp_rate_limit_script is None:
+        if redis is None:
+            raise RuntimeError("Redis is required for OTP rate limiting but is not installed.")
+
+        redis_url = getattr(Config, "REDIS_URL", "redis://localhost:6379/0")
+        _otp_rate_limit_client = redis.from_url(redis_url, decode_responses=True)
+        _otp_rate_limit_script = _otp_rate_limit_client.register_script(_OTP_RATE_LIMIT_SCRIPT)
+
+    return _otp_rate_limit_script
+
+
+def _reserve_otp_rate_limit_slot(email: str, max_requests_per_hour: int) -> int:
+    normalized_email = str(email).strip().lower()
+    if not normalized_email:
+        raise ValueError("Email is required for OTP rate limiting")
+
+    script = _get_otp_rate_limit_script()
+    current = int(script(keys=[_otp_rate_limit_key(normalized_email)], args=[_OTP_RATE_LIMIT_WINDOW_SECONDS]))
+
+    if current > max_requests_per_hour:
+        raise ValueError("Too many OTP requests. Please try again later.")
+
+    return current
+
+
 def create_otp_verification(
     db: Session,
     email: str,
@@ -1400,15 +1458,7 @@ def create_otp_verification(
     max_requests_per_hour: int = 5,
 ) -> OTPVerification:
     """Create a new OTP verification record with rate limiting"""
-    # Check recent OTPs
-    one_hour_ago = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)
-    recent_otps = db.query(OTPVerification).filter(
-        OTPVerification.email == email,
-        OTPVerification.created_at > one_hour_ago,
-    ).count()
-
-    if recent_otps >= max_requests_per_hour:
-        raise ValueError("Too many OTP requests. Please try again later.")
+    _reserve_otp_rate_limit_slot(email, max_requests_per_hour)
 
     otp = OTPVerification(
         email=email,
@@ -1432,13 +1482,27 @@ def get_pending_otp(db: Session, email: str) -> Optional[OTPVerification]:
 
 
 def mark_otp_as_used(db: Session, otp_id: int) -> bool:
-    """Mark an OTP as used"""
-    otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
-    if otp:
-        otp.is_used = True
-        db.commit()
-        return True
-    return False
+    """
+    Mark an OTP as used to prevent reuse.
+    
+    Args:
+        db: Database session
+        otp_id: OTP record ID to mark as used
+    
+    Returns:
+        True if OTP was found and marked used, False otherwise
+    """
+    try:
+        otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
+        if otp:
+            otp.is_used = True
+            db.commit()
+            db.refresh(otp)
+            return True
+        return False
+    except Exception:
+        db.rollback()
+        return False
 
 
 def record_otp_failed_attempt(db: Session, otp_id: int, lockout_duration_minutes: int = 15, max_failed_attempts: int = 5) -> bool:
@@ -1461,7 +1525,7 @@ def record_otp_failed_attempt(db: Session, otp_id: int, lockout_duration_minutes
         # Lock OTP if max attempts exceeded
         if otp.failed_attempts >= max_failed_attempts:
             otp.locked_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=lockout_duration_minutes)
-            logger.warning(
+            auth_logger.warning(
                 f"OTP for {otp.email} locked after {otp.failed_attempts} failed attempts. "
                 f"Locked until {otp.locked_until}"
             )
