@@ -262,13 +262,15 @@ def render_save_to_case_section(user_id, raw_text, summary, remedies):
             
             if st.button("Create Case & Save Document", use_container_width=True):
                 if new_case_number and new_jurisdiction:
-                    new_case = create_new_case(
+                    new_case, was_existing = create_new_case(
                         user_id=user_id,
                         case_number=new_case_number,
                         case_type=new_case_type,
                         jurisdiction=new_jurisdiction,
                         title=new_case_title
                     )
+                    if was_existing:
+                        st.warning("Case already exists. Document will be added to existing case.")
                     if new_case:
                         doc = upload_case_document(
                             user_id=user_id,
@@ -723,13 +725,15 @@ def main():
                                 new_jurisdiction = st.text_input("Jurisdiction", placeholder="e.g. Delhi High Court").strip()
                                 if st.button("Create & Save"):
                                     if new_case_number and new_jurisdiction:
-                                        new_case = create_new_case(
+                                        new_case, was_existing = create_new_case(
                                             user_id=user_id,
                                             case_number=new_case_number,
                                             case_type=new_case_type,
                                             jurisdiction=new_jurisdiction,
                                             title=new_case_title
                                         )
+                                        if was_existing:
+                                            st.warning("Case already exists. Document will be added to existing case.")
                                         if new_case:
                                             doc = upload_case_document(
                                                 user_id=user_id,
