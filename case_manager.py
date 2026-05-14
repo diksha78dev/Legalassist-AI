@@ -48,10 +48,11 @@ def create_new_case(
     case_type: str,
     jurisdiction: str,
     title: Optional[str] = None,
-) -> Optional[Case]:
+) -> tuple[Optional[Case], bool]:
     """
     Create a new case for a user.
-    Returns the created Case object or None if failed.
+    Returns (case, was_existing) tuple.
+    was_existing=True indicates an existing case was returned without updates.
     """
     db = SessionLocal()
     try:
@@ -69,8 +70,24 @@ def create_new_case(
         ).first()
 
         if existing:
-            logger.warning(f"Case {case_number} already exists for user {user_id}")
-            return existing
+            # Check if metadata differs from existing case
+            metadata_changed = (
+                existing.case_type != case_type or
+                existing.jurisdiction != jurisdiction or
+                (title and existing.title != title)
+            )
+            
+            if metadata_changed:
+                logger.warning(
+                    f"Case {case_number} exists but metadata differs. "
+                    f"Expected: type={case_type}, jurisdiction={jurisdiction}, title={title}. "
+                    f"Got: type={existing.case_type}, jurisdiction={existing.jurisdiction}, title={existing.title}. "
+                    f"Returning existing case without updates."
+                )
+            else:
+                logger.info(f"Case {case_number} already exists for user {user_id}")
+            
+            return existing, True
 
         case = create_case(
             db=db,
@@ -92,11 +109,11 @@ def create_new_case(
 
         db.refresh(case)
         logger.info(f"Created new case: {case_number} for user {user_id}")
-        return case
+        return case, False
 
     except Exception as e:
         logger.error(f"Error creating case: {str(e)}")
-        return None
+        return None, False
     finally:
         db.close()
 
@@ -127,13 +144,15 @@ def get_or_create_case_for_document(
         # Create new case — create_new_case manages its own session internally,
         # so the object it returns is already detached. No expunge needed here.
         if new_case_number:
-            case = create_new_case(
+            case, was_existing = create_new_case(
                 user_id=user_id,
                 case_number=new_case_number,
                 case_type=new_case_type or "general",
                 jurisdiction=new_jurisdiction or "Unknown",
                 title=new_title,
             )
+            if was_existing:
+                logger.info(f"Reusing existing case {new_case_number} for document processing")
             return case
 
         return None

@@ -8,6 +8,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
 
 from auth import require_auth, redirect_to_login, get_current_user_id
+import routes
 from case_manager import get_case_detail, upload_case_document, mark_deadline_completed, mark_deadline_incomplete, add_manual_deadline, mark_case_appealed, mark_case_closed, mark_case_active, generate_case_summary_text
 from case_manager import upload_case_attachment
 from core import extract_text_from_pdf
@@ -472,7 +473,7 @@ def main():
     if not case_id:
         st.warning("No case selected")
         if st.button("← Back to My Cases"):
-            st.switch_page("pages/1_My_Cases.py")
+            st.switch_page(routes.PAGE_MY_CASES)
         return
 
     # Get case details
@@ -481,7 +482,7 @@ def main():
     if not case_data:
         st.error("Case not found or access denied")
         if st.button("← Back to My Cases"):
-            st.switch_page("pages/1_My_Cases.py")
+            st.switch_page(routes.PAGE_MY_CASES)
         return
 
     case = case_data["case"]
