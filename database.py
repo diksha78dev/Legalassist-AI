@@ -1111,7 +1111,12 @@ def log_notification(
     error_message: Optional[str] = None,
     message_preview: Optional[str] = None,
 ) -> NotificationLog:
-    """Log a notification attempt"""
+    """Log a notification attempt.
+
+    NOTE: This helper does NOT commit the transaction. The caller is
+    responsible for committing or rolling back the session to avoid
+    partial commits (e.g., when used inside a larger business transaction).
+    """
     log = NotificationLog(
         deadline_id=deadline_id,
         user_id=user_id,
@@ -1125,7 +1130,8 @@ def log_notification(
         sent_at=dt.datetime.now(dt.timezone.utc) if status != NotificationStatus.PENDING else None,
     )
     db.add(log)
-    db.commit()
+    # flush so the newly-added object's PK and defaults are populated without committing
+    db.flush()
     db.refresh(log)
     return log
 
