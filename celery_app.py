@@ -28,7 +28,13 @@ from celery.result import AsyncResult
 # Import project settings for fallback and other configurations
 from api.config import get_settings
 from observability.integration import initialize_observability_for_environment
-from observability.instrumentation import traced_operation, capture_exception, bind_request_context, clear_request_context
+from observability.instrumentation import (
+    traced_operation,
+    capture_exception,
+    bind_request_context,
+    clear_request_context,
+    generate_correlation_id,
+)
 
 # ============================================================================
 # INITIALIZATION & LOGGING
@@ -40,6 +46,48 @@ settings = get_settings()
 # Initialize the structured logger for consistent logging across tasks
 logger = structlog.get_logger(__name__)
 initialize_observability_for_environment()
+
+
+def build_task_context_headers(
+    request_id: Optional[str] = None,
+    context_user_id: Optional[str] = None,
+) -> Dict[str, str]:
+    """Build Celery task headers used to propagate request context."""
+    resolved_request_id = request_id or generate_correlation_id()
+    headers = {
+        "x-request-id": resolved_request_id,
+        "x-correlation-id": resolved_request_id,
+    }
+    if context_user_id:
+        headers["x-user-id"] = str(context_user_id)
+    return headers
+
+
+def enqueue_task_with_context(task, *, request_id: Optional[str] = None, context_user_id: Optional[str] = None, **task_kwargs):
+    """Enqueue a Celery task with request context propagated in headers."""
+    headers = build_task_context_headers(request_id=request_id, context_user_id=context_user_id)
+    return task.apply_async(kwargs=task_kwargs, headers=headers)
+
+
+def enqueue_task_from_http_request(task, http_request, *, context_user_id: Optional[str] = None, **task_kwargs):
+    """Enqueue task carrying context from a FastAPI request object."""
+    request_id = getattr(http_request.state, "request_id", None) or getattr(http_request.state, "correlation_id", None)
+    if not request_id:
+        request_id = (
+            http_request.headers.get("X-Request-Id")
+            or http_request.headers.get("X-Correlation-Id")
+            or http_request.headers.get("x-request-id")
+            or http_request.headers.get("x-correlation-id")
+        )
+
+    user_id = context_user_id or getattr(http_request.state, "user_id", None) or http_request.headers.get("X-User-Id")
+
+    return enqueue_task_with_context(
+        task,
+        request_id=request_id,
+        context_user_id=user_id,
+        **task_kwargs,
+    )
 
 
 # ============================================================================
@@ -60,6 +108,28 @@ class ContextTask(Task):
     autoretry_for = (Exception,)
     retry_kwargs = {'max_retries': 3}
     retry_backoff = True
+
+    @staticmethod
+    def _extract_task_request_context(task_request) -> Dict[str, Optional[str]]:
+        headers = getattr(task_request, "headers", None) or {}
+        request_id = (
+            headers.get("x-request-id")
+            or headers.get("X-Request-Id")
+            or headers.get("x-correlation-id")
+            or headers.get("X-Correlation-Id")
+            or getattr(task_request, "root_id", None)
+            or getattr(task_request, "id", None)
+        )
+        user_id = headers.get("x-user-id") or headers.get("X-User-Id")
+        return {"request_id": request_id, "user_id": user_id}
+
+    def __call__(self, *args, **kwargs):
+        context = self._extract_task_request_context(self.request)
+        bind_request_context(request_id=context.get("request_id"), user_id=context.get("user_id"))
+        try:
+            return self.run(*args, **kwargs)
+        finally:
+            clear_request_context()
 
 
 # ============================================================================

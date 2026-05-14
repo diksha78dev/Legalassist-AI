@@ -8,7 +8,7 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status, De
 from fastapi import Request
 from api.models import DocumentAnalysisRequest, DocumentAnalysisSummary, AnalysisJobResponse
 from api.auth import get_current_user, CurrentUser
-from celery_app import analyze_document_task, TaskStatus
+from celery_app import analyze_document_task, TaskStatus, enqueue_task_from_http_request
 import structlog
 
 router = APIRouter(prefix="/api/v1/analyze", tags=["document-analysis"])
@@ -58,12 +58,14 @@ async def analyze_document(
     
     # Queue async task
     text = request.text or f"Content from {request.file_url or request.file_path}"
-    task = analyze_document_task.delay(
+    task = enqueue_task_from_http_request(
+        analyze_document_task,
+        http_request,
+        context_user_id=current_user.user_id,
         user_id=current_user.user_id,
         document_id=document_id,
         text=text,
         document_type=request.document_type,
-        request_id=getattr(http_request.state, "request_id", None),
     )
     
     return AnalysisJobResponse(
