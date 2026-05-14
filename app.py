@@ -38,6 +38,7 @@ from database import init_db, SessionLocal, get_db, DocumentType, db_session
 from scheduler import start_scheduler
 from auth import init_auth_session, require_auth, get_current_user_id, get_current_user_email, logout_user
 from case_manager import get_user_cases_summary, upload_case_document, create_new_case, get_case_detail
+import routes
 from observability.integration import initialize_observability_for_environment
 
 # Initialize database
@@ -218,7 +219,7 @@ def render_save_to_case_section(user_id, raw_text, summary, remedies):
     if not require_auth():
         st.info("Log in to save this document, track deadlines, and view timeline history.")
         if st.button("Go to Login", key="login_to_save"):
-            st.switch_page("pages/0_Login.py")
+            st.switch_page(routes.PAGE_LOGIN)
         return
 
     cases = get_user_cases_summary(user_id, include_closed=False)
@@ -249,7 +250,7 @@ def render_save_to_case_section(user_id, raw_text, summary, remedies):
         
         if st.session_state.get("selected_case_id"):
             if st.button("🔍 View Case Details", key="view_existing_case", use_container_width=True):
-                st.switch_page("pages/2_Case_Details.py")
+                st.switch_page(routes.PAGE_CASE_DETAILS)
             
     with col2:
         st.markdown("### New Case")
@@ -306,10 +307,10 @@ def render_analytics_preview_section():
             st.session_state.show_analytics = True
     with act_col2:
         if st.button("🎯 Est. Chances", key="estimate_chances", use_container_width=True):
-            st.switch_page("pages/2_Appeal_Estimator.py")
+            st.switch_page(routes.PAGE_APPEAL_ESTIMATOR)
     with act_col3:
         if st.button("📝 Report Outcome", key="report_outcome", use_container_width=True):
-            st.switch_page("pages/3_Report_Outcome.py")
+            st.switch_page(routes.PAGE_REPORT_OUTCOME)
     
     # Detailed analytics preview
     if st.session_state.get("show_analytics"):
@@ -446,7 +447,7 @@ def render_sidebar_navigation():
         st.sidebar.info("🔒 Secure Mode: Not logged in. Please sign in to access case history and tracking features.")
         
         if st.sidebar.button("🚀 Go to Login", use_container_width=True, type="primary"):
-            st.switch_page("pages/0_Login.py")
+            st.switch_page(routes.PAGE_LOGIN)
             
     st.sidebar.markdown("---")
     st.sidebar.caption("v2.4.0 | LegalAssist AI Enterprise")
@@ -456,10 +457,10 @@ def render_sidebar_navigation():
 def main():
     # Initialize the auth state at the very beginning of the run
     init_auth_session()
-    
+
     # Render the sidebar navigation and auth controls
     render_sidebar_navigation()
-    
+
     st.title("⚡ LegalEase AI")
     client = get_client()
     current_language = st.session_state.get("judgment_language", "English")
@@ -682,7 +683,7 @@ def main():
                     if not require_auth():
                         st.info("Log in to save this document, track deadlines, and view timeline history.")
                         if st.button("Go to Login", key="login_to_save"):
-                            st.switch_page("pages/0_Login.py")
+                            st.switch_page(routes.PAGE_LOGIN)
                     else:
                         user_id = get_current_user_id()
                         cases = get_user_cases_summary(user_id, include_closed=False)
@@ -712,7 +713,7 @@ def main():
                             
                             if st.session_state.get("selected_case_id"):
                                 if st.button("View Case Details", key="view_existing_case"):
-                                    st.switch_page("pages/2_Case_Details.py")
+                                    st.switch_page(routes.PAGE_CASE_DETAILS)
                                 
                         with col2:
                             with st.expander("➕ Or Create New Case"):
@@ -792,7 +793,7 @@ def main():
                                     st.metric("Appeals Filed", summary["appeals_filed"])
                                 
                                 if st.button("📊 View Full Dashboard", use_container_width=True, key="full_dashboard"):
-                                    st.switch_page("pages/1_Analytics_Dashboard.py")
+                                    st.switch_page(routes.PAGE_ANALYTICS_DASHBOARD)
                             else:
                                 st.info("Analytics will be available as more cases are tracked.")
                         except Exception as e:

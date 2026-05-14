@@ -8,6 +8,7 @@ import hashlib
 import secrets
 import time
 import re
+from routes import PAGE_LOGIN
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple, Any
@@ -902,7 +903,7 @@ def require_auth() -> bool:
             #     guarantees but automatically forces the UI to update to the logged-out state.
             # 
             # Approach C: Using a custom redirect.
-            #   - We could call `st.switch_page("pages/0_Login.py")`. This is a valid option,
+            #   - We could call `st.switch_page(PAGE_LOGIN)`. This is a valid option,
             #     but `st.rerun()` is more flexible. It allows the main `app.py` router to 
             #     handle the unauthenticated state gracefully, perhaps showing a generic 
             #     landing page rather than forcefully navigating the user.
@@ -1064,7 +1065,7 @@ def redirect_to_login():
     """Redirect to login page"""
     import streamlit as st
 
-    st.switch_page("pages/0_Login.py")
+    st.switch_page(PAGE_LOGIN)
 
 
 def get_current_user_id() -> Optional[int]:
