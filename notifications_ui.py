@@ -29,6 +29,8 @@ def apply_custom_css():
         unsafe_allow_html=True,
     )
 
+import routes
+
 from database import (
     SessionLocal,
     create_case_deadline,
@@ -314,7 +316,7 @@ def page_manage_deadlines():
         if not user_pref:
             st.warning("⚠️ Please set up your notification preferences first!")
             if st.button("Go to Preferences"):
-                st.switch_page("pages/3_Settings.py")
+                st.switch_page(routes.PAGE_SETTINGS)
             return
 
         # Add new deadline
