@@ -609,7 +609,7 @@ def collect_pdf_files(folder: Path, recursive: bool) -> List[Path]:
 
 
 def print_cost_summary(snapshot: Dict[str, float]) -> None:
-    LOGGER.info("batch_cost_summary", **snapshot)
+    print("batch_cost_summary", **snapshot)
 
 
 def process_command(args: argparse.Namespace) -> int:
