@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import time
 
 from config import Config
+import routes
 
 from auth import (
     init_auth_session,
@@ -138,11 +139,11 @@ def render_logged_in_state():
 
         with col1:
             if st.button("📊 Go to Dashboard", use_container_width=True):
-                st.switch_page("pages/1_My_Cases.py")
+                st.switch_page(routes.PAGE_MY_CASES)
 
         with col2:
             if st.button("🚀 Upload Judgment", use_container_width=True):
-                st.switch_page("pages/0_Home.py")
+                st.switch_page(routes.PAGE_HOME)
 
         st.markdown("---")
 

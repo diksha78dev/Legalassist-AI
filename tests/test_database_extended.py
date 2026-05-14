@@ -39,6 +39,11 @@ from database import (
     create_case_document,
 )
 
+
+@pytest.fixture(autouse=True)
+def disable_otp_rate_limiter(monkeypatch):
+    monkeypatch.setattr("database._reserve_otp_rate_limit_slot", lambda email, max_requests_per_hour: 1)
+
 @pytest.fixture(scope="function")
 def test_db():
     """Create an in-memory test database"""

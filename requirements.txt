@@ -149,6 +149,14 @@ line_profiler>=4.0.0
 
 # --- Audio & Accessibility ---
 gTTS>=2.5.1
+# HTTP client with retries
+requests>=2.31.0
+redis>=5.0.0
+tenacity>=8.2.0
+
+# Configuration Management
+python-dotenv>=1.0.0
+pydantic>=2.0.0
 
 # --- Additional Ecosystem Packages ---
 # These packages round out the environment to reach 200+ lines
