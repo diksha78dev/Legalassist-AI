@@ -118,6 +118,20 @@ celery_app.conf.update(
     
     # Max tasks per child prevents memory leaks in long-lived worker processes
     worker_max_tasks_per_child=1000,
+    
+    # Beat Schedule Configuration for periodic tasks
+    beat_schedule={
+        "send-deadline-reminders": {
+            "task": "send_deadline_reminders",
+            "schedule": 3600.0,
+            "options": {"queue": "maintenance"},
+        },
+        "cleanup-old-tasks": {
+            "task": "cleanup_old_tasks",
+            "schedule": 86400.0,
+            "options": {"queue": "maintenance"},
+        },
+    },
 )
 
 
