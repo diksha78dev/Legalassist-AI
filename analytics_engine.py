@@ -374,10 +374,10 @@ class AnalyticsCalculator:
         """Calculate statistics for a specific court using aggregates"""
         query = db.query(
             func.count(CaseRecord.id).label('total'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('plaintiff_won'), 1), else_=0)).label('p_wins'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('defendant_won'), 1), else_=0)).label('d_wins'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('settlement'), 1), else_=0)).label('settlements'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('dismissal'), 1), else_=0)).label('dismissals'),
+            func.sum(sql_case((CaseRecord.outcome == 'plaintiff_won', 1), else_=0)).label('p_wins'),
+            func.sum(sql_case((CaseRecord.outcome == 'defendant_won', 1), else_=0)).label('d_wins'),
+            func.sum(sql_case((CaseRecord.outcome == 'settlement', 1), else_=0)).label('settlements'),
+            func.sum(sql_case((CaseRecord.outcome == 'dismissal', 1), else_=0)).label('dismissals'),
             func.sum(sql_case((CaseOutcome.appeal_filed == True, 1), else_=0)).label('appeals')
         ).join(CaseOutcome, CaseRecord.id == CaseOutcome.case_id, isouter=True).filter(
             CaseRecord.court_name == court_name
@@ -424,7 +424,7 @@ class AnalyticsCalculator:
         stats_by_type = db.query(
             CaseRecord.case_type,
             func.count(CaseRecord.id).label('count'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('plaintiff_won'), 1), else_=0)).label('wins')
+func.sum(sql_case((CaseRecord.outcome == 'plaintiff_won'), 1), else_=0)).label('wins')
         ).filter(CaseRecord.jurisdiction == jurisdiction).group_by(CaseRecord.case_type).all()
         
         type_stats = {}
@@ -1066,7 +1066,7 @@ class PredictiveAnalyticsEngine:
         judge_rows = db.query(
             CaseRecord.judge_name,
             func.count(CaseRecord.id).label("total_cases"),
-            func.sum(sql_case((CaseRecord.outcome.ilike("plaintiff_won"), 1), else_=0)).label("plaintiff_wins"),
+            func.sum(sql_case((CaseRecord.outcome == "plaintiff_won"), 1), else_=0)).label("plaintiff_wins"),
             func.sum(sql_case(((CaseOutcome.appeal_filed == True) & (CaseOutcome.appeal_success == True), 1), else_=0)).label("appeal_successes"),
             func.sum(sql_case((CaseOutcome.appeal_filed == True, 1), else_=0)).label("appeals"),
         ).join(CaseOutcome, CaseRecord.id == CaseOutcome.case_id, isouter=True).filter(
@@ -1078,7 +1078,7 @@ class PredictiveAnalyticsEngine:
         court_rows = db.query(
             CaseRecord.court_name,
             func.count(CaseRecord.id).label("total_cases"),
-            func.sum(sql_case((CaseRecord.outcome.ilike("plaintiff_won"), 1), else_=0)).label("plaintiff_wins"),
+            func.sum(sql_case((CaseRecord.outcome == "plaintiff_won"), 1), else_=0)).label("plaintiff_wins"),
             func.sum(sql_case(((CaseOutcome.appeal_filed == True) & (CaseOutcome.appeal_success == True), 1), else_=0)).label("appeal_successes"),
             func.sum(sql_case((CaseOutcome.appeal_filed == True, 1), else_=0)).label("appeals"),
         ).join(CaseOutcome, CaseRecord.id == CaseOutcome.case_id, isouter=True).filter(
@@ -1184,10 +1184,10 @@ class AnalyticsAggregator:
         stats = db.query(
             func.count(CaseRecord.id).label('total'),
             func.sum(sql_case((CaseOutcome.appeal_filed == True, 1), else_=0)).label('appeals'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('plaintiff_won'), 1), else_=0)).label('p_wins'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('defendant_won'), 1), else_=0)).label('d_wins'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('settlement'), 1), else_=0)).label('settlements'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('dismissal'), 1), else_=0)).label('dismissals')
+            func.sum(sql_case((CaseRecord.outcome == 'plaintiff_won'), 1), else_=0)).label('p_wins'),
+            func.sum(sql_case((CaseRecord.outcome == 'defendant_won'), 1), else_=0)).label('d_wins'),
+            func.sum(sql_case((CaseRecord.outcome == 'settlement'), 1), else_=0)).label('settlements'),
+            func.sum(sql_case((CaseRecord.outcome == 'dismissal'), 1), else_=0)).label('dismissals')
         ).join(CaseOutcome, CaseRecord.id == CaseOutcome.case_id, isouter=True).first()
         
         total = stats.total or 0
@@ -1209,7 +1209,7 @@ class AnalyticsAggregator:
         judge_stats = db.query(
             CaseRecord.judge_name,
             func.count(CaseRecord.id).label('total'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('plaintiff_won'), 1), else_=0)).label('wins'),
+            func.sum(sql_case((CaseRecord.outcome == 'plaintiff_won'), 1), else_=0)).label('wins'),
             func.sum(sql_case(((CaseOutcome.appeal_filed == True) & (CaseOutcome.appeal_success == True), 1), else_=0)).label('appeal_wins'),
             func.sum(sql_case((CaseOutcome.appeal_filed == True, 1), else_=0)).label('appeals')
         ).join(CaseOutcome, CaseRecord.id == CaseOutcome.case_id, isouter=True).filter(
