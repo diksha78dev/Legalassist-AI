@@ -5,7 +5,29 @@ Integrate these into the main app.py or use as a separate page.
 
 import streamlit as st
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Optional, List
+import logging
+import pandas as pd
+import plotly.express as px
+import io
+
+# Initialize logger
+logger = logging.getLogger(__name__)
+
+def apply_custom_css():
+    """Apply custom CSS to prevent long notification text from overflowing UI containers."""
+    st.markdown(
+        """
+        <style>
+        /* Fix for extremely long notification text messages overflowing UI containers */
+        .stMarkdown, .stText, .stCaption, [data-testid="stVerticalBlock"], .stContainer {
+            word-wrap: break-word !important;
+            overflow-wrap: break-word !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 import routes
 
@@ -52,6 +74,7 @@ def get_user_id() -> int:
 
 def page_notification_preferences():
     """Page: User Notification Preferences"""
+    apply_custom_css()
     st.title("⚙️ Notification Preferences")
 
     db = SessionLocal()
@@ -176,6 +199,87 @@ def page_notification_preferences():
                 st.error(f"❌ Error saving preferences: {str(e)}")
                 logger.error(f"Error saving preferences: {str(e)}")
 
+    # --- Template Builder ---
+    st.divider()
+    st.subheader("✉️ Reminder Template Builder")
+    st.markdown("Customize the SMS and Email templates used for reminders. Use only allowed variables listed below.")
+
+    allowed = ["{case_title}", "{case_number}", "{deadline_date}", "{days_left}", "{court}", "{deadline_type}", "{deadline_description}", "{link}"]
+    st.markdown("**Allowed variables:** " + ", ".join(allowed))
+
+    db = SessionLocal()
+    try:
+        tmpl = db.query(__import__("database").NotificationTemplate).filter(__import__("database").NotificationTemplate.user_id == int(user_id)).first()
+
+        sms_val = tmpl.sms_template if tmpl and tmpl.sms_template else "⚖️ Reminder: {case_title} has a deadline in {days_left} day(s). {link}"
+        subj_val = tmpl.email_subject_template if tmpl and tmpl.email_subject_template else "⚖️ Reminder: {case_title} - {deadline_type} due"
+        html_val = tmpl.email_html_template if tmpl and tmpl.email_html_template else ("<p>Dear user,</p><p>Your case <strong>{case_title}</strong> has a {deadline_type} deadline on {deadline_date} ({days_left} days left).</p><p><a href=\"{link}\">View case</a></p>")
+
+        sms_input = st.text_area("SMS Template", value=sms_val, height=120, key="sms_template_input")
+        subj_input = st.text_input("Email Subject Template", value=subj_val, key="email_subject_input")
+        html_input = st.text_area("Email HTML Template", value=html_val, height=220, key="email_html_input")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Preview Templates"):
+                from core.template_renderer import validate_template, render_template, TemplateValidationError
+                sample_values = {
+                    "case_title": "Sharma vs State",
+                    "case_number": "CA/123/2024",
+                    "deadline_date": "12 May 2026",
+                    "days_left": 3,
+                    "court": "Delhi High Court",
+                    "deadline_type": "appeal",
+                    "deadline_description": "File appeal against lower court order",
+                    "link": "https://legalassist.ai/cases/1",
+                }
+
+                ok_sms, unknown_sms = validate_template(sms_input)
+                ok_subj, unknown_subj = validate_template(subj_input)
+                ok_html, unknown_html = validate_template(html_input)
+
+                if not ok_sms:
+                    st.error(f"SMS template contains unknown variables: {unknown_sms}")
+                else:
+                    try:
+                        st.markdown("**SMS Preview**")
+                        st.write(render_template(sms_input, sample_values))
+                    except TemplateValidationError as e:
+                        st.error(str(e))
+
+                if not ok_subj:
+                    st.error(f"Email subject contains unknown variables: {unknown_subj}")
+                else:
+                    st.markdown("**Email Subject Preview**")
+                    try:
+                        st.write(render_template(subj_input, sample_values))
+                    except TemplateValidationError as e:
+                        st.error(str(e))
+
+                if not ok_html:
+                    st.error(f"Email HTML contains unknown variables: {unknown_html}")
+                else:
+                    st.markdown("**Email HTML Preview**")
+                    try:
+                        rendered_html = render_template(html_input, sample_values)
+                        st.write(rendered_html, unsafe_allow_html=True)
+                    except TemplateValidationError as e:
+                        st.error(str(e))
+
+        with col2:
+            if st.button("Save Templates", use_container_width=True):
+                try:
+                    from database import create_or_update_notification_template
+                    create_or_update_notification_template(
+                        db=db,
+                        user_id=int(user_id),
+                        sms_template=sms_input,
+                        email_subject_template=subj_input,
+                        email_html_template=html_input,
+                    )
+                    st.success("✅ Templates saved")
+                except Exception as e:
+                    st.error(f"Failed to save templates: {str(e)}")
     finally:
         db.close()
 
@@ -197,6 +301,7 @@ def page_notification_preferences():
 
 def page_manage_deadlines():
     """Page: Add and manage case deadlines"""
+    apply_custom_css()
     st.title("📅 Case Deadlines")
 
     db = SessionLocal()
@@ -327,6 +432,7 @@ def page_manage_deadlines():
 
 def page_notification_history():
     """Page: View notification delivery history"""
+    apply_custom_css()
     st.title("📬 Notification History")
 
     db = SessionLocal()
@@ -396,10 +502,164 @@ def page_notification_history():
         db.close()
 
 
-# Logging for debugging
-import logging
 
-logger = logging.getLogger(__name__)
+
+def page_bulk_import():
+    """Page: Bulk import deadlines from CSV"""
+    apply_custom_css()
+    st.title("📥 Bulk Import Deadlines")
+    st.markdown("Upload a CSV file with your case deadlines. Required columns: `case_title`, `deadline_date`, `deadline_type` (optional: `description`, `case_id`)")
+
+    # Sample CSV download
+    sample_df = pd.DataFrame({
+        "case_title": ["State vs. Smith", "Doe Estate"],
+        "deadline_date": ["2026-06-15", "2026-07-20"],
+        "deadline_type": ["Filing", "Hearing"],
+        "description": ["Submit final brief", "Probate hearing"],
+        "case_id": [101, 102]
+    })
+    
+    csv = sample_df.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        "📥 Download Sample CSV Template",
+        data=csv,
+        file_name="deadline_template.csv",
+        mime="text/csv",
+    )
+
+    uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
+    
+    if uploaded_file is not None:
+        try:
+            df = pd.read_csv(uploaded_file)
+            st.write("### Preview of Uploaded Data")
+            st.dataframe(df.head())
+
+            if st.button("🚀 Process and Import Deadlines", use_container_width=True):
+                db = SessionLocal()
+                user_id = get_user_id()
+                count = 0
+                errors = []
+                
+                progress_bar = st.progress(0)
+                for i, row in df.iterrows():
+                    try:
+                        # Basic validation
+                        if pd.isna(row.get('case_title')) or pd.isna(row.get('deadline_date')):
+                            errors.append(f"Row {i+1}: Missing required fields")
+                            continue
+                        
+                        # Parse date
+                        d_date = pd.to_datetime(row['deadline_date']).to_pydatetime()
+                        d_date = d_date.replace(tzinfo=timezone.utc)
+                        
+                        create_case_deadline(
+                            db=db,
+                            user_id=int(user_id),
+                            case_id=int(row.get('case_id', 0)),
+                            case_title=str(row['case_title']),
+                            deadline_date=d_date,
+                            deadline_type=str(row.get('deadline_type', 'Other')).lower(),
+                            description=str(row.get('description', '')) if not pd.isna(row.get('description')) else None
+                        )
+                        count += 1
+                    except Exception as e:
+                        errors.append(f"Row {i+1}: {str(e)}")
+                    
+                    progress_bar.progress((i + 1) / len(df))
+                
+                db.commit()
+                db.close()
+                
+                if count > 0:
+                    st.success(f"✅ Successfully imported {count} deadlines!")
+                if errors:
+                    st.warning(f"⚠️ Encountered {len(errors)} errors during import.")
+                    with st.expander("View Error Details"):
+                        for err in errors:
+                            st.write(f"- {err}")
+                
+                if count > 0:
+                    st.balloons()
+
+        except Exception as e:
+            st.error(f"Error reading CSV: {str(e)}")
+
+
+def page_analytics():
+    """Page: Deadline and Notification Analytics"""
+    apply_custom_css()
+    st.title("📊 Analytics Dashboard")
+    
+    db = SessionLocal()
+    try:
+        user_id = get_user_id()
+        
+        # Get deadlines for charts
+        deadlines = get_user_deadlines(db, int(user_id))
+        
+        if not deadlines:
+            st.info("No data available yet. Add some deadlines to see analytics!")
+            return
+
+        # 1. Deadline Status Overview
+        st.subheader("🗓️ Deadline Distribution")
+        
+        data = []
+        for d in deadlines:
+            days = d.days_until_deadline()
+            status = "Completed" if d.is_completed else ("Critical (<=3d)" if days <= 3 else ("Upcoming" if days <= 10 else "Scheduled"))
+            data.append({
+                "Case": d.case_title,
+                "Type": d.deadline_type.title(),
+                "Days Left": days,
+                "Status": status
+            })
+        
+        df = pd.DataFrame(data)
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            fig_status = px.pie(df, names='Status', title='Deadline Status', color_discrete_sequence=px.colors.qualitative.Pastel)
+            st.plotly_chart(fig_status, use_container_width=True)
+            
+        with col2:
+            fig_type = px.bar(df.groupby('Type').size().reset_index(name='Count'), x='Type', y='Count', title='Deadlines by Type', color='Type')
+            st.plotly_chart(fig_type, use_container_width=True)
+
+        # 2. Notification Delivery Performance
+        st.divider()
+        st.subheader("📬 Delivery Performance")
+        
+        notifications = get_notification_history(db, int(user_id), limit=200)
+        if notifications:
+            notif_data = []
+            for n in notifications:
+                notif_data.append({
+                    "Date": n.created_at.date(),
+                    "Status": n.status.value.capitalize(),
+                    "Channel": n.channel.value.upper()
+                })
+            
+            ndf = pd.DataFrame(notif_data)
+            
+            col3, col4 = st.columns(2)
+            
+            with col3:
+                fig_notif_status = px.pie(ndf, names='Status', title='Notification Success Rate', 
+                                         color='Status', color_discrete_map={'Sent': '#4CAF50', 'Failed': '#F44336', 'Pending': '#FFC107'})
+                st.plotly_chart(fig_notif_status, use_container_width=True)
+                
+            with col4:
+                daily_notifs = ndf.groupby(['Date', 'Status']).size().reset_index(name='Count')
+                fig_timeline = px.line(daily_notifs, x='Date', y='Count', color='Status', title='Notification Timeline')
+                st.plotly_chart(fig_timeline, use_container_width=True)
+        else:
+            st.info("Notification history is empty.")
+
+    finally:
+        db.close()
 
 
 # Export for use in main app
@@ -409,11 +669,15 @@ if __name__ == "__main__":
     # Sidebar navigation
     page = st.sidebar.radio(
         "Select Page",
-        ["Manage Deadlines", "Notification History", "Preferences"],
+        ["Manage Deadlines", "Bulk Import", "Analytics", "Notification History", "Preferences"],
     )
 
     if page == "Manage Deadlines":
         page_manage_deadlines()
+    elif page == "Bulk Import":
+        page_bulk_import()
+    elif page == "Analytics":
+        page_analytics()
     elif page == "Notification History":
         page_notification_history()
     elif page == "Preferences":

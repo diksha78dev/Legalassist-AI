@@ -254,7 +254,7 @@ def main():
     with col2:
         type_filter = st.selectbox(
             "Filter by Type",
-            ["All"] + list(set(c["case_type"].title() for c in cases)),
+            ["All"] + sorted(set(c["case_type"].title() for c in cases)),
             key="type_filter",
         )
 

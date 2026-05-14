@@ -1,5 +1,6 @@
 PAGE_HOME = "pages/0_Home.py"
 PAGE_LOGIN = "pages/0_Login.py"
+PAGE_ANALYTICS_DASHBOARD = "pages/1_Analytics_Dashboard.py"
 PAGE_MY_CASES = "pages/1_My_Cases.py"
 PAGE_CASE_DETAILS = "pages/2_Case_Details.py"
 PAGE_APPEAL_ESTIMATOR = "pages/2_Appeal_Estimator.py"

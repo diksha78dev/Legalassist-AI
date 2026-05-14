@@ -5,7 +5,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.openapi.utils import get_openapi
 import structlog
 
@@ -16,6 +16,8 @@ from api.middleware import (
     error_handling_middleware,
     logging_middleware
 )
+from observability.integration import initialize_observability_for_environment
+from observability.instrumentation import get_metrics
 
 # Import routes
 from api.routes import documents, cases, reports, analytics, deadlines, auth, health
@@ -107,6 +109,7 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     async def startup_event():
         """Initialize on startup"""
+        initialize_observability_for_environment()
         logger.info(
             "API Starting",
             version=settings.API_VERSION,
@@ -176,6 +179,11 @@ def create_app() -> FastAPI:
             "redoc": "/redoc",
             "openapi": "/openapi.json"
         }
+
+    @app.get("/metrics")
+    async def metrics_endpoint():
+        """Prometheus metrics endpoint."""
+        return Response(content=get_metrics(), media_type="text/plain; version=0.0.4; charset=utf-8")
     
     return app
 

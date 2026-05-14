@@ -71,6 +71,7 @@ class CaseDeadline(Base):
     # Relationships
     case = relationship("Case", back_populates="deadlines")
     notifications = relationship("NotificationLog", back_populates="deadline", cascade="all, delete-orphan")
+    attachments = relationship("Attachment", back_populates="deadline", cascade="all, delete-orphan")
 
     def days_until_deadline(self) -> int:
         """Calculate days remaining until deadline"""
@@ -99,8 +100,17 @@ class UserPreference(Base):
     notify_10_days = Column(Boolean, default=True)
     notify_3_days = Column(Boolean, default=True)
     notify_1_day = Column(Boolean, default=True)
+
+    # Holiday-aware reminder engine (MVP)
+    holiday_aware_reminders = Column(Boolean, default=False)
+    holiday_country = Column(String(255), nullable=True)  # e.g., "IN" (optional in MVP)
+    holiday_region = Column(String(255), nullable=True)   # e.g., "MH" / state/province (optional in MVP)
+    # JSON array of ISO dates: ["2026-01-26", "2026-03-29", ...]
+    holiday_calendar_json = Column(Text, nullable=True)
+
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+
 
     # Relationships
     user = relationship("User", back_populates="preferences")
@@ -122,6 +132,7 @@ class NotificationLog(Base):
     days_before = Column(Integer, nullable=False)  # 30, 10, 3, or 1 day reminder
     message_id = Column(String(255), nullable=True)  # From Twilio or SendGrid
     error_message = Column(Text, nullable=True)
+    message_preview = Column(Text, nullable=True)
     sent_at = Column(DateTime(timezone=True), nullable=True)
     delivered_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
@@ -209,6 +220,23 @@ class CaseAnalytics(Base):
 
     def __repr__(self):
         return f"<CaseAnalytics(jurisdiction={self.jurisdiction}, appeal_success_rate={self.appeal_success_rate})>"
+
+
+class NotificationTemplate(Base):
+    """Per-user notification templates for SMS and Email"""
+    __tablename__ = "notification_templates"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
+    sms_template = Column(Text, nullable=True)
+    email_subject_template = Column(String(255), nullable=True)
+    email_html_template = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+
+    # Relationship back to user is optional
+    def __repr__(self):
+        return f"<NotificationTemplate(user_id={self.user_id})>"
 
 
 class UserFeedback(Base):
@@ -656,6 +684,7 @@ class Case(Base):
     documents = relationship("CaseDocument", back_populates="case", cascade="all, delete-orphan", order_by="CaseDocument.uploaded_at")
     deadlines = relationship("CaseDeadline", back_populates="case", cascade="all, delete-orphan")
     timeline_events = relationship("CaseTimeline", back_populates="case", cascade="all, delete-orphan")
+    attachments = relationship("Attachment", back_populates="case", cascade="all, delete-orphan", order_by="Attachment.uploaded_at")
 
     def __repr__(self):
         return f"<Case(case_number={self.case_number}, status={self.status})>"
@@ -679,6 +708,28 @@ class CaseDocument(Base):
 
     def __repr__(self):
         return f"<CaseDocument(case_id={self.case_id}, type={self.document_type})>"
+
+
+class Attachment(Base):
+    """Model for storing uploaded attachments/evidence linked to cases or deadlines"""
+    __tablename__ = "attachments"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=True, index=True)
+    deadline_id = Column(Integer, ForeignKey("case_deadlines.id", ondelete="CASCADE"), nullable=True, index=True)
+    original_filename = Column(String(255), nullable=False)
+    stored_path = Column(String(1024), nullable=False)  # Absolute path on disk
+    content_type = Column(String(255), nullable=True)
+    size_bytes = Column(Integer, nullable=True)
+    uploaded_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+
+    # Relationships
+    case = relationship("Case", back_populates="attachments")
+    deadline = relationship("CaseDeadline", back_populates="attachments")
+
+    def __repr__(self):
+        return f"<Attachment(id={self.id}, user_id={self.user_id}, filename={self.original_filename})>"
 
 
 class CaseTimeline(Base):
@@ -745,16 +796,27 @@ def create_or_update_user_preference(
     phone_number: Optional[str] = None,
     notification_channel: NotificationChannel = NotificationChannel.BOTH,
     timezone: str = "UTC",
+    # Holiday-aware reminder engine (MVP)
+    holiday_aware_reminders: bool = False,
+    holiday_country: Optional[str] = None,
+    holiday_region: Optional[str] = None,
+    holiday_calendar_json: Optional[str] = None,
 ) -> UserPreference:
     """Create or update user notification preferences"""
     pref = db.query(UserPreference).filter(UserPreference.user_id == user_id).first()
-    
+
     if pref:
         pref.email = email
         pref.phone_number = phone_number
         pref.notification_channel = notification_channel
         pref.timezone = timezone
+        # Holiday-aware reminder engine (MVP)
+        pref.holiday_aware_reminders = holiday_aware_reminders
+        pref.holiday_country = holiday_country
+        pref.holiday_region = holiday_region
+        pref.holiday_calendar_json = holiday_calendar_json
         pref.updated_at = dt.datetime.now(dt.timezone.utc)
+
     else:
         pref = UserPreference(
             user_id=user_id,
@@ -762,7 +824,13 @@ def create_or_update_user_preference(
             phone_number=phone_number,
             notification_channel=notification_channel,
             timezone=timezone,
+            # Holiday-aware reminder engine (MVP)
+            holiday_aware_reminders=holiday_aware_reminders,
+            holiday_country=holiday_country,
+            holiday_region=holiday_region,
+            holiday_calendar_json=holiday_calendar_json,
         )
+
         db.add(pref)
     
     db.commit()
@@ -857,6 +925,7 @@ def log_notification(
     status: NotificationStatus = NotificationStatus.PENDING,
     message_id: Optional[str] = None,
     error_message: Optional[str] = None,
+    message_preview: Optional[str] = None,
 ) -> NotificationLog:
     """Log a notification attempt"""
     log = NotificationLog(
@@ -868,6 +937,7 @@ def log_notification(
         status=status,
         message_id=message_id,
         error_message=error_message,
+        message_preview=message_preview,
         sent_at=dt.datetime.now(dt.timezone.utc) if status != NotificationStatus.PENDING else None,
     )
     db.add(log)
@@ -1328,6 +1398,38 @@ def get_case_by_number(db: Session, user_id: int, case_number: str) -> Optional[
         Case.case_number == case_number,
     ).first()
 
+def get_notification_template_for_user(db: Session, user_id: int) -> Optional["NotificationTemplate"]:
+    return db.query(NotificationTemplate).filter(NotificationTemplate.user_id == user_id).first()
+
+def create_or_update_notification_template(
+    db: Session,
+    user_id: int,
+    sms_template: Optional[str] = None,
+    email_subject_template: Optional[str] = None,
+    email_html_template: Optional[str] = None,
+):
+    tmpl = db.query(NotificationTemplate).filter(NotificationTemplate.user_id == user_id).first()
+    if tmpl:
+        if sms_template is not None:
+            tmpl.sms_template = sms_template
+        if email_subject_template is not None:
+            tmpl.email_subject_template = email_subject_template
+        if email_html_template is not None:
+            tmpl.email_html_template = email_html_template
+        tmpl.updated_at = dt.datetime.now(dt.timezone.utc)
+    else:
+        tmpl = NotificationTemplate(
+            user_id=user_id,
+            sms_template=sms_template,
+            email_subject_template=email_subject_template,
+            email_html_template=email_html_template,
+        )
+        db.add(tmpl)
+
+    db.commit()
+    db.refresh(tmpl)
+    return tmpl
+
 
 def update_case_status(db: Session, case_id: int, status: CaseStatus) -> Optional[Case]:
     """Update case status"""
@@ -1425,6 +1527,53 @@ def update_case_document(
         db.commit()
         db.refresh(doc)
     return doc
+
+
+def create_attachment(
+    db: Session,
+    user_id: int,
+    original_filename: str,
+    stored_path: str,
+    content_type: Optional[str] = None,
+    size_bytes: Optional[int] = None,
+    case_id: Optional[int] = None,
+    deadline_id: Optional[int] = None,
+) -> "Attachment":
+    """Create a new attachment record linked to a case or deadline"""
+    att = Attachment(
+        user_id=user_id,
+        case_id=case_id,
+        deadline_id=deadline_id,
+        original_filename=original_filename,
+        stored_path=stored_path,
+        content_type=content_type,
+        size_bytes=size_bytes,
+    )
+    db.add(att)
+    db.commit()
+    db.refresh(att)
+    return att
+
+
+def get_attachments_for_case(db: Session, case_id: int):
+    return db.query(Attachment).filter(Attachment.case_id == case_id).order_by(Attachment.uploaded_at.desc()).all()
+
+
+def get_attachments_for_deadline(db: Session, deadline_id: int):
+    return db.query(Attachment).filter(Attachment.deadline_id == deadline_id).order_by(Attachment.uploaded_at.desc()).all()
+
+
+def get_attachment_by_id(db: Session, attachment_id: int):
+    return db.query(Attachment).filter(Attachment.id == attachment_id).first()
+
+
+def delete_attachment(db: Session, attachment_id: int) -> bool:
+    att = db.query(Attachment).filter(Attachment.id == attachment_id).first()
+    if not att:
+        return False
+    db.delete(att)
+    db.commit()
+    return True
 
 
 # ==================== Case Timeline Helper Functions ====================

@@ -16,7 +16,7 @@ from core.app_utils import (
     _initialize_openai_client,
     extract_text_from_pdf,
     compress_text,
-    english_leakage_detected,
+    english_leakage_detected,  # Used to detect if output contains English in non-English text
     output_language_mismatch_detected,
     build_prompt,
     build_summary_prompt,
@@ -38,16 +38,25 @@ from database import init_db, SessionLocal, get_db, DocumentType, db_session
 from scheduler import start_scheduler
 from auth import init_auth_session, require_auth, get_current_user_id, get_current_user_email, logout_user
 from case_manager import get_user_cases_summary, upload_case_document, create_new_case, get_case_detail
+import routes
+from observability.integration import initialize_observability_for_environment
 
 # Initialize database
 from config import Config
 init_db()
 
 # ==================== Logging Setup ====================
+# CENTRALIZED LOGGING CONFIGURATION
+# This is the single, authoritative logging setup point for the entire application.
+# All modules (scheduler, database, auth, etc.) use logging.getLogger(__name__)
+# and get their logs handled by this configuration.
+# NOTE: Other modules (scheduler.py, etc.) are imported BEFORE this point,
+# but they do NOT call logging.basicConfig() to avoid duplicate handlers.
 logging.basicConfig(
     level=Config.LOG_LEVEL,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
+initialize_observability_for_environment()
 
 # ==================== App Config ====================
 st.set_page_config(
@@ -246,10 +255,10 @@ def render_save_to_case_section(user_id, raw_text, summary, remedies):
     with col2:
         st.markdown("### New Case")
         with st.expander("➕ Create & Save New Case"):
-            new_case_number = st.text_input("Case Number", placeholder="e.g. CA/123/2024")
-            new_case_title = st.text_input("Case Title (Optional)", placeholder="e.g. Sharma vs State")
+            new_case_number = st.text_input("Case Number", placeholder="e.g. CA/123/2024").strip()
+            new_case_title = st.text_input("Case Title (Optional)", placeholder="e.g. Sharma vs State").strip()
             new_case_type = st.selectbox("Type", ["civil", "criminal", "family", "other"])
-            new_jurisdiction = st.text_input("Jurisdiction", placeholder="e.g. Delhi High Court")
+            new_jurisdiction = st.text_input("Jurisdiction", placeholder="e.g. Delhi High Court").strip()
             
             if st.button("Create Case & Save Document", use_container_width=True):
                 if new_case_number and new_jurisdiction:
@@ -347,20 +356,110 @@ def render_analytics_preview_section():
             st.info("The analytics module is currently being updated. Please try again later.")
 
 
+# =============================================================================
+# COMPREHENSIVE SESSION MANAGEMENT & LOGOUT HANDLER
+# =============================================================================
+
+def perform_comprehensive_logout():
+    """
+    Executes a high-integrity logout process by aggressively clearing all 
+    application state and session data.
+    
+    SECURITY RATIONALE:
+    ------------------
+    In a Streamlit environment, simple variable assignment (setting keys to None)
+    is often insufficient for guaranteed data isolation, especially in scenarios
+    where multiple users might share the same physical machine or browser session.
+    
+    Stale data persistence can lead to "session bleeding" where fragments of 
+    a previous user's state (like cached IDs, document metadata, or UI toggles)
+    unexpectedly appear in a subsequent user's experience.
+    
+    IMPLEMENTATION STRATEGY:
+    -----------------------
+    1. DATABASE REVOCATION: First, we call the standard logout_user() to 
+       synchronously revoke the JWT token in the database. This ensures that 
+       even if the client somehow retains the token, it is cryptographically 
+       invalidated server-side.
+    
+    2. STATE WIPE: We then iterate through EVERY key currently present in 
+       st.session_state and explicitly delete it. This is more robust than 
+       st.session_state.clear() in some edge cases involving widget-linked 
+       keys, and it ensures that NO information remains in memory.
+    
+    3. EXECUTION ABORT: Finally, we trigger st.rerun() to kill the current 
+       execution thread and start a fresh, pristine render cycle.
+    """
+    
+    logging.info("Initiating comprehensive logout and session wipe...")
+    
+    try:
+        # Step 1: Backend Revocation
+        # This revokes the JWT and clears the standard auth keys in session_state.
+        logout_user()
+        
+        # Step 2: Aggressive Session Wipe
+        # We iterate through all keys to ensure nothing is missed, including
+        # application-specific keys like 'raw_text', 'summary', 'remedies', etc.
+        # This prevents stale analysis data from being visible to the next user.
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+            
+        logging.info("Session state keys cleared successfully.")
+        
+    except Exception as e:
+        logging.error(f"Critical error during logout session wipe: {str(e)}")
+        # We still want to attempt a rerun even if a partial failure occurs
+        # to force the UI back to a safe, unauthenticated state.
+    
+    # Step 3: Forced UI Refresh
+    # This abandons the current script run and restarts from the top of app.py.
+    st.rerun()
+
+
+def render_sidebar_navigation():
+    """
+    Renders the premium sidebar navigation and user profile section.
+    
+    This component handles the visual representation of the user's auth status
+     and provides the primary entry point for the logout workflow.
+    """
+    st.sidebar.markdown("# ⚖️ LegalEase AI")
+    st.sidebar.markdown("---")
+    
+    if require_auth():
+        user_email = get_current_user_email()
+        
+        # Premium User Profile UI
+        st.sidebar.markdown(f"""
+        <div style="background-color: rgba(255, 255, 255, 0.05); padding: 15px; border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.1); margin-bottom: 20px;">
+            <p style="margin: 0; font-size: 0.8rem; opacity: 0.7;">SIGNED IN AS</p>
+            <p style="margin: 0; font-weight: bold; overflow: hidden; text-overflow: ellipsis;">{user_email}</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Secondary navigation links could go here...
+        
+        st.sidebar.markdown("### Account Management")
+        if st.sidebar.button("🔓 Logout", use_container_width=True, help="Securely sign out and clear all local data"):
+            perform_comprehensive_logout()
+    else:
+        st.sidebar.info("🔒 Secure Mode: Not logged in. Please sign in to access case history and tracking features.")
+        
+        if st.sidebar.button("🚀 Go to Login", use_container_width=True, type="primary"):
+            st.switch_page(routes.PAGE_LOGIN)
+            
+    st.sidebar.markdown("---")
+    st.sidebar.caption("v2.4.0 | LegalAssist AI Enterprise")
+
+
 # ==================== Main UI Component ====================
 def main():
+    # Initialize the auth state at the very beginning of the run
     init_auth_session()
-    
-    st.sidebar.markdown("# ⚖️ LegalEase AI")
-    if require_auth():
-        st.sidebar.success(f"Logged in as {get_current_user_email()}")
-        if st.sidebar.button("Logout"):
-            logout_user()
-            st.rerun()
-    else:
-        st.sidebar.info("Not logged in. Log in to track cases and deadlines.")
-        if st.sidebar.button("Go to Login"):
-            st.switch_page(routes.PAGE_LOGIN)
+
+    # Render the sidebar navigation and auth controls
+    render_sidebar_navigation()
 
     st.title("⚡ LegalEase AI")
     client = get_client()
@@ -618,10 +717,10 @@ def main():
                                 
                         with col2:
                             with st.expander("➕ Or Create New Case"):
-                                new_case_number = st.text_input("Case Number")
-                                new_case_title = st.text_input("Case Title (Optional)")
+                                new_case_number = st.text_input("Case Number").strip()
+                                new_case_title = st.text_input("Case Title (Optional)").strip()
                                 new_case_type = st.selectbox("Type", ["civil", "criminal", "family", "other"])
-                                new_jurisdiction = st.text_input("Jurisdiction", placeholder="e.g. Delhi High Court")
+                                new_jurisdiction = st.text_input("Jurisdiction", placeholder="e.g. Delhi High Court").strip()
                                 if st.button("Create & Save"):
                                     if new_case_number and new_jurisdiction:
                                         new_case = create_new_case(
@@ -687,11 +786,14 @@ def main():
                                 with col1:
                                     st.metric("Total Cases Tracked", summary["total_cases_processed"])
                                 with col2:
-                                    st.metric("Appeals Success Rate", f"{AnalyticsAggregator.get_regional_trends(db)[0]['appeal_success_rate'] if AnalyticsAggregator.get_regional_trends(db) else 'N/A'}%")
+                                    regional_trends = AnalyticsAggregator.get_regional_trends(db)
+                                    appeal_rate = f"{regional_trends[0]['appeal_success_rate']}%" if regional_trends else 'N/A'
+                                    st.metric("Appeals Success Rate", appeal_rate)
                                 with col3:
                                     st.metric("Appeals Filed", summary["appeals_filed"])
                                 
-                                st.write("📌 **Visit Analytics Dashboard for detailed insights** ➡️ [See Full Dashboard]()")
+                                if st.button("📊 View Full Dashboard", use_container_width=True, key="full_dashboard"):
+                                    st.switch_page(routes.PAGE_ANALYTICS_DASHBOARD)
                             else:
                                 st.info("Analytics will be available as more cases are tracked.")
                         except Exception as e:

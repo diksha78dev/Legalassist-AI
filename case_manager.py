@@ -32,6 +32,8 @@ from database import (
     create_case_document,
     create_timeline_event,
     update_case_status,
+    create_attachment,
+    get_attachments_for_case,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,6 +55,13 @@ def create_new_case(
     """
     db = SessionLocal()
     try:
+        # Normalize inputs by trimming whitespace
+        case_number = case_number.strip()
+        jurisdiction = jurisdiction.strip()
+        case_type = case_type.strip()
+        if title:
+            title = title.strip()
+        
         # Check if case number already exists for this user
         existing = db.query(Case).filter(
             Case.user_id == user_id,
@@ -210,6 +219,19 @@ def get_case_detail(user_id: int, case_id: int) -> Optional[Dict[str, Any]]:
             for doc in documents
         ]
 
+        # Get attachments
+        attachments = get_attachments_for_case(db, case_id)
+        attachments_list = [
+            {
+                "id": a.id,
+                "original_filename": a.original_filename,
+                "uploaded_at": a.uploaded_at.isoformat(),
+                "size_bytes": a.size_bytes,
+                "content_type": a.content_type,
+            }
+            for a in attachments
+        ]
+
         # Get timeline
         timeline = get_case_timeline(db, case_id)
         timeline_list = [
@@ -258,6 +280,7 @@ def get_case_detail(user_id: int, case_id: int) -> Optional[Dict[str, Any]]:
             "timeline": timeline_list,
             "deadlines": deadlines_list,
             "remedies": remedies,
+            "attachments": attachments_list,
         }
 
     except Exception as e:
@@ -322,6 +345,66 @@ def upload_case_document(
 
     except Exception as e:
         logger.error(f"Error uploading document: {str(e)}")
+        return None
+    finally:
+        db.close()
+
+
+def upload_case_attachment(
+    user_id: int,
+    case_id: int,
+    file_bytes: bytes,
+    filename: str,
+    content_type: Optional[str] = None,
+    deadline_id: Optional[int] = None,
+) -> Optional[dict]:
+    """
+    Save an attachment file to disk and register it in the DB.
+    Returns attachment dict on success.
+    """
+    from core.storage import save_attachment
+
+    db = SessionLocal()
+    try:
+        case = get_case_by_id(db, case_id)
+        if not case or case.user_id != user_id:
+            logger.error(f"Case {case_id} not found or not owned by user {user_id}")
+            return None
+
+        # Save file to storage
+        stored_path, size = save_attachment(file_bytes, filename)
+
+        att = create_attachment(
+            db=db,
+            user_id=user_id,
+            original_filename=filename,
+            stored_path=stored_path,
+            content_type=content_type,
+            size_bytes=size,
+            case_id=case_id,
+            deadline_id=deadline_id,
+        )
+
+        # Timeline event
+        create_timeline_event(
+            db=db,
+            case_id=case_id,
+            event_type="attachment_uploaded",
+            description=f"Attachment uploaded: {filename}",
+            metadata={"attachment_id": att.id, "deadline_id": deadline_id},
+        )
+
+        db.refresh(att)
+        return {
+            "id": att.id,
+            "original_filename": att.original_filename,
+            "stored_path": att.stored_path,
+            "size_bytes": att.size_bytes,
+            "uploaded_at": att.uploaded_at.isoformat(),
+        }
+
+    except Exception as e:
+        logger.error(f"Error uploading attachment: {str(e)}", exc_info=True)
         return None
     finally:
         db.close()
@@ -552,6 +635,86 @@ def get_case_timeline_events(user_id: int, case_id: int) -> List[Dict[str, Any]]
             for e in events
         ]
 
+    finally:
+        db.close()
+
+
+def get_case_full_timeline(user_id: int, case_id: int) -> List[Dict[str, Any]]:
+    """
+    Return a unified, ordered timeline for a case combining:
+    - CaseTimeline events
+    - CaseDocument uploads
+    - CaseDeadline entries (created)
+    - NotificationLog entries (reminders sent)
+
+    Ensures user owns the case and performs batched queries to avoid N+1.
+    """
+    db = SessionLocal()
+    try:
+        case = get_case_by_id(db, case_id)
+        if not case or case.user_id != user_id:
+            return []
+
+        # Batch fetch related items
+        timelines = db.query(CaseTimeline).filter(CaseTimeline.case_id == case_id).all()
+        documents = db.query(CaseDocument).filter(CaseDocument.case_id == case_id).all()
+        deadlines = db.query(CaseDeadline).filter(CaseDeadline.case_id == case_id).all()
+
+        notifications = []
+        if deadlines:
+            deadline_ids = [d.id for d in deadlines]
+            NotificationLog = __import__("database").NotificationLog
+            notifications = db.query(NotificationLog).filter(NotificationLog.deadline_id.in_(deadline_ids)).all()
+
+        items: List[Dict[str, Any]] = []
+
+        for t in timelines:
+            item = {
+                "type": t.event_type,
+                "timestamp": t.event_date.isoformat(),
+                "description": t.description,
+                "metadata": t.event_metadata or {},
+                "source": "timeline",
+            }
+            # If a timeline event represents a reminder and includes a preview, expose it
+            if t.event_type == "reminder" and t.event_metadata and isinstance(t.event_metadata, dict):
+                mp = t.event_metadata.get("message_preview") or t.event_metadata.get("message")
+                if mp:
+                    item["message_preview"] = mp
+            items.append(item)
+
+        for d in documents:
+            items.append({
+                "type": "document_uploaded",
+                "timestamp": d.uploaded_at.isoformat(),
+                "description": f"{d.document_type.value} uploaded",
+                "metadata": {"document_id": d.id},
+                "source": "document",
+            })
+
+        for d in deadlines:
+            ts = d.created_at.isoformat() if d.created_at else (d.deadline_date.isoformat() if d.deadline_date else "")
+            items.append({
+                "type": "deadline_created",
+                "timestamp": ts,
+                "description": f"{d.deadline_type} - {d.description or ''}",
+                "metadata": {"deadline_id": d.id},
+                "source": "deadline",
+            })
+
+        for n in notifications:
+            items.append({
+                "type": "reminder",
+                "timestamp": n.created_at.isoformat() if n.created_at else "",
+                "description": f"Reminder ({n.channel.value}) to {n.recipient} - {n.status.value}",
+                "metadata": {"notification_id": n.id, "deadline_id": n.deadline_id, "days_before": n.days_before},
+                "message_preview": n.message_preview,
+                "source": "notification",
+            })
+
+        # Sort descending by timestamp
+        items_sorted = sorted(items, key=lambda x: x.get("timestamp") or "", reverse=True)
+        return items_sorted
     finally:
         db.close()
 
@@ -888,3 +1051,133 @@ def generate_anonymized_case_data(case_id: int) -> Optional[Dict[str, Any]]:
         return None
     finally:
         db.close()
+
+
+# =============================================================================
+# BULK OPERATIONS
+# =============================================================================
+
+def delete_user_cases(user_id: int, case_ids: List[int]) -> Dict[str, Any]:
+    """
+    Perform a bulk deletion of multiple cases belonging to a specific user.
+    
+    This function implements a high-performance bulk delete strategy to avoid the 
+    N+1 query problem commonly associated with looping through individual 
+    ORM delete statements. By using a single SQLAlchemy query with an 'IN' 
+    clause, we drastically reduce database round-trips and transaction 
+    overhead.
+    
+    Performance Optimizations:
+    --------------------------
+    1. Single Query Execution: All specified cases are deleted in one SQL 
+       statement: DELETE FROM cases WHERE id IN (...) AND user_id = :user_id.
+    2. synchronize_session=False: We bypass the expensive session state 
+       synchronization logic since we are deleting records and don't need 
+       to update in-memory objects.
+    3. User ID Scoping: The query is strictly scoped to the user_id to 
+       ensure that users can only delete their own data, preventing 
+       unauthorized deletions.
+    
+    Args:
+        user_id (int): The unique identifier of the user performing the deletion.
+        case_ids (List[int]): A list of case IDs to be permanently removed.
+        
+    Returns:
+        Dict[str, Any]: A result dictionary containing:
+            - success (bool): True if the operation completed without error.
+            - count (int): The number of case records actually deleted.
+            - error (str, optional): Error message if the operation failed.
+            
+    Note:
+        Due to the 'cascade="all, delete-orphan"' configuration in the Case 
+        model, all related documents, timeline events, and deadlines will 
+        be automatically purged from the database along with the cases.
+    """
+    
+    # -------------------------------------------------------------------------
+    # Initialization and Input Validation
+    # -------------------------------------------------------------------------
+    
+    db = SessionLocal()
+    result = {
+        "success": False,
+        "count": 0,
+        "error": None
+    }
+    
+    # Early exit if no case IDs are provided to save database resources
+    if not case_ids:
+        logger.warning(f"No case IDs provided for bulk deletion by user {user_id}")
+        result["success"] = True
+        return result
+        
+    try:
+        # ---------------------------------------------------------------------
+        # Bulk Deletion Execution
+        # ---------------------------------------------------------------------
+        
+        logger.info(
+            f"Initiating bulk deletion for user {user_id}. "
+            f"Targeting {len(case_ids)} potential cases."
+        )
+        
+        # We use session.query(Case).filter().delete() for maximum efficiency.
+        # This translates to a single DELETE statement at the database level.
+        #
+        # Security Note: We MUST include the user_id in the filter to prevent 
+        # ID-traversal attacks where a user could delete cases belonging 
+        # to other users by guessing their IDs.
+        
+        query = db.query(Case).filter(
+            Case.id.in_(case_ids),
+            Case.user_id == user_id
+        )
+        
+        # Execute the delete operation.
+        # We set synchronize_session=False because we don't need to update 
+        # any in-memory Case objects after they are deleted. This provides 
+        # a slight performance boost by avoiding session state management.
+        
+        deleted_count = query.delete(synchronize_session=False)
+        
+        # Commit the transaction to persist the changes.
+        db.commit()
+        
+        # ---------------------------------------------------------------------
+        # Finalization and Audit Logging
+        # ---------------------------------------------------------------------
+        
+        logger.info(
+            f"Bulk deletion successful for user {user_id}. "
+            f"Records removed: {deleted_count}."
+        )
+        
+        result["success"] = True
+        result["count"] = deleted_count
+        
+    except Exception as e:
+        # ---------------------------------------------------------------------
+        # Error Handling and Recovery
+        # ---------------------------------------------------------------------
+        
+        # Roll back the transaction if any part of the deletion fails to 
+        # maintain database consistency.
+        db.rollback()
+        
+        error_msg = f"Failed to execute bulk deletion: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        
+        result["success"] = False
+        result["error"] = error_msg
+        
+    finally:
+        # Always ensure the database session is closed to prevent 
+        # connection pool exhaustion.
+        db.close()
+        
+    return result
+
+
+# =============================================================================
+# END OF SERVICE
+# =============================================================================
