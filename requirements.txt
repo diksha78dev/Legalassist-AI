@@ -87,6 +87,7 @@ py-spy>=0.3.14
 
 # HTTP client with retries
 requests>=2.31.0
+redis>=5.0.0
 tenacity>=8.2.0
 
 # Configuration Management

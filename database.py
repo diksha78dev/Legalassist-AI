@@ -4,6 +4,7 @@ Uses SQLAlchemy ORM with SQLite for persistence.
 """
 
 import datetime as dt
+import hashlib
 import logging
 from typing import Optional, List
 from sqlalchemy import (
@@ -26,6 +27,11 @@ import enum
 from contextlib import contextmanager
 from config import Config
 
+try:
+    import redis
+except ImportError:  # pragma: no cover - handled at runtime if Redis is unavailable
+    redis = None
+
 # Database setup
 DATABASE_URL = Config.DATABASE_URL
 _db_url = make_url(DATABASE_URL)
@@ -35,6 +41,17 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, expire_on_commit=
 Base = declarative_base()
 
 logger = logging.getLogger(__name__)
+
+_OTP_RATE_LIMIT_WINDOW_SECONDS = 60 * 60
+_OTP_RATE_LIMIT_SCRIPT = """
+local current = redis.call('INCR', KEYS[1])
+if current == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return current
+"""
+_otp_rate_limit_client = None
+_otp_rate_limit_script = None
 
 
 class NotificationStatus(str, enum.Enum):
@@ -1392,6 +1409,40 @@ def update_user_last_login(db: Session, user_id: int) -> User:
     return user
 
 
+def _otp_rate_limit_key(email: str) -> str:
+    normalized_email = str(email).strip().lower()
+    digest = hashlib.sha256(normalized_email.encode("utf-8")).hexdigest()
+    return f"otp:rate:{digest}"
+
+
+def _get_otp_rate_limit_script():
+    global _otp_rate_limit_client, _otp_rate_limit_script
+
+    if _otp_rate_limit_script is None:
+        if redis is None:
+            raise RuntimeError("Redis is required for OTP rate limiting but is not installed.")
+
+        redis_url = getattr(Config, "REDIS_URL", "redis://localhost:6379/0")
+        _otp_rate_limit_client = redis.from_url(redis_url, decode_responses=True)
+        _otp_rate_limit_script = _otp_rate_limit_client.register_script(_OTP_RATE_LIMIT_SCRIPT)
+
+    return _otp_rate_limit_script
+
+
+def _reserve_otp_rate_limit_slot(email: str, max_requests_per_hour: int) -> int:
+    normalized_email = str(email).strip().lower()
+    if not normalized_email:
+        raise ValueError("Email is required for OTP rate limiting")
+
+    script = _get_otp_rate_limit_script()
+    current = int(script(keys=[_otp_rate_limit_key(normalized_email)], args=[_OTP_RATE_LIMIT_WINDOW_SECONDS]))
+
+    if current > max_requests_per_hour:
+        raise ValueError("Too many OTP requests. Please try again later.")
+
+    return current
+
+
 def create_otp_verification(
     db: Session,
     email: str,
@@ -1400,15 +1451,7 @@ def create_otp_verification(
     max_requests_per_hour: int = 5,
 ) -> OTPVerification:
     """Create a new OTP verification record with rate limiting"""
-    # Check recent OTPs
-    one_hour_ago = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)
-    recent_otps = db.query(OTPVerification).filter(
-        OTPVerification.email == email,
-        OTPVerification.created_at > one_hour_ago,
-    ).count()
-
-    if recent_otps >= max_requests_per_hour:
-        raise ValueError("Too many OTP requests. Please try again later.")
+    _reserve_otp_rate_limit_slot(email, max_requests_per_hour)
 
     otp = OTPVerification(
         email=email,

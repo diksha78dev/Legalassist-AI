@@ -10,7 +10,7 @@ import time
 import re
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Any
 import logging
 from config import Config
 
@@ -34,7 +34,6 @@ from database import (
     is_token_revoked,
     cleanup_expired_revoked_tokens,
     User,
-    OTPVerification,  # Added to fix NameError in request_otp rate limiting
 )
 
 logger = logging.getLogger(__name__)
@@ -57,8 +56,6 @@ JWT_EXPIRY_HOURS = Config.JWT_EXPIRY_HOURS
 EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
 
 OTP_EXPIRY_MINUTES = Config.OTP_EXPIRY_MINUTES
-OTP_RATE_LIMIT_HOURS = 1
-OTP_RATE_LIMIT_MAX = 3  # Max OTP requests per email per hour
 
 # OTP Verification Security - Failed Attempt Lockout
 OTP_MAX_FAILED_ATTEMPTS = int(os.getenv("OTP_MAX_FAILED_ATTEMPTS", "5"))  # Max failed verification attempts
@@ -172,7 +169,10 @@ def request_otp(email: str) -> Tuple[bool, str]:
         expires_at = now + timedelta(minutes=OTP_EXPIRY_MINUTES)
 
         # Store OTP
-        create_otp_verification(db, email, otp_hash, expires_at)
+        try:
+            create_otp_verification(db, email, otp_hash, expires_at)
+        except ValueError as exc:
+            return False, str(exc)
 
         # Send OTP email
         email_sent = send_otp_email(email, otp)
