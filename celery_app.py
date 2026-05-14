@@ -57,7 +57,12 @@ class ContextTask(Task):
         retry_backoff (bool): Enables exponential backoff for retries.
     """
     
-    autoretry_for = (Exception,)
+    autoretry_for = (
+        ConnectionError,
+        TimeoutError,
+        OSError,
+        IOError,
+    )
     retry_kwargs = {'max_retries': 3}
     retry_backoff = True
 
