@@ -41,6 +41,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, expire_on_commit=
 Base = declarative_base()
 
 logger = logging.getLogger(__name__)
+auth_logger = logging.getLogger("auth.otp")
 
 _OTP_RATE_LIMIT_WINDOW_SECONDS = 60 * 60
 _OTP_RATE_LIMIT_SCRIPT = """
@@ -1524,7 +1525,7 @@ def record_otp_failed_attempt(db: Session, otp_id: int, lockout_duration_minutes
         # Lock OTP if max attempts exceeded
         if otp.failed_attempts >= max_failed_attempts:
             otp.locked_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=lockout_duration_minutes)
-            logger.warning(
+            auth_logger.warning(
                 f"OTP for {otp.email} locked after {otp.failed_attempts} failed attempts. "
                 f"Locked until {otp.locked_until}"
             )
