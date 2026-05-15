@@ -201,3 +201,41 @@ async def logging_middleware(request: Request, call_next: Callable):
     response.headers["X-Process-Time"] = str(process_time)
     response.headers["X-Request-Id"] = request_id
     return response
+
+
+async def request_size_limit_middleware(request: Request, call_next: Callable):
+    """Enforce request body size limits to prevent DOS attacks"""
+    from api.validation import ValidationConfig, PayloadTooLargeError
+    
+    # Skip size checks for certain endpoints
+    if request.url.path in ["/api/v1/health", "/api/v1/health/ready", "/api/v1/health/live", "/metrics"]:
+        return await call_next(request)
+    
+    # Get content length header
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            content_length_bytes = int(content_length)
+            max_json_body = ValidationConfig.MAX_JSON_BODY
+            
+            # For file uploads, allow larger sizes
+            if request.url.path.startswith("/api/v1/analyze/upload") or request.url.path.startswith("/api/v1/documents"):
+                max_size = ValidationConfig.MAX_UPLOAD_SIZE
+            else:
+                max_size = max_json_body
+            
+            if content_length_bytes > max_size:
+                logger.warning(
+                    "request_size_limit_exceeded",
+                    path=request.url.path,
+                    content_length=content_length_bytes,
+                    max_size=max_size,
+                    size_mb=round(content_length_bytes / 1024 / 1024, 2),
+                )
+                raise PayloadTooLargeError(
+                    detail=f"Request body too large: {round(content_length_bytes / 1024 / 1024, 2)} MB (max {round(max_size / 1024 / 1024, 2)} MB)"
+                )
+        except (ValueError, TypeError):
+            pass  # Invalid content-length, let the request proceed
+    
+    return await call_next(request)
