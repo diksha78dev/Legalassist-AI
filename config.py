@@ -98,6 +98,12 @@ class Config:
     # Use randomized filenames to avoid collisions and leaking original names
     ATTACHMENTS_RANDOMIZE_FILENAMES = _get_bool_env("ATTACHMENTS_RANDOMIZE_FILENAMES", True)
     
+    # --- Export Settings ---
+    # Directory where user data exports are saved (local storage)
+    EXPORTS_DIR = _get_val("EXPORTS_DIR", str(PROJECT_ROOT / ".exports"))
+    # Hours before export files expire and can be deleted
+    EXPORT_FILE_EXPIRY_HOURS = _get_int_env("EXPORT_FILE_EXPIRY_HOURS", 24)
+    
     # --- Database Settings ---
     DATABASE_URL = _get_val("DATABASE_URL", "sqlite:///./legalassist.db")
 
