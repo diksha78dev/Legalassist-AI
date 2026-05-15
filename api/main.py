@@ -157,6 +157,15 @@ def create_app() -> FastAPI:
     async def startup_event():
         """Initialize on startup"""
         initialize_observability_for_environment()
+        
+        if settings.RATE_LIMIT_ENABLED:
+            logger.info(
+                "Rate limiter enabled",
+                redis_url=settings.REDIS_URL,
+                requests=settings.RATE_LIMIT_REQUESTS,
+                window=settings.RATE_LIMIT_WINDOW
+            )
+        
         logger.info(
             "API Starting",
             version=settings.API_VERSION,
