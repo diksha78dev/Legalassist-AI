@@ -18,7 +18,7 @@ from observability.instrumentation import (
     traced_operation,
 )
 
-from api.limiter import limiter, RateLimitExceeded
+from api.limiter import limiter, RateLimitExceeded, resolve_rate_limit_identifier
 from api.config import get_settings
 
 settings = get_settings()
@@ -39,12 +39,8 @@ async def rate_limit_middleware(request: Request, call_next: Callable):
     if path in ["/api/v1/health", "/api/v1/health/ready", "/api/v1/health/live", "/metrics", "/"]:
         return await call_next(request)
     
-    # Identify the client
-    # Priority: X-User-Id header > IP Address
-    identifier = request.headers.get("X-User-Id")
-    if not identifier:
-        # Fallback to IP address
-        identifier = request.client.host if request.client else "127.0.0.1"
+    # Identify the client using validated credentials first, then source IP.
+    identifier = resolve_rate_limit_identifier(request)
     
     # Check rate limit using the sliding window engine
     # We use a broad 'global' endpoint identifier for the middleware limit
@@ -98,7 +94,7 @@ async def add_correlation_id_middleware(request: Request, call_next: Callable):
     
     request.state.correlation_id = correlation_id
     request.state.request_id = correlation_id
-    request.state.user_id = request.headers.get("X-User-Id") or request.headers.get("Authorization")
+    request.state.user_id = identifier
     
     try:
         response = await call_next(request)
