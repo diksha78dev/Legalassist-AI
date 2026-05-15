@@ -8,7 +8,13 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status, De
 from fastapi import Request
 from api.models import DocumentAnalysisRequest, DocumentAnalysisSummary, AnalysisJobResponse
 from api.auth import get_current_user, CurrentUser
-from celery_app import analyze_document_task, TaskStatus
+from celery_app import analyze_document_task, TaskStatus, enqueue_task_from_http_request
+from api.validation import (
+    validate_file_upload,
+    validate_text_input,
+    validate_file_upload_streaming,
+    ValidationConfig,
+)
 import structlog
 
 router = APIRouter(prefix="/api/v1/analyze", tags=["document-analysis"])
@@ -45,6 +51,10 @@ async def analyze_document(
             detail="Must provide file_url, file_path, or text"
         )
     
+    # Validate text input if provided
+    if request.text:
+        validate_text_input(request.text, max_length=ValidationConfig.MAX_TEXT_LENGTH)
+    
     # Generate document ID and job ID
     document_id = str(uuid.uuid4())
     job_id = str(uuid.uuid4())
@@ -58,12 +68,14 @@ async def analyze_document(
     
     # Queue async task
     text = request.text or f"Content from {request.file_url or request.file_path}"
-    task = analyze_document_task.delay(
+    task = enqueue_task_from_http_request(
+        analyze_document_task,
+        http_request,
+        context_user_id=current_user.user_id,
         user_id=current_user.user_id,
         document_id=document_id,
         text=text,
         document_type=request.document_type,
-        request_id=getattr(http_request.state, "request_id", None),
     )
     
     return AnalysisJobResponse(
@@ -148,3 +160,89 @@ async def cancel_analysis(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Failed to cancel job"
         )
+
+
+@router.post(
+    "/upload",
+    response_model=AnalysisJobResponse,
+    summary="Upload document file for analysis",
+    description="Upload a PDF, Word, or text file for legal analysis."
+)
+async def upload_document_file(
+    file: UploadFile = File(...),
+    document_type: str = Form(default="unknown"),
+    http_request: Request = Depends(),
+    current_user: CurrentUser = Depends(get_current_user)
+) -> AnalysisJobResponse:
+    """
+    Upload and analyze a document file asynchronously
+    
+    - **file**: Document file (PDF, DOCX, DOC, TXT, HTML, RTF)
+    - **document_type**: Type of document (contract, lawsuit, etc.)
+    
+    Returns job ID to track progress
+    """
+    import uuid
+    
+    try:
+        # Validate file metadata upfront
+        validate_file_upload(
+            file,
+            max_size=ValidationConfig.MAX_UPLOAD_SIZE,
+            allowed_extensions=ValidationConfig.ALLOWED_EXTENSIONS,
+            allowed_mime_types=ValidationConfig.ALLOWED_MIME_TYPES,
+        )
+        
+        # Validate file size during streaming read
+        bytes_read = await validate_file_upload_streaming(
+            file,
+            max_size=ValidationConfig.MAX_UPLOAD_SIZE,
+        )
+        
+        logger.info(
+            "File uploaded successfully",
+            user_id=current_user.user_id,
+            filename=file.filename,
+            size_bytes=bytes_read,
+            document_type=document_type,
+        )
+        
+        # Read file content
+        file_content = await file.read()
+        
+        # Generate IDs
+        document_id = str(uuid.uuid4())
+        
+        logger.info(
+            "Starting document analysis from upload",
+            user_id=current_user.user_id,
+            document_id=document_id,
+            filename=file.filename,
+        )
+        
+        # Queue async task with context propagation
+        text = file_content.decode("utf-8", errors="ignore")
+        task = enqueue_task_from_http_request(
+            analyze_document_task,
+            http_request,
+            context_user_id=current_user.user_id,
+            user_id=current_user.user_id,
+            document_id=document_id,
+            text=text,
+            document_type=document_type,
+        )
+        
+        return AnalysisJobResponse(
+            job_id=task.id,
+            status="pending",
+            created_at=__import__('datetime').datetime.utcnow()
+        )
+    
+    except Exception as e:
+        logger.error(
+            "File upload failed",
+            user_id=current_user.user_id,
+            filename=file.filename,
+            error=str(e),
+        )
+        raise

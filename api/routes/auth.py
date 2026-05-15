@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, status, Depends
 from datetime import datetime, timedelta
 from api.auth import create_access_token, generate_api_key, hash_api_key, CurrentUser, get_current_user
 from api.models import TokenResponse, APIKeyCreate, APIKeyResponse
+from api.limiter import RateLimit
 import structlog
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
@@ -17,7 +18,8 @@ logger = structlog.get_logger(__name__)
 @router.post(
     "/token",
     response_model=TokenResponse,
-    summary="Get access token"
+    summary="Get access token",
+    dependencies=[Depends(RateLimit(use_auth_defaults=True))]
 )
 async def get_token(
     username: str,

@@ -1,32 +1,44 @@
-"""Secure helpers for attachment path resolution."""
-
-from __future__ import annotations
-
 import os
+import uuid
 from pathlib import Path
+from typing import Tuple
+from config import Config
+
+ATTACHMENTS_DIR = Path(Config.ATTACHMENTS_DIR)
+
+# Ensure directory exists
+os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
 
 
-ATTACHMENTS_DIR = Path(
-    os.getenv("ATTACHMENTS_DIR", Path(__file__).resolve().parent.parent / "attachments")
-).resolve()
-
-
-def get_attachment_path(stored_path: str) -> Path:
-    """Return a safe path for an attachment stored under ATTACHMENTS_DIR.
-
-    Only the basename is used so path traversal segments like ``../`` are discarded.
-    The final resolved path must still live inside ``ATTACHMENTS_DIR``.
+def save_attachment(file_bytes: bytes, original_filename: str) -> Tuple[str, int]:
     """
+    Save attachment bytes to the attachments directory.
+    Returns (stored_path, size_bytes).
+    """
+    # Randomize filename to avoid collisions and sensitive names
+    ext = Path(original_filename).suffix or ""
+    if Config.ATTACHMENTS_RANDOMIZE_FILENAMES:
+        stored_name = f"{uuid.uuid4().hex}{ext}"
+    else:
+        # sanitize filename minimally
+        safe_name = Path(original_filename).name.replace("..", "")
+        stored_name = safe_name
 
-    filename = os.path.basename(str(stored_path).strip())
-    if not filename:
-        raise ValueError("Attachment path must include a filename")
+    stored_path = ATTACHMENTS_DIR / stored_name
 
-    candidate = (ATTACHMENTS_DIR / filename).resolve()
+    # Write file
+    with open(stored_path, "wb") as f:
+        f.write(file_bytes)
 
-    try:
-        candidate.relative_to(ATTACHMENTS_DIR)
-    except ValueError as exc:
-        raise ValueError("Resolved attachment path escapes the attachments directory") from exc
+    size = stored_path.stat().st_size
+    return str(stored_path), size
 
-    return candidate
+
+def get_attachment_path(stored_path: str) -> str:
+    """Return full path for a stored attachment (no security checks)."""
+    if not stored_path:
+        return ""
+    p = Path(stored_path)
+    if not p.exists():
+        return ""
+    return str(p)

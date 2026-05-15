@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.openapi.utils import get_openapi
+from fastapi import status
 import structlog
 
 from api.config import get_settings
@@ -14,10 +15,17 @@ from api.middleware import (
     rate_limit_middleware,
     add_correlation_id_middleware,
     error_handling_middleware,
-    logging_middleware
+    logging_middleware,
+    request_size_limit_middleware
 )
+from api.limiter import cleanup_limiter
 from observability.integration import initialize_observability_for_environment
 from observability.instrumentation import get_metrics
+from api.validation import (
+    ValidationConfig,
+    ValidationError,
+    PayloadTooLargeError,
+)
 
 # Import routes
 from api.routes import documents, cases, reports, analytics, deadlines, auth, health, case_search
@@ -59,7 +67,11 @@ def create_app() -> FastAPI:
         middleware=middleware
     )
     
+    # Initialize validation config from settings
+    ValidationConfig.from_settings(settings)
+    
     # Add middleware
+    app.middleware("http")(request_size_limit_middleware)
     app.middleware("http")(add_correlation_id_middleware)
     app.middleware("http")(logging_middleware)
     app.middleware("http")(error_handling_middleware)
@@ -86,6 +98,40 @@ def create_app() -> FastAPI:
     # ========================================================================
     # Global Exception Handlers
     # ========================================================================
+    
+    @app.exception_handler(ValidationError)
+    async def validation_error_handler(request: Request, exc: ValidationError):
+        """Handle validation errors"""
+        logger.warning(
+            "validation_error",
+            path=request.url.path,
+            detail=exc.detail
+        )
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "error_code": "VALIDATION_ERROR",
+                "message": exc.detail
+            }
+        )
+    
+    @app.exception_handler(PayloadTooLargeError)
+    async def payload_too_large_handler(request: Request, exc: PayloadTooLargeError):
+        """Handle payload too large errors"""
+        logger.warning(
+            "payload_too_large",
+            path=request.url.path,
+            detail=exc.detail
+        )
+        return JSONResponse(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            content={
+                "error_code": "PAYLOAD_TOO_LARGE",
+                "message": exc.detail,
+                "status_code": 413
+            },
+            headers={"Retry-After": "60"}
+        )
     
     @app.exception_handler(Exception)
     async def generic_exception_handler(request: Request, exc: Exception):
@@ -120,6 +166,7 @@ def create_app() -> FastAPI:
     @app.on_event("shutdown")
     async def shutdown_event():
         """Cleanup on shutdown"""
+        await cleanup_limiter()
         logger.info("API Shutting down")
     
     # ========================================================================

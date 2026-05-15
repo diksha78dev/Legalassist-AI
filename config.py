@@ -49,22 +49,40 @@ class Config:
     LOG_LEVEL = _get_val("LOG_LEVEL", "INFO")
     
     # --- Model Settings (LLM) ---
-    # Default model for summary and remedies
+    # The primary model used for generating summaries and legal remedies analysis.
+    # Default is Llama 3.1 8B Instruct via OpenRouter.
     DEFAULT_MODEL = _get_val("DEFAULT_MODEL", "meta-llama/llama-3.1-8b-instruct")
+    
+    # Base URL for the OpenAI-compatible API (OpenRouter is used by default).
     OPENROUTER_BASE_URL = _get_val("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+    
+    # API Key for OpenRouter. Must be provided for the AI features to work.
     OPENROUTER_API_KEY = _get_val("OPENROUTER_API_KEY", "")
     
-    # --- Embedding Model Settings ---
-    OPENAI_API_KEY = _get_val("OPENAI_API_KEY", "")
-    EMBEDDING_MODEL = _get_val("EMBEDDING_MODEL", "text-embedding-3-small")
-    EMBEDDING_DIMENSION = _get_int_env("EMBEDDING_DIMENSION", 1536)
-    
-    # LLM Hyperparameters
+    # --- AI Request Performance & Reliability ---
+    # The maximum number of tokens allowed for judgment summaries.
     SUMMARY_MAX_TOKENS = _get_int_env("SUMMARY_MAX_TOKENS", 280)
-    REMEDIES_MAX_TOKENS = _get_int_env("REMEDIES_MAX_TOKENS", 900)
-    LLM_TEMPERATURE = float(_get_val("LLM_TEMPERATURE", "0.05"))
-    LLM_TIMEOUT = float(_get_val("LLM_TIMEOUT", "60.0"))
     
+    # The maximum number of tokens allowed for legal remedies analysis.
+    REMEDIES_MAX_TOKENS = _get_int_env("REMEDIES_MAX_TOKENS", 900)
+    
+    # Controls the randomness of the AI output. 
+    # Lower values (0.0-0.2) make the output more deterministic and focused.
+    LLM_TEMPERATURE = float(_get_val("LLM_TEMPERATURE", "0.05"))
+    
+    # The timeout in seconds for AI model API requests. 
+    # This is critical for preventing the application from hanging on slow network calls.
+    AI_REQUEST_TIMEOUT = float(_get_val("AI_REQUEST_TIMEOUT", _get_val("LLM_TIMEOUT", "60.0")))
+    
+    # Alias for backward compatibility with legacy code.
+    LLM_TIMEOUT = AI_REQUEST_TIMEOUT 
+    
+    # The maximum number of retry attempts for failed AI requests (e.g., on rate limits).
+    AI_MAX_RETRIES = _get_int_env("AI_MAX_RETRIES", 3)
+    
+    # The base delay in seconds for exponential backoff during retries.
+    AI_RETRY_BACKOFF_BASE = float(_get_val("AI_RETRY_BACKOFF_BASE", "2.0"))
+
     # --- OCR Settings ---
     OCR_ENABLED = _get_bool_env("OCR_ENABLED", False)
     OCR_LANGUAGES = _get_val("OCR_LANGUAGES", "eng+hin")
@@ -74,9 +92,11 @@ class Config:
     MAX_FILE_SIZE_MB = _get_int_env("MAX_FILE_SIZE_MB", 25)
     WARN_FILE_SIZE_MB = _get_int_env("WARN_FILE_SIZE_MB", 10)
     TEXT_COMPRESSION_LIMIT = _get_int_env("TEXT_COMPRESSION_LIMIT", 6000)
-
-    # --- Redis / Async Infrastructure ---
-    REDIS_URL = _get_val("REDIS_URL", "redis://localhost:6379/0")
+    # --- Attachments ---
+    # Directory where uploaded attachments are stored (development)
+    ATTACHMENTS_DIR = _get_val("ATTACHMENTS_DIR", str(PROJECT_ROOT / "attachments"))
+    # Use randomized filenames to avoid collisions and leaking original names
+    ATTACHMENTS_RANDOMIZE_FILENAMES = _get_bool_env("ATTACHMENTS_RANDOMIZE_FILENAMES", True)
     
     # --- Database Settings ---
     DATABASE_URL = _get_val("DATABASE_URL", "sqlite:///./legalassist.db")
@@ -96,33 +116,22 @@ class Config:
         """
         Resolve JWT secret securely.
         
-        Order of precedence:
-        1. Environment variable or Streamlit secret 'JWT_SECRET'
-        2. File-based secret in '.jwt_secret' (legacy/local development)
+        JWT_SECRET must be provided via environment variable or Streamlit secrets.
+        File-based secrets are no longer supported for security.
         
-        NOTE: Automatic generation and writing of .jwt_secret has been disabled 
-        for security in all environments.
+        Raises:
+            RuntimeError: If JWT_SECRET is not configured in environment variables.
         """
         secret = str(_get_val("JWT_SECRET", "")).strip()
         if secret:
             return secret
-            
-        secret_file = PROJECT_ROOT / ".jwt_secret"
-        if secret_file.exists():
-            try:
-                file_secret = secret_file.read_text(encoding="utf-8").strip()
-                if file_secret:
-                    return file_secret
-            except Exception as e:
-                logger.warning(f"Failed to read .jwt_secret file: {e}")
         
-        # We no longer auto-generate secrets to prevent insecure fallback.
-        # This forces explicit configuration which is a security best practice.
         env_name = cls.APP_ENV.upper()
         raise RuntimeError(
             f"JWT_SECRET is not configured for the {env_name} environment. "
             "For security, secrets must be explicitly provided via the 'JWT_SECRET' "
-            "environment variable or a manually created '.jwt_secret' file in the root."
+            "environment variable. Consider using AWS Secrets Manager or HashiCorp Vault "
+            "for production secret management."
         )
 
     # --- Notification Settings (SMS) ---
@@ -141,6 +150,9 @@ class Config:
     def get_sendgrid_api_key(cls) -> str:
         """Return the SendGrid API key, retrieved on demand to limit exposure."""
         return str(_get_val("SENDGRID_API_KEY", "") or "")
+
+    # --- Application URLs ---
+    BASE_URL = _get_val("BASE_URL", "https://legalassist.ai")
 
     @classmethod
     def is_development(cls):

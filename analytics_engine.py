@@ -9,49 +9,490 @@ import os
 import re
 from collections import Counter
 import logging
+import pandas as pd
+import numpy as np
+import gc
+import sys
+import time
+from sqlalchemy.orm import Query
 
 logger = logging.getLogger(__name__)
 
 
-def _normalize_text(value: Optional[str]) -> str:
-    return (value or "").strip().lower()
+class MemoryOptimizationMixin:
+    """
+    Mixin providing utilities for memory management during intensive data operations.
+    
+    This mixin provides methods to trigger garbage collection and monitor memory
+    usage, which is critical when processing large legal datasets that can
+    otherwise lead to OOM (Out of Memory) crashes.
+    """
+
+    @staticmethod
+    def trigger_garbage_collection(force: bool = False):
+        """
+        Manually trigger Python's garbage collector to reclaim memory.
+        
+        This is particularly important when processing large lists of SQLAlchemy 
+        objects which can remain in memory even after they are no longer used 
+        due to the session's identity map or cyclic references.
+        
+        Args:
+            force: If True, performs a more aggressive collection (generation 2).
+        """
+        if force:
+            # Generation 2 collection is the most thorough but slowest
+            collected = gc.collect(2)
+        else:
+            # Default collection handles most common leak scenarios
+            collected = gc.collect()
+        
+        logger.debug(f"Garbage collection triggered. Objects collected: {collected}")
+
+    @staticmethod
+    def log_memory_stats():
+        """
+        Log current memory usage of the process to help diagnose leaks.
+        
+        Utilizes psutil if available to provide real-time Resident Set Size (RSS)
+        monitoring during large-scale data processing loops.
+        """
+        try:
+            import psutil
+            process = psutil.Process()
+            mem_info = process.memory_info()
+            logger.info(f"Process Memory Usage: {mem_info.rss / (1024 * 1024):.2f} MB")
+        except ImportError:
+            # Fallback for environments where psutil is not installed
+            logger.debug("psutil not installed, skipping detailed memory stats logging.")
 
 
-def _token_set(value: Optional[str]) -> set[str]:
-    tokens = re.findall(r"[a-z0-9]+", _normalize_text(value))
-    return {token for token in tokens if len(token) > 2}
+class BatchReportGenerator(MemoryOptimizationMixin):
+    """
+    High-performance engine for generating large-scale legal reports.
+    
+    Specifically designed to handle datasets exceeding 10,000 cases by
+    utilizing SQLAlchemy's `yield_per()` for streaming results and
+    manual memory management to prevent object reference accumulation.
+    
+    The generator follows a 'process-and-purge' pattern:
+    1. Stream records in fixed-size batches from the DB.
+    2. Aggregate metrics into lightweight Python primitives.
+    3. Periodically clear the SQLAlchemy session.
+    4. Manually trigger garbage collection.
+    """
+
+    def __init__(self, db: Session, batch_size: int = 1000):
+        """
+        Initialize the generator with a database session and batch size.
+        
+        Args:
+            db: The SQLAlchemy Session to use for queries.
+            batch_size: Number of records to process before clearing memory.
+        """
+        self.db = db
+        self.batch_size = batch_size
+
+    def generate_comprehensive_report(
+        self, 
+        base_query: Query,
+        report_name: str = "Analytical Report"
+    ) -> Dict:
+        """
+        Processes a large query in batches and aggregates results into a summary report.
+        
+        This method is the primary fix for memory leaks in report generation.
+        It avoids loading all CaseRecord objects into memory at once by using
+        the 'yield_per' streaming strategy.
+        
+        Args:
+            base_query: The SQLAlchemy query representing the dataset.
+            report_name: Descriptive name for logging and metadata.
+            
+        Returns:
+            A dictionary containing aggregated metrics and processing metadata.
+        """
+        logger.info(f"Starting batch-optimized report generation: {report_name}")
+        self.log_memory_stats()
+
+        total_processed = 0
+        metrics = {
+            "total_count": 0,
+            "outcomes": Counter(),
+            "jurisdictions": Counter(),
+            "case_types": Counter(),
+            "total_appeal_cost": 0.0,
+            "appeal_count": 0,
+            "start_time": datetime.now(timezone.utc),
+        }
+
+        # ---------------------------------------------------------------------
+        # FIX: Use yield_per() to stream results from the database.
+        # This prevents SQLAlchemy from loading the entire result set into 
+        # the session's identity map at once. Note that yield_per() requires
+        # the DB driver to support server-side cursors.
+        # ---------------------------------------------------------------------
+        try:
+            # We process one record at a time but fetch them in batch_size chunks
+            stream = base_query.yield_per(self.batch_size)
+            
+            for i, case in enumerate(stream):
+                # Update metrics using primitives to avoid keeping references
+                metrics["total_count"] += 1
+                metrics["outcomes"][str(case.outcome).lower()] += 1
+                metrics["jurisdictions"][str(case.jurisdiction)] += 1
+                metrics["case_types"][str(case.case_type).lower()] += 1
+                
+                # Safely process nested outcome data
+                outcome_data = getattr(case, "outcome_data", None)
+                if outcome_data and getattr(outcome_data, "appeal_filed", False):
+                    metrics["appeal_count"] += 1
+                    cost = _parse_cost_value(getattr(outcome_data, "appeal_cost", None))
+                    if cost:
+                        metrics["total_appeal_cost"] += cost
+
+                total_processed += 1
+
+                # -------------------------------------------------------------
+                # PERIODIC CLEANUP: Every batch_size records, we clear the 
+                # session and trigger GC to free up memory from processed objects.
+                # -------------------------------------------------------------
+                if total_processed % self.batch_size == 0:
+                    logger.info(f"Checkpoint: Processed {total_processed} cases. Optimizing memory...")
+                    # Expunge all objects from session to allow GC to claim them
+                    self.db.expunge_all() 
+                    self.trigger_garbage_collection()
+                    self.log_memory_stats()
+
+        except Exception as e:
+            logger.error(f"Critical error during batch report generation: {str(e)}")
+            # Ensure we still attempt to clear memory even on failure
+            self.db.expunge_all()
+            gc.collect()
+            raise
+
+        metrics["end_time"] = datetime.now(timezone.utc)
+        metrics["duration_seconds"] = (metrics["end_time"] - metrics["start_time"]).total_seconds()
+        
+        logger.info(f"Batch report completed. Total records processed: {total_processed}")
+        self.trigger_garbage_collection(force=True)
+        
+        return self._finalize_report(metrics)
+
+    def _finalize_report(self, raw_metrics: Dict) -> Dict:
+        """
+        Post-processes raw counters and sums into a structured response.
+        
+        Args:
+            raw_metrics: Dictionary of raw aggregated values.
+            
+        Returns:
+            A polished dictionary with percentages and formatted data.
+        """
+        total = raw_metrics["total_count"]
+        if total == 0:
+            return {
+                "status": "empty", 
+                "total_cases": 0,
+                "message": "No data found matching the provided filters."
+            }
+
+        return {
+            "metadata": {
+                "generated_at": raw_metrics["end_time"].isoformat(),
+                "execution_time_seconds": round(raw_metrics["duration_seconds"], 2),
+                "total_records": total,
+                "engine_version": "2.0.0-batched"
+            },
+            "outcomes": {
+                k: {"count": v, "pct": round((v / total) * 100, 2)}
+                for k, v in raw_metrics["outcomes"].items()
+            },
+            "demographics": {
+                "top_jurisdictions": [
+                    {"name": k, "count": v} 
+                    for k, v in raw_metrics["jurisdictions"].most_common(10)
+                ],
+                "case_type_split": [
+                    {"type": k, "count": v}
+                    for k, v in raw_metrics["case_types"].items()
+                ]
+            },
+            "financials": {
+                "total_estimated_appeal_cost": raw_metrics["total_appeal_cost"],
+                "average_appeal_cost": (
+                    raw_metrics["total_appeal_cost"] / raw_metrics["appeal_count"]
+                    if raw_metrics["appeal_count"] > 0 else 0
+                ),
+                "appeal_frequency_rate": round((raw_metrics["appeal_count"] / total) * 100, 2),
+            }
+        }
 
 
-def _summary_overlap(reference: Optional[str], candidate: Optional[str]) -> float:
-    reference_tokens = _token_set(reference)
-    candidate_tokens = _token_set(candidate)
-    if not reference_tokens or not candidate_tokens:
-        return 0.0
-    union = reference_tokens | candidate_tokens
-    if not union:
-        return 0.0
-    return len(reference_tokens & candidate_tokens) / len(union)
+class PandasAnalyticsProcessor:
+    """
+    Advanced analytics engine utilizing Pandas for complex data transformations.
+    
+    This class provides high-performance data processing for legal case records,
+    bridging the gap between SQLAlchemy ORM objects and analytical DataFrames.
+    
+    The implementation is specifically designed to be defensive against the
+    infamous 'SettingWithCopyWarning' by ensuring that all filtered subsets
+    are explicitly detached from the parent DataFrame before modification.
+    """
 
+    @staticmethod
+    def convert_cases_to_dataframe(cases: List[CaseRecord]) -> pd.DataFrame:
+        """
+        Transform a list of SQLAlchemy CaseRecord objects into a Pandas DataFrame.
+        
+        Extracts both primary record data and nested outcome information into
+        a flat structure suitable for vectorised operations.
+        
+        Args:
+            cases: List of CaseRecord database objects.
+            
+        Returns:
+            A populated pd.DataFrame with normalized columns.
+        """
+        if not cases:
+            return pd.DataFrame()
 
-def _parse_cost_value(cost_text: Optional[str]) -> Optional[float]:
-    if not cost_text:
-        return None
+        # This method is suitable for small lists (< 5000 cases)
+        data_list = []
+        for case in cases:
+            row = PandasAnalyticsProcessor._extract_case_row(case)
+            data_list.append(row)
 
-    numbers = [int(match.replace(",", "")) for match in re.findall(r"\d[\d,]*", cost_text)]
-    if not numbers:
-        return None
+        return pd.DataFrame(data_list)
 
-    return float(sum(numbers) / len(numbers))
+    @staticmethod
+    def convert_query_to_dataframe_batched(
+        db: Session,
+        query: Query, 
+        batch_size: int = 2000
+    ) -> pd.DataFrame:
+        """
+        Memory-efficient conversion of a large query into a DataFrame.
+        
+        Uses yield_per() and periodic session clearing to handle 10,000+ 
+        records without leaking memory or causing OOM crashes.
+        
+        Args:
+            db: The active database session.
+            query: The SQLAlchemy query object to execute.
+            batch_size: Number of records to process per memory cycle.
+            
+        Returns:
+            A single concatenated pd.DataFrame containing all results.
+        """
+        all_chunks = []
+        current_chunk_data = []
+        total_processed = 0
 
+        logger.info(f"Converting large query to DataFrame using batch size {batch_size}")
+        
+        # Stream results using server-side cursors where possible
+        stream = query.yield_per(batch_size)
+        
+        for case in stream:
+            # Flatten DB object into a simple dict immediately
+            current_chunk_data.append(PandasAnalyticsProcessor._extract_case_row(case))
+            total_processed += 1
+            
+            if total_processed % batch_size == 0:
+                # Convert the current list to a DataFrame chunk and store
+                chunk_df = pd.DataFrame(current_chunk_data)
+                all_chunks.append(chunk_df)
+                
+                # Clear the temporary list to free list-specific memory
+                current_chunk_data = []
+                
+                # CRITICAL: Clear the session identity map and trigger GC
+                db.expunge_all()
+                gc.collect()
+                logger.debug(f"Memory optimization checkpoint: {total_processed} records batched.")
 
-def _confidence_from_samples(sample_count: int) -> str:
-    if sample_count >= 25:
-        return "high"
-    if sample_count >= 12:
-        return "medium"
-    if sample_count >= 5:
-        return "low"
-    return "very_low"
+        # Handle the final partial batch
+        if current_chunk_data:
+            all_chunks.append(pd.DataFrame(current_chunk_data))
+
+        if not all_chunks:
+            return pd.DataFrame()
+
+        # Concatenate all chunks into the final result set
+        final_df = pd.concat(all_chunks, ignore_index=True)
+        
+        # Release the chunk list as early as possible
+        del all_chunks
+        gc.collect()
+        
+        logger.info(f"Batched conversion complete. Final DataFrame size: {len(final_df)} rows.")
+        return final_df
+
+    @staticmethod
+    def _extract_case_row(case: CaseRecord) -> Dict:
+        """
+        Internal utility to transform a CaseRecord into a flat dictionary.
+        
+        Decouples the analytical data from the SQLAlchemy ORM layer.
+        """
+        row = {
+            "id": case.id,
+            "case_type": str(case.case_type).lower() if case.case_type else "unknown",
+            "jurisdiction": str(case.jurisdiction) if case.jurisdiction else "Unknown",
+            "court_name": str(case.court_name) if case.court_name else "N/A",
+            "judge_name": str(case.judge_name) if case.judge_name else "N/A",
+            "outcome": str(case.outcome).lower() if case.outcome else "pending",
+            "created_at": case.created_at,
+        }
+        
+        # Safely handle the one-to-one relationship with CaseOutcome
+        outcome_data = getattr(case, "outcome_data", None)
+        if outcome_data:
+            row.update({
+                "appeal_filed": bool(getattr(outcome_data, "appeal_filed", False)),
+                "appeal_success": bool(getattr(outcome_data, "appeal_success", False)),
+                "appeal_cost": getattr(outcome_data, "appeal_cost", None),
+                "time_to_verdict": getattr(outcome_data, "time_to_appeal_verdict", None),
+            })
+        else:
+            row.update({
+                "appeal_filed": False,
+                "appeal_success": False,
+                "appeal_cost": None,
+                "time_to_verdict": None,
+            })
+        return row
+
+    @staticmethod
+    def get_jurisdiction_performance_report(
+        df: pd.DataFrame, 
+        jurisdiction_name: str
+    ) -> pd.DataFrame:
+        """
+        Generate a detailed performance report for a specific jurisdiction.
+        
+        CRITICAL FIX: This method explicitly uses .copy() when creating the 
+        subset DataFrame. This prevents 'SettingWithCopyWarning' when adding 
+        calculated success metrics and ensures that modifications to the 
+        jurisdiction-specific data do not unintentionally affect the global 
+        dataset or trigger Pandas' defensive warnings.
+        
+        Args:
+            df: The master cases DataFrame.
+            jurisdiction_name: The name of the jurisdiction to analyze.
+            
+        Returns:
+            A processed DataFrame with calculated success metrics.
+        """
+        if df.empty or 'jurisdiction' not in df.columns:
+            return pd.DataFrame()
+
+        # ---------------------------------------------------------------------
+        # STEP 1: Create a filtered subset of the data.
+        # We EXPLICITLY call .copy() here. This is the core fix for the
+        # SettingWithCopyWarning. By doing this, we create a new memory object
+        # that is independent of the original 'df'.
+        # ---------------------------------------------------------------------
+        jur_df = df[df['jurisdiction'] == jurisdiction_name].copy()
+
+        if jur_df.empty:
+            return jur_df
+
+        # ---------------------------------------------------------------------
+        # STEP 2: Apply data transformations.
+        # Since 'jur_df' is a clean copy, these assignments are safe and 
+        # predictable. We are no longer operating on a 'view' of the original data.
+        # ---------------------------------------------------------------------
+        
+        # Calculate boolean flags for success
+        jur_df['is_plaintiff_win'] = jur_df['outcome'].str.contains('plaintiff_won', na=False)
+        jur_df['is_defendant_win'] = jur_df['outcome'].str.contains('defendant_won', na=False)
+        jur_df['is_settlement'] = jur_df['outcome'].str.contains('settlement', na=False)
+        
+        # Calculate win rates using cumulative sums for trend analysis
+        # (Assuming the DF is sorted by date)
+        jur_df = jur_df.sort_values('created_at')
+        
+        jur_df['cumulative_cases'] = range(1, len(jur_df) + 1)
+        jur_df['cumulative_wins'] = jur_df['is_plaintiff_win'].cumsum()
+        jur_df['running_win_rate'] = (jur_df['cumulative_wins'] / jur_df['cumulative_cases']) * 100
+
+        # Calculate appeal indicators
+        jur_df['appeal_status'] = jur_df.apply(
+            lambda x: "Appealed" if x['appeal_filed'] else "Final", 
+            axis=1
+        )
+        
+        # Cleanup and return
+        return jur_df
+
+    @staticmethod
+    def analyze_judge_patterns(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Group data by judge to identify success patterns and appeal rates.
+        
+        Uses aggregation to provide high-level metrics for the analytics dashboard.
+        
+        Args:
+            df: The master cases DataFrame.
+            
+        Returns:
+            A DataFrame indexed by judge with aggregated metrics.
+        """
+        if df.empty:
+            return pd.DataFrame()
+
+        # Grouping and aggregation
+        judge_stats = df.groupby('judge_name').agg({
+            'id': 'count',
+            'appeal_filed': 'sum',
+            'appeal_success': 'sum',
+        }).rename(columns={'id': 'total_cases', 'appeal_filed': 'appeals_filed'})
+
+        # Calculate percentages
+        judge_stats['appeal_rate'] = (judge_stats['appeals_filed'] / judge_stats['total_cases']) * 100
+        judge_stats['appeal_success_rate'] = (
+            judge_stats['appeal_success'] / judge_stats['appeals_filed']
+        ).fillna(0) * 100
+
+        # Create a copy for the final ranking to be safe
+        ranked_stats = judge_stats.sort_values('appeal_success_rate', ascending=False).copy()
+        
+        return ranked_stats
+
+    @staticmethod
+    def identify_case_correlations(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Perform correlation analysis between case types and outcomes.
+        
+        This helps identify if certain jurisdictions are 'pro-plaintiff' for
+        specific types of legal disputes.
+        
+        Args:
+            df: The master cases DataFrame.
+            
+        Returns:
+            A pivot table showing win rates by jurisdiction and case type.
+        """
+        if df.empty:
+            return pd.DataFrame()
+
+        # Create a temporary copy to avoid modifying the original during processing
+        temp_df = df.copy()
+        temp_df['is_win'] = temp_df['outcome'].str.contains('plaintiff_won', na=False).astype(int)
+
+        # Create pivot table
+        pivot = pd.pivot_table(
+            temp_df,
+            values='is_win',
+            index='jurisdiction',
+            columns='case_type',
+            aggfunc='mean'
+        ) * 100
+
+        return pivot.fillna(0)
 
 
 class CaseSimilarityCalculator:
@@ -220,10 +661,10 @@ class AnalyticsCalculator:
         """Calculate statistics for a specific court using aggregates"""
         query = db.query(
             func.count(CaseRecord.id).label('total'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('plaintiff_won'), 1), else_=0)).label('p_wins'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('defendant_won'), 1), else_=0)).label('d_wins'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('settlement'), 1), else_=0)).label('settlements'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('dismissal'), 1), else_=0)).label('dismissals'),
+            func.sum(sql_case((CaseRecord.outcome == 'plaintiff_won', 1), else_=0)).label('p_wins'),
+            func.sum(sql_case((CaseRecord.outcome == 'defendant_won', 1), else_=0)).label('d_wins'),
+            func.sum(sql_case((CaseRecord.outcome == 'settlement', 1), else_=0)).label('settlements'),
+            func.sum(sql_case((CaseRecord.outcome == 'dismissal', 1), else_=0)).label('dismissals'),
             func.sum(sql_case((CaseOutcome.appeal_filed == True, 1), else_=0)).label('appeals')
         ).join(CaseOutcome, CaseRecord.id == CaseOutcome.case_id, isouter=True).filter(
             CaseRecord.court_name == court_name
@@ -270,7 +711,7 @@ class AnalyticsCalculator:
         stats_by_type = db.query(
             CaseRecord.case_type,
             func.count(CaseRecord.id).label('count'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('plaintiff_won'), 1), else_=0)).label('wins')
+func.sum(sql_case((CaseRecord.outcome == 'plaintiff_won'), 1), else_=0)).label('wins')
         ).filter(CaseRecord.jurisdiction == jurisdiction).group_by(CaseRecord.case_type).all()
         
         type_stats = {}
@@ -474,13 +915,22 @@ class PredictiveAnalyticsEngine:
         plaintiff_type: Optional[str] = None,
         defendant_type: Optional[str] = None,
         limit: int = 1000,
+        streaming_mode: bool = False
     ):
+        """
+        Internal utility to build a filtered query for candidate cases.
+        
+        Refactored to support either direct result fetching or returning 
+        the Query object for memory-efficient batch processing (streaming_mode).
+        """
+        # We always joinedload outcome_data as it's frequently accessed in predictions
         query = db.query(CaseRecord).options(joinedload(CaseRecord.outcome_data))
 
         normalized_case_type = _normalize_text(case_type)
         if normalized_case_type and normalized_case_type != "general":
             query = query.filter(func.lower(CaseRecord.case_type) == normalized_case_type)
 
+        # Apply specific filters if provided
         if jurisdiction:
             query = query.filter(func.lower(CaseRecord.jurisdiction) == _normalize_text(jurisdiction))
         if court_name:
@@ -492,7 +942,14 @@ class PredictiveAnalyticsEngine:
         if defendant_type:
             query = query.filter(func.lower(CaseRecord.defendant_type) == _normalize_text(defendant_type))
 
-        return query.order_by(CaseRecord.created_at.desc()).limit(limit).all()
+        ordered_query = query.order_by(CaseRecord.created_at.desc())
+        
+        if streaming_mode:
+            # Return the Query object so caller can use yield_per()
+            return ordered_query
+        
+        # Return a limited list for immediate consumption
+        return ordered_query.limit(limit).all()
 
     @staticmethod
     def _score_case_profile(
@@ -912,7 +1369,7 @@ class PredictiveAnalyticsEngine:
         judge_rows = db.query(
             CaseRecord.judge_name,
             func.count(CaseRecord.id).label("total_cases"),
-            func.sum(sql_case((CaseRecord.outcome.ilike("plaintiff_won"), 1), else_=0)).label("plaintiff_wins"),
+            func.sum(sql_case((CaseRecord.outcome == "plaintiff_won"), 1), else_=0)).label("plaintiff_wins"),
             func.sum(sql_case(((CaseOutcome.appeal_filed == True) & (CaseOutcome.appeal_success == True), 1), else_=0)).label("appeal_successes"),
             func.sum(sql_case((CaseOutcome.appeal_filed == True, 1), else_=0)).label("appeals"),
         ).join(CaseOutcome, CaseRecord.id == CaseOutcome.case_id, isouter=True).filter(
@@ -924,7 +1381,7 @@ class PredictiveAnalyticsEngine:
         court_rows = db.query(
             CaseRecord.court_name,
             func.count(CaseRecord.id).label("total_cases"),
-            func.sum(sql_case((CaseRecord.outcome.ilike("plaintiff_won"), 1), else_=0)).label("plaintiff_wins"),
+            func.sum(sql_case((CaseRecord.outcome == "plaintiff_won"), 1), else_=0)).label("plaintiff_wins"),
             func.sum(sql_case(((CaseOutcome.appeal_filed == True) & (CaseOutcome.appeal_success == True), 1), else_=0)).label("appeal_successes"),
             func.sum(sql_case((CaseOutcome.appeal_filed == True, 1), else_=0)).label("appeals"),
         ).join(CaseOutcome, CaseRecord.id == CaseOutcome.case_id, isouter=True).filter(
@@ -975,6 +1432,24 @@ class PredictiveAnalyticsEngine:
         case_value: Optional[str] = None,
         case_summary: Optional[str] = None,
     ) -> Dict:
+        """
+        Orchestrates the generation of a multi-faceted analytical prediction pack.
+        
+        This method combines success probability, timeline estimation, and cost 
+        analysis. It handles large datasets by checking regional case volume 
+        and triggering manual memory reclamation after heavy processing.
+        """
+        # Pre-check volume for memory safety optimization
+        jurisdiction_normalized = _normalize_text(jurisdiction)
+        vol_count = db.query(func.count(CaseRecord.id)).filter(
+            func.lower(CaseRecord.jurisdiction) == jurisdiction_normalized
+        ).scalar() or 0
+
+        is_high_volume = vol_count > 5000
+        if is_high_volume:
+            logger.warning(f"High-volume dataset detected ({vol_count} records). Implementing memory guardrails.")
+
+        # Step 1: Predict appeal success probability
         appeal_success = PredictiveAnalyticsEngine.predict_appeal_success(
             db,
             case_type=case_type,
@@ -986,6 +1461,8 @@ class PredictiveAnalyticsEngine:
             case_value=case_value,
             case_summary=case_summary,
         )
+        
+        # Step 2: Estimate judgment timelines
         timeline = PredictiveAnalyticsEngine.estimate_judgment_timeline(
             db,
             case_type=case_type,
@@ -996,6 +1473,8 @@ class PredictiveAnalyticsEngine:
             defendant_type=defendant_type,
             case_summary=case_summary,
         )
+        
+        # Step 3: Predict associated legal costs
         cost = PredictiveAnalyticsEngine.predict_cost(
             db,
             case_type=case_type,
@@ -1006,11 +1485,17 @@ class PredictiveAnalyticsEngine:
             defendant_type=defendant_type,
             case_summary=case_summary,
         )
+        
+        # Step 4: Recommend judges and courts based on historical success
         recommendations = PredictiveAnalyticsEngine.recommend_judge_and_court(
             db,
             case_type=case_type,
             jurisdiction=jurisdiction,
         )
+
+        # CRITICAL FIX: Reclaim memory after building large prediction packs
+        # especially important in jurisdictions with thousands of precedents.
+        gc.collect()
 
         return {
             "appeal_success": appeal_success,
@@ -1018,6 +1503,11 @@ class PredictiveAnalyticsEngine:
             "cost": cost,
             "recommendations": recommendations,
             "similar_cases": appeal_success["similar_cases"],
+            "processing_info": {
+                "memory_optimized": is_high_volume,
+                "dataset_volume": vol_count,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
         }
 
 
@@ -1030,10 +1520,10 @@ class AnalyticsAggregator:
         stats = db.query(
             func.count(CaseRecord.id).label('total'),
             func.sum(sql_case((CaseOutcome.appeal_filed == True, 1), else_=0)).label('appeals'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('plaintiff_won'), 1), else_=0)).label('p_wins'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('defendant_won'), 1), else_=0)).label('d_wins'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('settlement'), 1), else_=0)).label('settlements'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('dismissal'), 1), else_=0)).label('dismissals')
+            func.sum(sql_case((CaseRecord.outcome == 'plaintiff_won'), 1), else_=0)).label('p_wins'),
+            func.sum(sql_case((CaseRecord.outcome == 'defendant_won'), 1), else_=0)).label('d_wins'),
+            func.sum(sql_case((CaseRecord.outcome == 'settlement'), 1), else_=0)).label('settlements'),
+            func.sum(sql_case((CaseRecord.outcome == 'dismissal'), 1), else_=0)).label('dismissals')
         ).join(CaseOutcome, CaseRecord.id == CaseOutcome.case_id, isouter=True).first()
         
         total = stats.total or 0
@@ -1055,7 +1545,7 @@ class AnalyticsAggregator:
         judge_stats = db.query(
             CaseRecord.judge_name,
             func.count(CaseRecord.id).label('total'),
-            func.sum(sql_case((CaseRecord.outcome.ilike('plaintiff_won'), 1), else_=0)).label('wins'),
+            func.sum(sql_case((CaseRecord.outcome == 'plaintiff_won'), 1), else_=0)).label('wins'),
             func.sum(sql_case(((CaseOutcome.appeal_filed == True) & (CaseOutcome.appeal_success == True), 1), else_=0)).label('appeal_wins'),
             func.sum(sql_case((CaseOutcome.appeal_filed == True, 1), else_=0)).label('appeals')
         ).join(CaseOutcome, CaseRecord.id == CaseOutcome.case_id, isouter=True).filter(

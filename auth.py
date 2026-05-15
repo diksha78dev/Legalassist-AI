@@ -8,6 +8,7 @@ import hashlib
 import secrets
 import time
 import re
+from routes import PAGE_LOGIN
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple, Any
@@ -139,77 +140,6 @@ def send_otp_email(email: str, otp: str) -> bool:
         return False
 
 
-def _handle_test_account_bypass(db: Any, email: str, now: datetime) -> Tuple[bool, str]:
-    """
-    Handles automated OTP bypass for designated test accounts in non-production environments.
-    
-    CRITICAL SECURITY DESIGN:
-    The previous implementation allowed a bypass for 'test@example.com' based solely 
-    on the 'DEBUG' flag. This was dangerous because 'DEBUG' is often accidentally 
-    left enabled in staging or even production misconfigurations.
-    
-    This new implementation implements 'Defense in Depth' by requiring:
-    1. ACCOUNT MATCH: The email must exactly match the hardcoded test account.
-    2. ENVIRONMENT LOCK: The APP_ENV must NOT be 'production'.
-    3. EXPLICIT OPT-IN: A specific 'ALLOW_UNSAFE_TEST_BYPASS' variable must be 'true'.
-    4. MODE VERIFICATION: Standard 'DEBUG' or 'TESTING' flags must still be active.
-    
-    If any of these conditions are missing, the bypass is skipped entirely and 
-    the system falls back to the secure, real OTP flow.
-    """
-    # Step 1: Identity Verification
-    # We only ever allow a bypass for this specific, low-privilege test account.
-    if email.lower() != "test@example.com":
-        return False, "Not a designated test account"
-
-    # Step 2: Production Safeguard
-    # Explicitly block this logic if we detect we are in a production environment.
-    # We default to 'production' if the variable is missing to fail-safe.
-    app_env = os.getenv("APP_ENV", "production").strip().lower()
-    if app_env == "production":
-        logger.error(
-            "SECURITY WARNING: Bypass attempt for %s blocked because APP_ENV is 'production'.",
-            email
-        )
-        return False, "Bypass strictly forbidden in production"
-
-    # Step 3: Explicit Opt-In Flag
-    # This requires the administrator to set a very specific, scary-sounding 
-    # environment variable, making it harder to enable by mistake.
-    truthy = {"1", "true", "yes", "on"}
-    allow_bypass = os.getenv("ALLOW_UNSAFE_TEST_BYPASS", "").strip().lower() in truthy
-    if not allow_bypass:
-        return False, "Explicit bypass flag (ALLOW_UNSAFE_TEST_BYPASS) is not enabled"
-
-    # Step 4: Mode Verification
-    # Ensure we are actually in a debug/testing context as defined by the app.
-    if not _is_debug_or_testing_mode():
-        return False, "Standard debug or testing flags are not active"
-
-    # --- ALL SECURITY CHECKS PASSED ---
-    # We proceed with generating a deterministic 'test' OTP for CI/CD or local dev.
-    test_otp = "123456"
-    test_otp_hash = _hash_otp(test_otp)
-    expires_at = now + timedelta(minutes=OTP_EXPIRY_MINUTES)
-    
-    # Register the bypass in the database so the verification step works correctly.
-    create_otp_verification(db, email, test_otp_hash, expires_at)
-    
-    # Ensure the test user exists in the system.
-    user = get_user_by_email(db, email)
-    if not user:
-        create_user(db, email)
-        logger.info("Created new test user for bypass: %s", email)
-        
-    logger.warning(
-        "SECURITY ALERT: Active OTP bypass for %s (Env: %s). "
-        "Remove ALLOW_UNSAFE_TEST_BYPASS in non-test environments.", 
-        email, app_env
-    )
-    
-    return True, "Test bypass activated successfully"
-
-
 def request_otp(email: str) -> Tuple[bool, str]:
     """
     Request OTP for email authentication.
@@ -224,15 +154,15 @@ def request_otp(email: str) -> Tuple[bool, str]:
         # Check rate limiting
         now = datetime.now(timezone.utc)
         
-        # SECURITY: Check for isolated test account bypass.
-        # This replaces the previous vulnerable inline check.
-        # It uses multiple layers of environment validation to prevent 
-        # accidental backdoors in production builds.
-        bypass_success, bypass_msg = _handle_test_account_bypass(db, email, now)
-        if bypass_success:
-            # We return a generic 'success' message to the frontend to maintain 
-            # consistent UI behavior and avoid leaking bypass status.
-            return True, "OTP sent to your email"
+        rate_limit_start = now - timedelta(hours=OTP_RATE_LIMIT_HOURS)
+
+        recent_otps = db.query(OTPVerification).filter(
+            OTPVerification.email == email,
+            OTPVerification.created_at >= rate_limit_start,
+        ).count()
+
+        if recent_otps >= OTP_RATE_LIMIT_MAX:
+            return False, "Too many OTP requests. Please try again in an hour."
 
         # Generate OTP
         otp = generate_otp()
@@ -791,22 +721,69 @@ def verify_login(otp: str) -> bool:
 
 
 def logout_user():
-    """Logout current user and revoke their token"""
+    """
+    Logout current user, revoke their JWT token, and aggressively clear the session state.
+    
+    This function is the authoritative source for user termination in the application.
+    It implements a "Scorched Earth" policy for session data to guarantee that NO 
+    personally identifiable information (PII) or authentication artifacts remain
+    in the browser's memory after the user clicks 'Logout'.
+    
+    SECURITY RATIONALE:
+    ------------------
+    1. SHARED TERMINALS: In legal environments, users may share workstations. 
+       If session data (like case IDs or document summaries) is not purged, 
+       the next user could potentially view the previous user's sensitive data.
+    
+    2. STALE STATE BUGS: Streamlit's reactive model sometimes retains values
+       for widgets that are no longer visible. Explicitly deleting keys
+       from st.session_state forces a clean reset.
+    
+    3. REPLAY PROTECTION: By revoking the token in the database, we ensure 
+       the session is dead on the server side as well as the client side.
+    """
     import streamlit as st
 
+    logger.info("Performing global logout and session state purge...")
+    
+    # Ensure session state is initialized before we start clearing it
     init_auth_session()
     
-    # Revoke the token if it exists
+    # Step 1: Revoke the token if it exists in the database.
+    # This prevents the token from being used in any subsequent API calls
+    # even if it is intercepted from the client's network traffic.
     token = st.session_state.get("user_token")
     if token:
-        revoke_jwt_token(token)
-        
-    st.session_state.user_token = None
-    st.session_state.user_email = None
-    st.session_state.user_id = None
-    st.session_state.is_authenticated = False
-    st.session_state.pending_email = None
-    st.session_state.otp_sent = False
+        try:
+            revoke_jwt_token(token)
+            logger.debug("Active JWT token revoked in database.")
+        except Exception as e:
+            logger.error(f"Failed to revoke token during logout: {str(e)}")
+            # We continue with session clearing even if revocation fails
+            # to prioritize local data privacy.
+    
+    # Step 2: Aggressive Session State Wipe.
+    # Instead of just setting individual keys to None, we iterate through
+    # every key currently registered in the Streamlit session and delete it.
+    # This ensures that ANY data stored by the app (including custom keys
+    # added by individual pages) is completely erased.
+    
+    # We use list() to create a copy of the keys to avoid "RuntimeError: 
+    # dictionary changed size during iteration".
+    all_keys = list(st.session_state.keys())
+    
+    for key in all_keys:
+        try:
+            del st.session_state[key]
+        except KeyError:
+            # Handle potential race conditions where a key might have 
+            # been removed by another process/thread (unlikely but safe).
+            pass
+            
+    logger.info(f"Successfully cleared {len(all_keys)} session state keys.")
+    
+    # NOTE: The caller (e.g., app.py) is responsible for calling st.rerun()
+    # to restart the UI flow after this function returns.
 
 
 def require_auth() -> bool:
@@ -926,7 +903,7 @@ def require_auth() -> bool:
             #     guarantees but automatically forces the UI to update to the logged-out state.
             # 
             # Approach C: Using a custom redirect.
-            #   - We could call `st.switch_page("pages/0_Login.py")`. This is a valid option,
+            #   - We could call `st.switch_page(PAGE_LOGIN)`. This is a valid option,
             #     but `st.rerun()` is more flexible. It allows the main `app.py` router to 
             #     handle the unauthenticated state gracefully, perhaps showing a generic 
             #     landing page rather than forcefully navigating the user.
@@ -1088,7 +1065,7 @@ def redirect_to_login():
     """Redirect to login page"""
     import streamlit as st
 
-    st.switch_page("pages/0_Login.py")
+    st.switch_page(PAGE_LOGIN)
 
 
 def get_current_user_id() -> Optional[int]:

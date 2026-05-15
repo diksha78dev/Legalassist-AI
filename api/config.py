@@ -32,6 +32,11 @@ class APISettings(BaseSettings):
     RATE_LIMIT_WINDOW: int = 60  # seconds
     RATE_LIMIT_BURST: int = 200  # max burst
     
+    # Authentication Rate Limiting (Credential Stuffing Protection)
+    AUTH_RATE_LIMIT_REQUESTS: int = 5  # tight limit for login
+    AUTH_RATE_LIMIT_WINDOW: int = 60   # per minute
+    AUTH_RATE_LIMIT_STRATEGY: str = "fixed-window"  # or 'sliding-window'
+    
     # Authentication
     AUTH_ENABLED: bool = True
     JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "your-secret-key-change-in-production")
