@@ -35,6 +35,7 @@ from observability.instrumentation import (
     clear_request_context,
     generate_correlation_id,
 )
+from api.idempotency import IdempotencyManager
 
 # ============================================================================
 # INITIALIZATION & LOGGING
@@ -321,6 +322,15 @@ def analyze_document_task(
     Returns:
         Dict[str, Any]: The structured analysis results including identified remedies.
     """
+    # Idempotency: prevent duplicate processing for same user/document
+    idemp = IdempotencyManager()
+    idempotency_key = f"analyze:{user_id}:{document_id}"
+    if not idemp.acquire(idempotency_key, ttl=300):
+        # Another worker is processing or has processed this key
+        existing = idemp.get_result(idempotency_key)
+        logger.info("analyze_document_duplicate_skipped", key=idempotency_key, task_id=self.request.id)
+        return existing or {"status": "duplicate", "task_id": self.request.id}
+
     try:
         # Phase 1: Text Pre-processing
         self.update_state(
@@ -378,6 +388,7 @@ def analyze_document_task(
             document_id=document_id
         )
         
+        idemp.mark_completed(idempotency_key, result)
         return result
     
     except Exception as e:
@@ -393,6 +404,10 @@ def analyze_document_task(
         raise
     finally:
         clear_request_context()
+        try:
+            idemp.release_lock(idempotency_key)
+        except Exception:
+            pass
 
 
 @celery_app.task(bind=True, name="generate_report")
@@ -415,6 +430,14 @@ def generate_report_task(
     Returns:
         Dict[str, Any]: Metadata about the generated report file.
     """
+    # Idempotency: avoid regenerating same report repeatedly
+    idemp = IdempotencyManager()
+    idempotency_key = f"report:{user_id}:{case_id}:{report_type}:{format}"
+    if not idemp.acquire(idempotency_key, ttl=600):
+        existing = idemp.get_result(idempotency_key)
+        logger.info("generate_report_duplicate_skipped", key=idempotency_key, task_id=self.request.id)
+        return existing or {"status": "duplicate", "task_id": self.request.id}
+
     try:
         # Step 1: Data Aggregation
         self.update_state(
@@ -482,6 +505,7 @@ def generate_report_task(
             report_id=report_id
         )
         
+        idemp.mark_completed(idempotency_key, result)
         return result
     
     except Exception as e:
@@ -492,6 +516,11 @@ def generate_report_task(
             error=str(e)
         )
         raise
+    finally:
+        try:
+            idemp.release_lock(idempotency_key)
+        except Exception:
+            pass
 
 
 @celery_app.task(bind=True, name="export_data")
