@@ -702,8 +702,9 @@ def parse_remedies_response(response_text: str) -> Dict:
         # If JSON was thin, fall through to regex just in case
 
     # --- STEP 2: Fallback to regex-based line parsing ---
-    # Only match 1-2 digit numbers to avoid matching content like "5000-10000"
-    pattern = r'^([1-9]\d?)\s*[.):‐-]\s*(.*?)$'
+    # Match 0-99 section numbers and a wider set of separators while still
+    # avoiding content like "5000-10000".
+    pattern = r'^(\d{1,2})\s*[\.)\:\]\-\u2010\u2011\u2012\u2013\u2014]\s*(.*?)$'
     sections = {}
     
     for line in text.split('\n'):
@@ -734,41 +735,47 @@ def parse_remedies_response(response_text: str) -> Dict:
     for num in sections:
         sections[num]["content"] = sections[num]["content"].strip()
     
-    # Map sections to keys based on count
+    # Map sections to keys based on count. Some LLMs emit 0-based numbering,
+    # so normalize the logical positions against the smallest detected index.
+    section_offset = min(sections.keys())
     is_7section = len(sections) >= 7
+
+    def _section_content(logical_number: int) -> str:
+        actual_number = section_offset + logical_number - 1
+        return sections.get(actual_number, {}).get("content", "")
     
     if is_7section:
-        if 1 in sections:
-            remedies["what_happened"] = sections[1]["content"]
-        if 2 in sections:
-            can_appeal_text = sections[2]["content"].lower()
+        if _section_content(1):
+            remedies["what_happened"] = _section_content(1)
+        if _section_content(2):
+            can_appeal_text = _section_content(2).lower()
             remedies["can_appeal"] = "yes" if "yes" in can_appeal_text else "no"
-        if 3 in sections:
+        if _section_content(3):
             # Extract just the number from "30 days"
-            appeal_days_text = sections[3]["content"]
+            appeal_days_text = _section_content(3)
             match = re.search(r'\d+', appeal_days_text)
             remedies["appeal_days"] = match.group() if match else appeal_days_text
-        if 4 in sections:
-            remedies["appeal_court"] = sections[4]["content"]
-        if 5 in sections:
-            remedies["cost_estimate"] = sections[5]["content"]
-            remedies["cost"] = sections[5]["content"]  # Support both keys
-        if 6 in sections:
-            remedies["first_action"] = sections[6]["content"]
-        if 7 in sections:
-            remedies["deadline"] = sections[7]["content"]
+        if _section_content(4):
+            remedies["appeal_court"] = _section_content(4)
+        if _section_content(5):
+            remedies["cost_estimate"] = _section_content(5)
+            remedies["cost"] = _section_content(5)  # Support both keys
+        if _section_content(6):
+            remedies["first_action"] = _section_content(6)
+        if _section_content(7):
+            remedies["deadline"] = _section_content(7)
         remedies["_is_partial"] = False  # Full 7-section response
     else:
         # 5-section format (old) - mark as partial
         remedies["_is_partial"] = True
-        if 1 in sections:
-            remedies["what_happened"] = sections[1]["content"]
-        if 2 in sections:
-            can_appeal_text = sections[2]["content"].strip()
+        if _section_content(1):
+            remedies["what_happened"] = _section_content(1)
+        if _section_content(2):
+            can_appeal_text = _section_content(2).strip()
             normalized_can_appeal = _normalize_yes_no(can_appeal_text)
             remedies["can_appeal"] = normalized_can_appeal or can_appeal_text.lower()
-        if 3 in sections:
-            appeal_details = sections[3]["content"]
+        if _section_content(3):
+            appeal_details = _section_content(3)
             remedies["appeal_details"] = appeal_details
 
             appeal_info = extract_appeal_info(appeal_details)
@@ -779,10 +786,10 @@ def parse_remedies_response(response_text: str) -> Dict:
             if appeal_info["cost"]:
                 remedies["cost_estimate"] = appeal_info["cost"]
                 remedies["cost"] = appeal_info["cost"]
-        if 4 in sections:
-            remedies["first_action"] = sections[4]["content"]
-        if 5 in sections:
-            remedies["deadline"] = sections[5]["content"]
+        if _section_content(4):
+            remedies["first_action"] = _section_content(4)
+        if _section_content(5):
+            remedies["deadline"] = _section_content(5)
 
     return remedies
 
