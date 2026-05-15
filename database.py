@@ -55,6 +55,21 @@ _otp_rate_limit_client = None
 _otp_rate_limit_script = None
 
 
+def _to_utc_datetime(value: dt.datetime) -> dt.datetime:
+    """Convert a datetime to timezone-aware UTC."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=dt.timezone.utc)
+    return value.astimezone(dt.timezone.utc)
+
+
+def _datetime_for_db(value: dt.datetime) -> dt.datetime:
+    """Return a datetime in the format best suited for the current backend."""
+    utc_value = _to_utc_datetime(value)
+    if _is_sqlite:
+        return utc_value.replace(tzinfo=None)
+    return utc_value
+
+
 class NotificationStatus(str, enum.Enum):
     """Status of sent notifications"""
     PENDING = "pending"
@@ -1065,13 +1080,16 @@ def create_case_deadline(
 
 def get_upcoming_deadlines(db: Session, days_before: int = 30) -> List[CaseDeadline]:
     """Get all deadlines that are X days away"""
-    now = dt.datetime.now(dt.timezone.utc)
-    target_date = (now + dt.timedelta(days=days_before)).replace(
+    now_utc = dt.datetime.now(dt.timezone.utc)
+    target_utc = (now_utc + dt.timedelta(days=days_before)).replace(
         hour=23,
         minute=59,
         second=59,
         microsecond=999999,
     )
+
+    now = _datetime_for_db(now_utc)
+    target_date = _datetime_for_db(target_utc)
     
     return db.query(CaseDeadline).filter(
         CaseDeadline.is_completed == False,
@@ -1082,7 +1100,7 @@ def get_upcoming_deadlines(db: Session, days_before: int = 30) -> List[CaseDeadl
 
 def get_user_deadlines(db: Session, user_id: int) -> List[CaseDeadline]:
     """Get all active deadlines for a user"""
-    now = dt.datetime.now(dt.timezone.utc)
+    now = _datetime_for_db(dt.datetime.now(dt.timezone.utc))
     return db.query(CaseDeadline).filter(
         CaseDeadline.user_id == user_id,
         CaseDeadline.is_completed == False,
