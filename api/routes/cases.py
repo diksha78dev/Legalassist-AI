@@ -267,7 +267,7 @@ async def get_case_timeline(
     )
     
     # Mock timeline data
-    base_date = datetime.utcnow() - timedelta(days=365)
+    base_date = datetime.now(timezone.utc) - timedelta(days=365)
     events = [
         CaseEvent(
             date=base_date,
@@ -310,18 +310,20 @@ async def get_case_timeline(
             documents=["decision.pdf"]
         ),
     ]
-    
-    return CaseTimeline(
-        case_id=case_id,
-        case_number="2023-CV-00001",
-        title="Example Case",
-        status="closed",
-        created_at=base_date,
-        updated_at=datetime.utcnow(),
-        events=events,
-        total_events=len(events),
-        duration_years=1.0
-    )
+
+    timeline_payload = {
+        "case_id": case_id,
+        "case_number": "2023-CV-00001",
+        "title": "Example Case",
+        "status": "closed",
+        "created_at": base_date,
+        "updated_at": datetime.now(timezone.utc),
+        "events": events,
+        "total_events": len(events),
+        "duration_years": 1.0,
+    }
+
+    return CaseTimeline.model_validate(timeline_payload)
 
 
 @router.get(
