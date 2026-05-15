@@ -26,6 +26,11 @@ class APISettings(BaseSettings):
         "http://localhost:8000",
     ]
     
+    # Allowed Hosts for TrustedHostMiddleware
+    # Format: comma-separated (localhost,127.0.0.1,example.com) or JSON array
+    # Default: localhost, 127.0.0.1
+    ALLOWED_HOSTS: list = None
+    
     # Rate Limiting
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_REQUESTS: int = 100  # requests
@@ -90,6 +95,25 @@ class APISettings(BaseSettings):
     ENABLE_OAUTH2: bool = os.getenv("ENABLE_OAUTH2", "true").lower() == "true"
     ENABLE_WEBSOCKET: bool = os.getenv("ENABLE_WEBSOCKET", "true").lower() == "true"
     ENABLE_ANALYTICS: bool = os.getenv("ENABLE_ANALYTICS", "true").lower() == "true"
+    
+    def __init__(self, **data):
+        super().__init__(**data)
+        # Parse ALLOWED_HOSTS from environment
+        if self.ALLOWED_HOSTS is None:
+            hosts_env = os.getenv("APP_ALLOWED_HOSTS", "")
+            if hosts_env.strip():
+                # Support both comma-separated and JSON formats
+                if hosts_env.startswith('['):
+                    import json
+                    try:
+                        self.ALLOWED_HOSTS = json.loads(hosts_env)
+                    except (json.JSONDecodeError, ValueError):
+                        self.ALLOWED_HOSTS = [h.strip() for h in hosts_env.split(',') if h.strip()]
+                else:
+                    self.ALLOWED_HOSTS = [h.strip() for h in hosts_env.split(',') if h.strip()]
+            else:
+                # Safe defaults for development
+                self.ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
     
     class Config:
         env_file = ".env"
