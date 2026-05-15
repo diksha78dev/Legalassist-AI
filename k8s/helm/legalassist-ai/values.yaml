@@ -71,8 +71,9 @@ autoscaling:
 
 livenessProbe:
   httpGet:
-    path: /_stcore/health
+    path: /api/v1/health/live
     port: http
+    scheme: HTTP
   initialDelaySeconds: 60
   periodSeconds: 30
   timeoutSeconds: 10
@@ -80,8 +81,9 @@ livenessProbe:
 
 readinessProbe:
   httpGet:
-    path: /_stcore/health
+    path: /api/v1/health/ready
     port: http
+    scheme: HTTP
   initialDelaySeconds: 20
   periodSeconds: 10
   timeoutSeconds: 5
