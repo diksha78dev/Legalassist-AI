@@ -24,11 +24,17 @@ LIGHT_GRAY = (245, 245, 245)
 BORDER_COLOR = (200, 200, 200)
 
 # Font configuration
-# We assume DejaVuSans fonts are placed in a 'fonts' directory
+# We assume Unicode-compliant fonts are placed in a 'fonts' directory
 FONT_DIR = Path(__file__).parent / "fonts"
-REGULAR_FONT = "DejaVuSans.ttf"
-BOLD_FONT = "DejaVuSans-Bold.ttf"
-ITALIC_FONT = "DejaVuSans-Oblique.ttf"
+
+# Priority list for Unicode fonts (local assets first, then system fallbacks)
+UNICODE_FONT_CONFIGS = [
+    {"name": "DejaVu", "file": "DejaVuSans.ttf", "style": ""},
+    {"name": "DejaVu", "file": "DejaVuSans-Bold.ttf", "style": "B"},
+    {"name": "DejaVu", "file": "DejaVuSans-Oblique.ttf", "style": "I"},
+    {"name": "Arial Unicode", "file": "ARIALUNI.TTF", "style": "", "system_path": r"C:\Windows\Fonts\ARIALUNI.TTF"},
+    {"name": "Noto Sans", "file": "NotoSans-Regular.ttf", "style": "", "system_path": r"C:\Windows\Fonts\NotoSans-Regular.ttf"},
+]
 
 class LegalAssistPDF(FPDF):
     """
@@ -58,70 +64,65 @@ class LegalAssistPDF(FPDF):
 
     def _setup_fonts(self):
         """
-        Register Unicode-capable fonts (DejaVu Sans) for multilingual reporting.
+        Register Unicode-capable fonts (DejaVu, Arial Unicode, Noto Sans) 
+        for multilingual reporting.
         
         This method ensures the PDF can render characters from various 
-        scripts (Hindi, Bengali, Urdu, etc.) which are common in legal 
+        scripts (Hindi, Chinese, Bengali, Urdu, etc.) which are common in legal 
         documents within the target jurisdictions.
-        
-        Robustness Features:
-        1. Verifies existence of 'fonts' directory.
-        2. Checks for individual font variant files (.ttf).
-        3. Wraps individual font registration in try-except blocks.
-        4. Tracks available styles to prevent runtime crashes during rendering.
-        5. Falls back to standard system fonts if custom assets are missing.
         """
         logger.info("Initializing font system for LegalAssist PDF...")
         
+        fonts_registered = []
+        
         try:
-            # Path validation: Ensure the fonts directory exists.
-            if not FONT_DIR.exists():
-                logger.warning(f"Font directory not found: {FONT_DIR}")
-                # We don't create it here as we expect deployment to handle assets,
-                # but we could if we had a download mechanism.
-            
-            # Map of styles to their respective filenames
-            # 'style' key: ''=Regular, 'B'=Bold, 'I'=Italic
-            font_configs = [
-                ("", REGULAR_FONT),
-                ("B", BOLD_FONT),
-                ("I", ITALIC_FONT),
-            ]
-
-            fonts_registered_count = 0
-
-            # Iterate through each required font variant
-            for style, filename in font_configs:
+            # Iterate through our prioritized font configurations
+            for config in UNICODE_FONT_CONFIGS:
+                name = config["name"]
+                style = config["style"]
+                filename = config["file"]
+                
+                # Check 1: Local 'fonts' directory
                 font_path = FONT_DIR / filename
+                
+                # Check 2: System path (if defined and local missing)
+                if not font_path.exists() and "system_path" in config:
+                    sys_path = Path(config["system_path"])
+                    if sys_path.exists():
+                        font_path = sys_path
                 
                 if font_path.exists():
                     try:
-                        # Attempt to register the TrueType font with FPDF
-                        # family='DejaVu' is used consistently for all variants
-                        self.add_font("DejaVu", style, str(font_path))
-                        self.font_availability[style] = True
-                        fonts_registered_count += 1
-                        logger.debug(f"Successfully registered DejaVu style '{style}' from {filename}")
+                        # Register the TrueType font
+                        self.add_font(name, style, str(font_path))
+                        self.font_availability[style if name == "DejaVu" else ""] = True
+                        
+                        if name not in fonts_registered:
+                            fonts_registered.append(name)
+                        
+                        logger.debug(f"Successfully registered {name} style '{style}' from {font_path}")
                     except Exception as e:
-                        # The file might be corrupted or in an unsupported format
-                        logger.error(f"Error registering font file {filename}: {str(e)}")
+                        logger.error(f"Error registering font {name} from {font_path}: {str(e)}")
                 else:
-                    # Log missing assets for troubleshooting
-                    logger.warning(f"Required font asset missing: {filename} at {font_path}")
+                    logger.debug(f"Font asset not found: {filename}")
 
-            # Define the 'main_font' property which will be used as the primary family.
-            # If Regular ('') is available, we use DejaVu.
-            if self.font_availability[""]:
+            # Determine the primary font family based on availability
+            # We prefer DejaVu if available, otherwise Arial Unicode or Noto Sans
+            if "DejaVu" in fonts_registered:
                 self.main_font = "DejaVu"
-                logger.info(f"Custom font setup complete. {fonts_registered_count} variant(s) available.")
+            elif "Arial Unicode" in fonts_registered:
+                self.main_font = "Arial Unicode"
+            elif "Noto Sans" in fonts_registered:
+                self.main_font = "Noto Sans"
             else:
-                # If even the regular variant is missing, we must use a core PDF font.
-                # Helvetica is a standard font guaranteed to be available in all PDF readers.
+                # If no Unicode fonts are found, fallback to Helvetica
                 self.main_font = "Helvetica"
-                logger.error("Primary DejaVu font missing. Falling back to system standard (Helvetica).")
+                logger.error("No Unicode-compliant fonts found. Non-Latin characters (Hindi, Chinese) will render as boxes.")
+                
+            if self.main_font != "Helvetica":
+                logger.info(f"Custom font setup complete. Using '{self.main_font}' as primary family.")
                 
         except Exception as global_exc:
-            # Catch unexpected errors to ensure PDF generation doesn't crash the whole app
             logger.critical(f"Global font setup failure: {global_exc}")
             self.main_font = "Helvetica"
 
@@ -129,45 +130,33 @@ class LegalAssistPDF(FPDF):
         """
         Defensively set the font for the current PDF context.
         
-        This method replaces direct calls to self.set_font() to provide
-        protection against missing font variants. It intelligently
-        downgrades to available styles or families if the requested
-        one is not registered.
-        
-        Args:
-            family: Font family name (e.g., self.main_font)
-            style: Desired style string ('B', 'I', or '')
-            size: Font size in points
+        Handles fallbacks for bold/italic styles if not available in the 
+        selected Unicode font.
         """
-        # Normalize the style string to handle various input formats
         style_norm = style.upper().strip()
         
         try:
-            # If we are trying to use our custom DejaVu family
+            # Special handling for DejaVu which usually has multiple variants
             if family == "DejaVu":
-                # 1. Check if the exact requested style is available
                 if self.font_availability.get(style_norm, False):
                     self.set_font(family, style_norm, size)
                     return
-                
-                # 2. If requested style (e.g. Bold) is missing, try falling back to Regular
-                if self.font_availability.get("", False):
-                    logger.debug(f"Requested style '{style_norm}' not found for DejaVu. Using Regular.")
-                    self.set_font(family, "", size)
-                    return
-                
-                # 3. If no DejaVu variants are available at all, force Helvetica
-                family = "Helvetica"
+                # Fallback to Regular if Bold/Italic is missing
+                self.set_font(family, "", size)
+                return
+
+            # For other Unicode fonts (Arial Unicode, Noto Sans), they often 
+            # only have a single comprehensive 'Regular' file that handles everything.
+            if family in ["Arial Unicode", "Noto Sans"]:
+                self.set_font(family, "", size)
+                return
             
-            # Standard fonts (Helvetica, Times, etc.) are internal to FPDF
-            # and don't need manual registration/availability checks.
+            # Standard PDF fonts
             self.set_font(family, style_norm, size)
             
         except Exception as e:
-            # Final fallback: If everything fails, use standard Helvetica Regular
-            logger.warning(f"safe_set_font recovery: {family} {style} failed -> falling back to Helvetica")
+            logger.warning(f"safe_set_font recovery: {family} {style} failed -> using Helvetica")
             try:
-                # We use a nested try just in case the PDF state is severely corrupted
                 self.set_font("Helvetica", "", size)
             except:
                 pass
