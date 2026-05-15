@@ -16,14 +16,27 @@ if PROJECT_ENV_PATH.exists():
 else:
     load_dotenv()
 
+# Detection of the environment should be done only once at startup.
+try:
+    import streamlit as st
+    # Verify st.secrets is accessible
+    _ = st.secrets
+    _HAS_STREAMLIT = True
+except (ImportError, RuntimeError, AttributeError, FileNotFoundError):
+    st = None
+    _HAS_STREAMLIT = False
+
 def _get_val(key, default=None):
-    # Try Streamlit secrets first (if in a Streamlit context)
-    try:
-        import streamlit as st
-        if key in st.secrets:
-            return st.secrets[key]
-    except (ImportError, RuntimeError, AttributeError, FileNotFoundError):
-        pass
+    """
+    Retrieve configuration value from Streamlit secrets or environment variables.
+    Refactored to avoid redundant dynamic imports.
+    """
+    if _HAS_STREAMLIT and st is not None:
+        try:
+            if key in st.secrets:
+                return st.secrets[key]
+        except Exception:
+            pass
     
     # Fallback to environment variables
     return os.getenv(key, default)
