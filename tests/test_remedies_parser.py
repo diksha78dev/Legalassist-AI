@@ -54,6 +54,39 @@ None
     assert "acquitted" in remedies["what_happened"].lower()
     # Now normalized to lowercase
     assert "no" in remedies["can_appeal"].lower()
+    assert remedies["appeal_details"] == "Not applicable"
+    assert remedies["appeal_days"] == ""
+    assert remedies["appeal_court"] == ""
+    assert remedies["cost_estimate"] == ""
+    assert remedies["_is_partial"] is True
+
+
+def test_parse_legacy_5section_extracts_appeal_fields_from_free_text():
+    """Test that legacy 5-section appeal details still backfill normalized fields"""
+    response = """
+1. What happened?
+Defendant lost.
+2. Can the loser appeal?
+Yes, appeal is available.
+3. Appeal details
+File in High Court within 45 days. Estimated cost: 5000-15000.
+4. First action
+Apply for certified copies.
+5. Timeline
+Within 45 days from judgment.
+"""
+
+    remedies = parse_remedies_response(response)
+
+    assert remedies is not None
+    assert remedies["can_appeal"] == "yes"
+    assert remedies["appeal_details"].startswith("File in High Court")
+    assert remedies["appeal_days"] == "45"
+    assert "High Court" in remedies["appeal_court"]
+    assert remedies["cost_estimate"] == "5000-15000"
+    assert remedies["cost"] == "5000-15000"
+    assert remedies["first_action"] == "Apply for certified copies."
+    assert remedies["deadline"] == "Within 45 days from judgment."
     assert remedies["_is_partial"] is True
 
 

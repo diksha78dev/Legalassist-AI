@@ -25,7 +25,7 @@ from openai import OpenAI
 from pypdf import PdfReader
 from langdetect import detect, DetectorFactory, detect_langs
 import pdfplumber
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import html as html_lib
 
 from config import Config
@@ -764,9 +764,21 @@ def parse_remedies_response(response_text: str) -> Dict:
         if 1 in sections:
             remedies["what_happened"] = sections[1]["content"]
         if 2 in sections:
-            remedies["can_appeal"] = sections[2]["content"].lower()
+            can_appeal_text = sections[2]["content"].strip()
+            normalized_can_appeal = _normalize_yes_no(can_appeal_text)
+            remedies["can_appeal"] = normalized_can_appeal or can_appeal_text.lower()
         if 3 in sections:
-            remedies["appeal_details"] = sections[3]["content"]
+            appeal_details = sections[3]["content"]
+            remedies["appeal_details"] = appeal_details
+
+            appeal_info = extract_appeal_info(appeal_details)
+            if appeal_info["days"]:
+                remedies["appeal_days"] = appeal_info["days"]
+            if appeal_info["court"]:
+                remedies["appeal_court"] = appeal_info["court"]
+            if appeal_info["cost"]:
+                remedies["cost_estimate"] = appeal_info["cost"]
+                remedies["cost"] = appeal_info["cost"]
         if 4 in sections:
             remedies["first_action"] = sections[4]["content"]
         if 5 in sections:
@@ -786,7 +798,15 @@ def extract_appeal_info(appeal_details_text):
         if keyword.lower() in text.lower():
             info["court"] = keyword
             break
-    cost_match = re.search(r"₹?([\d,]+(?:[-–][\d,]+)?)", text.replace(" ", ""))
+    cost_match = re.search(
+        r"(?:cost|estimated cost|fee|fees|amount|expense|expenses)[^\d₹$£€]*([₹$£€]?\d[\d,]*(?:[-–]\d[\d,]*)?)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not cost_match:
+        cost_match = re.search(r"[₹$£€]\s*(\d[\d,]*(?:[-–]\d[\d,]*)?)", text)
+    if not cost_match:
+        cost_match = re.search(r"\b(\d[\d,]*(?:[-–]\d[\d,]*)?)\b", text)
     if cost_match:
         info["cost"] = cost_match.group(1)
     return info
