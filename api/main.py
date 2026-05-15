@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.openapi.utils import get_openapi
 from fastapi import status
 import structlog
+import asyncio
 
 from api.config import get_settings
 from api.middleware import (
@@ -255,6 +256,7 @@ app = create_app()
 
 if settings.ENABLE_WEBSOCKET:
     from fastapi import WebSocket
+    from celery_app import TaskStatus
     
     @app.websocket("/ws/progress/{job_id}")
     async def websocket_progress_endpoint(websocket: WebSocket, job_id: str):
@@ -268,11 +270,7 @@ if settings.ENABLE_WEBSOCKET:
         await websocket.accept()
         
         try:
-            from celery_app import TaskStatus
-            
             while True:
-                import asyncio
-                
                 status_info = TaskStatus.get_task_status(job_id)
                 
                 await websocket.send_json({
