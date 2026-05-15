@@ -1024,7 +1024,12 @@ def create_case_deadline(
 def get_upcoming_deadlines(db: Session, days_before: int = 30) -> List[CaseDeadline]:
     """Get all deadlines that are X days away"""
     now = dt.datetime.now(dt.timezone.utc)
-    target_date = dt.datetime.fromtimestamp(now.timestamp() + (days_before * 86400), tz=dt.timezone.utc)
+    target_date = (now + dt.timedelta(days=days_before)).replace(
+        hour=23,
+        minute=59,
+        second=59,
+        microsecond=999999,
+    )
     
     return db.query(CaseDeadline).filter(
         CaseDeadline.is_completed == False,
