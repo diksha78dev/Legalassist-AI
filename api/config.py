@@ -2,6 +2,8 @@
 API Configuration
 """
 import os
+import tempfile
+from pathlib import Path
 from typing import Optional
 from pydantic_settings import BaseSettings
 
@@ -65,7 +67,10 @@ class APISettings(BaseSettings):
     # File Upload
     UPLOAD_MAX_SIZE: int = 500 * 1024 * 1024  # 500 MB
     UPLOAD_EXTENSIONS: list = [".pdf", ".doc", ".docx", ".txt", ".html"]
-    UPLOAD_TEMP_DIR: str = "/tmp/legalassist-uploads"
+    UPLOAD_TEMP_DIR: str = os.getenv(
+        "UPLOAD_TEMP_DIR",
+        str(Path(tempfile.gettempdir()) / "legalassist-uploads")
+    )
     
     # PDF Export
     PDF_MAX_PAGES: int = 5000
