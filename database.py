@@ -303,7 +303,7 @@ class ModelFeedback(Base):
     __tablename__ = "model_feedback"
 
     id = Column(Integer, primary_key=True)
-    user_id = Column(String(255), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     model_name = Column(String(255), nullable=False, index=True)
     task = Column(String(100), nullable=False, index=True)  # summary, remedy, appeal_estimate, etc.
     case_id = Column(Integer, ForeignKey("case_records.id", ondelete="SET NULL"), nullable=True, index=True)
@@ -1309,7 +1309,7 @@ def get_user_feedback(db: Session, user_id: int, limit: int = 50) -> List[UserFe
 
 def submit_model_feedback(
     db: Session,
-    user_id: str,
+    user_id: int,
     model_name: str,
     task: str,
     case_id: Optional[int] = None,
@@ -1319,7 +1319,7 @@ def submit_model_feedback(
 ) -> ModelFeedback:
     """Persist model output feedback for training and evaluation"""
     fb = ModelFeedback(
-        user_id=str(user_id),
+        user_id=user_id,
         model_name=model_name,
         task=task,
         case_id=case_id,
