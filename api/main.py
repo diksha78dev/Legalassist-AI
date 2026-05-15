@@ -48,7 +48,7 @@ middleware = [
     ),
     Middleware(
         TrustedHostMiddleware,
-        allowed_hosts=["localhost", "127.0.0.1", "*.example.com"]
+        allowed_hosts=settings.ALLOWED_HOSTS
     ),
 ]
 
