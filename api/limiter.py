@@ -16,6 +16,7 @@ from fastapi import Request, HTTPException, status, Depends
 import redis.asyncio as redis
 import structlog
 from api.config import get_settings
+from api.auth import verify_token
 
 settings = get_settings()
 logger = structlog.get_logger(__name__)
@@ -91,7 +92,31 @@ class DistributedRateLimiter:
         """Generate a unique key for the rate limit bucket"""
         # Hash the endpoint to keep keys short but unique
         endpoint_hash = hashlib.md5(endpoint.encode()).hexdigest()[:8]
-        return f"ratelimit:{endpoint_hash}:{identifier}"
+        return f"ratelimit:v2:{endpoint_hash}:{identifier}"
+
+
+def resolve_rate_limit_identifier(request: Request) -> str:
+    """Resolve a stable identifier for rate limiting.
+
+    Prefer server-verified credentials over mutable client-supplied headers.
+    Unauthenticated requests fall back to the source IP address.
+    """
+    authorization = request.headers.get("Authorization")
+    if authorization:
+        token = authorization.removeprefix("Bearer ").strip()
+        if token:
+            try:
+                payload = verify_token(token)
+                user_id = payload.get("sub")
+                if user_id:
+                    return f"user:{user_id}"
+            except HTTPException:
+                pass
+
+    if request.client and request.client.host:
+        return f"ip:{request.client.host}"
+
+    return "ip:unknown"
 
     async def check_rate_limit(
         self, 
@@ -203,10 +228,8 @@ def RateLimit(
     limit_win = window or (settings.AUTH_RATE_LIMIT_WINDOW if use_auth_defaults else settings.RATE_LIMIT_WINDOW)
 
     async def rate_limit_dependency(request: Request):
-        # Identify the client
-        identifier = request.headers.get("X-User-Id")
-        if not identifier:
-            identifier = request.client.host if request.client else "127.0.0.1"
+        # Identify the client using validated auth credentials when available.
+        identifier = resolve_rate_limit_identifier(request)
             
         # Bypass for whitelist
         if is_whitelisted(identifier):
