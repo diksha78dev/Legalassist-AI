@@ -7,6 +7,7 @@ import datetime as dt
 import hashlib
 import logging
 from typing import Optional, List
+import threading
 from sqlalchemy import (
     create_engine,
     Column,
@@ -20,6 +21,7 @@ from sqlalchemy import (
     JSON,
     UniqueConstraint,
     Index,
+    event,
 )
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
@@ -36,9 +38,28 @@ except ImportError:  # pragma: no cover - handled at runtime if Redis is unavail
 DATABASE_URL = Config.DATABASE_URL
 _db_url = make_url(DATABASE_URL)
 _is_sqlite = _db_url.get_backend_name() == "sqlite"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if _is_sqlite else {})
+engine = create_engine(
+    DATABASE_URL, 
+    connect_args={"check_same_thread": False, "timeout": 30} if _is_sqlite else {}
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, expire_on_commit=False, bind=engine)
 Base = declarative_base()
+
+# SQLite specific concurrency optimizations
+if _is_sqlite:
+    @event.listens_for(engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.close()
+
+    @event.listens_for(engine, "begin")
+    def do_begin(conn):
+        conn.execute("BEGIN IMMEDIATE")
+
+# Thread-local storage for session re-entrancy
+_session_registry = threading.local()
 
 logger = logging.getLogger(__name__)
 auth_logger = logging.getLogger("auth.otp")
@@ -962,8 +983,15 @@ def db_session():
     """
     Context manager for database sessions.
     Ensures the session is closed after use, even if an exception occurs.
+    Supports nesting by re-using an existing session in the current thread.
     """
+    # Check if a session is already active in this thread
+    if hasattr(_session_registry, "session") and _session_registry.session is not None:
+        yield _session_registry.session
+        return
+
     db = SessionLocal()
+    _session_registry.session = db
     try:
         yield db
         db.commit()
@@ -972,6 +1000,7 @@ def db_session():
         raise
     finally:
         db.close()
+        _session_registry.session = None
 
 
 def get_db():
