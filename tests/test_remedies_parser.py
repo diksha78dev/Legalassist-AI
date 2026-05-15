@@ -137,6 +137,35 @@ Appeal
     assert "Supreme" in remedies["appeal_court"]
 
 
+@pytest.mark.parametrize("marker", ["]", "\u2010", "\u2011", "\u2012", "\u2013", "\u2014"])
+def test_parse_numbering_formats_with_variant_separators(marker):
+    """Test alternative numbering separators, including bracket and dash variants."""
+    response = f"""
+0{marker} What happened?
+Background text.
+1{marker} Can the loser appeal?
+Yes.
+2{marker} Appeal timeline
+30 days
+3{marker} Appeal court
+High Court
+4{marker} Cost estimate
+5000-10000
+5{marker} First action
+Appeal
+6{marker} Deadline
+30 days
+"""
+    remedies = parse_remedies_response(response)
+
+    assert remedies is not None
+    assert remedies["what_happened"] == "Background text."
+    assert remedies["can_appeal"] == "yes"
+    assert remedies["appeal_days"] == "30"
+    assert "High Court" in remedies["appeal_court"]
+    assert remedies["_is_partial"] is False
+
+
 def test_parse_3section_format():
     """Test 3-section format is treated as old format"""
     remedies = parse_remedies_response("This answer has no numbering and cannot be parsed")
