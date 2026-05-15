@@ -730,7 +730,7 @@ class CaseDocument(Base):
     id = Column(Integer, primary_key=True)
     case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
     document_type = Column(SQLEnum(DocumentType), nullable=False)
-    document_content = Column(Text, nullable=True)  # Extracted text from PDF
+    document_content = Column(Text(length=50000), nullable=True)  # Extracted text (limited to 50k chars for stability)
     file_path = Column(String(255), nullable=True)  # Optional: path to stored PDF
     uploaded_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     summary = Column(Text, nullable=True)  # LLM-generated 3-bullet summary
@@ -1736,6 +1736,11 @@ def create_case_document(
             "case_id not found or not owned by the provided user_id"
         )
 
+    # Truncate content to prevent unbounded memory usage and DB bloat
+    limit = Config.MAX_DOCUMENT_TEXT_STORAGE_LIMIT
+    if document_content and len(document_content) > limit:
+        document_content = document_content[:limit] + "\n\n... [TRUNCATED DUE TO SIZE LIMIT] ..."
+
     doc = CaseDocument(
         case_id=normalized_case_id,
         document_type=document_type,
@@ -1773,6 +1778,9 @@ def update_case_document(
     doc = db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
     if doc:
         if document_content is not None:
+            limit = Config.MAX_DOCUMENT_TEXT_STORAGE_LIMIT
+            if len(document_content) > limit:
+                document_content = document_content[:limit] + "\n\n... [TRUNCATED DUE TO SIZE LIMIT] ..."
             doc.document_content = document_content
         if summary is not None:
             doc.summary = summary

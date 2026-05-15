@@ -92,6 +92,7 @@ class Config:
     MAX_FILE_SIZE_MB = _get_int_env("MAX_FILE_SIZE_MB", 25)
     WARN_FILE_SIZE_MB = _get_int_env("WARN_FILE_SIZE_MB", 10)
     TEXT_COMPRESSION_LIMIT = _get_int_env("TEXT_COMPRESSION_LIMIT", 6000)
+    MAX_DOCUMENT_TEXT_STORAGE_LIMIT = _get_int_env("MAX_DOCUMENT_TEXT_STORAGE_LIMIT", 50000)
     # --- Attachments ---
     # Directory where uploaded attachments are stored (development)
     ATTACHMENTS_DIR = _get_val("ATTACHMENTS_DIR", str(PROJECT_ROOT / "attachments"))
