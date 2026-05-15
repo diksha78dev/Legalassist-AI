@@ -869,18 +869,19 @@ def require_auth() -> bool:
             # authentication fails, no further code in the current execution context 
             # is permitted to run, completely neutralizing the risk of accidental exposure.
             # 
-            # 4. THE SOLUTION: IMMEDIATE CONTEXT ABORT VIA ST.RERUN()
+            # 4. THE SOLUTION: IMMEDIATE CONTEXT ABORT VIA ST.SWITCH_PAGE()
             # -------------------------------------------------------
             # To fix this architectural flaw, we must explicitly tell Streamlit to abandon
-            # the current execution run immediately after clearing the session state.
+            # the current execution run immediately after clearing the session state and
+            # navigate directly to the login page.
             # 
-            # We achieve this by calling `st.rerun()`. 
+            # We achieve this by calling `st.switch_page(PAGE_LOGIN)`. 
             # 
-            # How `st.rerun()` works under the hood:
-            #   - It raises a special internal exception (`RerunException`).
+            # How `st.switch_page()` works under the hood:
+            #   - It raises a special internal navigation exception.
             #   - This exception is caught by the Streamlit execution engine.
             #   - The engine completely discards the ongoing render.
-            #   - It immediately starts a fresh, new execution from the top of the script.
+            #   - It immediately starts a fresh execution on the login page.
             # 
             # Because `logout_user()` has already mutated the `st.session_state` to remove
             # the authentication flags, the new run will accurately reflect an unauthenticated
@@ -1047,16 +1048,15 @@ def require_auth() -> bool:
             # and ensures a seamless, deterministic user experience.
             # =========================================================================
             #
-            # The following lines perform the actual state cleanup and forced rerun.
+            # The following lines perform the actual state cleanup and forced redirect.
             # Do NOT remove or reorder these lines.
             # 
             # Step 1: Securely wipe all PII and authentication flags from the session state.
             # This includes revoking the current token in the database to prevent replay attacks.
             logout_user()
             
-            # Step 2: Raise the internal exception to abandon the current execution context
-            # and trigger a fresh render cycle. The application will restart from the top.
-            st.rerun()
+            # Step 2: Move the user to the login page and abandon the current render.
+            st.switch_page(PAGE_LOGIN)
 
     return False
 
