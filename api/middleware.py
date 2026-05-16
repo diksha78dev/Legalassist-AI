@@ -203,7 +203,7 @@ async def request_size_limit_middleware(request: Request, call_next: Callable):
             max_json_body = ValidationConfig.MAX_JSON_BODY
             
             # For file uploads, allow larger sizes
-            if request.url.path.startswith("/api/v1/analyze/upload") or request.url.path.startswith("/api/v1/documents"):
+            if request.url.path.startswith("/api/v1/analyze/upload") or request.url.path.startswith("/api/v1/documents") or request.url.path.startswith("/api/v1/analyze/document"):
                 max_size = ValidationConfig.MAX_UPLOAD_SIZE
             else:
                 max_size = max_json_body
