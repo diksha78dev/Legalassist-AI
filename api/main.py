@@ -1,6 +1,11 @@
 """
 Main FastAPI Application
 """
+# asyncio imported at module level for performance - avoids repeated import
+# resolution inside async hot paths like WebSocket loops
+import asyncio
+from contextlib import asynccontextmanager
+
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,9 +13,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.openapi.utils import get_openapi
 from fastapi import status
-from contextlib import asynccontextmanager
 import structlog
-import asyncio
 
 from api.config import get_settings
 from api.middleware import (
