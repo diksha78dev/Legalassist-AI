@@ -2,6 +2,7 @@
 REST API Integration module for Flask/Streamlit applications
 """
 from functools import wraps
+import uuid
 from celery_app import celery_app
 import structlog
 
@@ -20,7 +21,7 @@ class StreamlitAPIAdapter:
         
         task = analyze_document_task.delay(
             user_id="streamlit-user",
-            document_id="doc_" + __import__('uuid').uuid4().hex[:8],
+            document_id="doc_" + uuid.uuid4().hex[:8],
             text=text,
             document_type=document_type
         )
