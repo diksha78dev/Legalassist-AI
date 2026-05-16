@@ -139,14 +139,15 @@ class DistributedRateLimiter:
 
             return allowed
         except Exception as exc:
+            fail_open = not any(p in endpoint for p in ["/api/v1/analyze", "/api/v1/auth"])
             logger.error(
                 "rate_limiter_error",
                 error=str(exc),
                 identifier=identifier,
                 endpoint=endpoint,
-                fail_open=True,
+                fail_open=fail_open,
             )
-            return True
+            return fail_open
 
     async def get_remaining_ttl(self, identifier: str, endpoint: str, window_seconds: int) -> int:
         try:
