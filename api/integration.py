@@ -7,6 +7,8 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
+_integration_done = False
+
 
 class StreamlitAPIAdapter:
     """Adapter for Streamlit application to use async API tasks"""
@@ -72,7 +74,14 @@ def integrate_api_with_core():
 
     Raises RuntimeError on import failure so broken wiring is surfaced
     immediately at startup rather than silently downgraded to a warning.
+    
+    Idempotent - safe to call multiple times.
     """
+    global _integration_done
+    
+    if _integration_done:
+        return
+    
     logger.info("Integrating REST API with core application")
 
     # Import the real core entry points.  Raise immediately if they are
@@ -102,6 +111,8 @@ def integrate_api_with_core():
             "summary_prompt": summary_prompt,
             "remedies": remedies,
         }
+    
+    _integration_done = True
 
 
 if __name__ == "__main__":
