@@ -11,6 +11,7 @@ from auth import require_auth, redirect_to_login, get_current_user_id, get_curre
 import routes
 from case_manager import get_user_cases_summary, get_or_create_case_for_document
 from database import CaseStatus, DocumentType
+from pages.ui_components import render_header, section
 
 # Page config
 st.set_page_config(
@@ -229,37 +230,34 @@ def main():
     user_email = get_current_user_email()
 
     # Header
-    st.title("📁 My Cases")
-    st.markdown(f"*Welcome back, {user_email}*")
-
-    st.markdown("---")
+    render_header("📁 My Cases", f"Welcome back, {user_email}")
 
     # Stats bar
     cases = get_user_cases_summary(user_id, include_closed=True)
 
     if cases:
         render_stats_bar(cases)
-        st.markdown("---")
 
     # Filters
-    col1, col2, col3 = st.columns(3)
+    with section("Filter Cases"):
+        col1, col2, col3 = st.columns(3)
 
-    with col1:
-        status_filter = st.selectbox(
-            "Filter by Status",
-            ["All", "Active", "Appealed", "Closed", "Pending"],
-            key="status_filter",
-        )
+        with col1:
+            status_filter = st.selectbox(
+                "Filter by Status",
+                ["All", "Active", "Appealed", "Closed", "Pending"],
+                key="status_filter",
+            )
 
-    with col2:
-        type_filter = st.selectbox(
-            "Filter by Type",
-            ["All"] + sorted(set(c["case_type"].title() for c in cases)),
-            key="type_filter",
-        )
+        with col2:
+            type_filter = st.selectbox(
+                "Filter by Type",
+                ["All"] + sorted(set(c["case_type"].title() for c in cases)),
+                key="type_filter",
+            )
 
-    with col3:
-        search_query = st.text_input("🔍 Search", placeholder="Case number or title...", key="search")
+        with col3:
+            search_query = st.text_input("🔍 Search", placeholder="Case number or title...", key="search")
 
     # Apply filters
     filtered_cases = cases
@@ -293,7 +291,7 @@ def main():
     st.markdown("---")
 
     # Create new case section
-    with st.expander("📁 Create New Case Manually"):
+    with section("📁 Create New Case Manually"):
         render_create_case_modal()
 
     # Handle export has been moved to export_dialog directly invoked by the case card
