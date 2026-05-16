@@ -1,11 +1,12 @@
 """
 API Configuration
 """
+import os
 from functools import lru_cache
-import tempfile
 from pathlib import Path
 from typing import Optional
 from pydantic_settings import BaseSettings
+from pydantic import field_validator
 
 
 class APISettings(BaseSettings):
@@ -46,10 +47,20 @@ class APISettings(BaseSettings):
     
     # Authentication
     AUTH_ENABLED: bool = True
-    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "your-secret-key-change-in-production")
+    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "")
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRATION_HOURS: int = 24
     API_KEY_HEADER: str = "X-API-Key"
+    
+    @field_validator("JWT_SECRET_KEY")
+    @classmethod
+    def validate_jwt_secret(cls, v: str) -> str:
+        if not v or v == "your-secret-key-change-in-production":
+            raise ValueError(
+                "JWT_SECRET_KEY must be set to a secure value. "
+                "Do not use default or placeholder values in production."
+            )
+        return v
     
     # Database
     DATABASE_URL: str = os.getenv(
