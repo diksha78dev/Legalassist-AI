@@ -86,6 +86,10 @@ jobs:
     - name: Install security tools
       run: |
         pip install bandit safety
+
+    - name: Run secret policy checks
+      run: |
+        python scripts/check_secrets_policy.py
     
     - name: Run Bandit security scan
       run: |
