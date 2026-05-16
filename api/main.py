@@ -54,7 +54,7 @@ middleware = [
     ),
     Middleware(
         TrustedHostMiddleware,
-        allowed_hosts=settings.ALLOWED_HOSTS
+        allowed_hosts=settings.TRUSTED_HOSTS,
     ),
 ]
 
@@ -65,6 +65,8 @@ middleware = [
 
 def create_app() -> FastAPI:
     """Create FastAPI application"""
+
+    settings.validate_runtime_security()
     
     app = FastAPI(
         title=settings.API_TITLE,
@@ -164,19 +166,16 @@ def create_app() -> FastAPI:
     async def startup_event():
         """Initialize on startup"""
         initialize_observability_for_environment()
+<<<<<<< HEAD
         
         if settings.RATE_LIMIT_ENABLED:
             logger.info(
-                "Rate limiter enabled",
-                redis_url=settings.REDIS_URL,
-                requests=settings.RATE_LIMIT_REQUESTS,
-                window=settings.RATE_LIMIT_WINDOW
+                trusted_hosts=settings.TRUSTED_HOSTS,
             )
-        
+>>>>>>> 498
         logger.info(
             "API Starting",
             version=settings.API_VERSION,
-            environment=settings.LOG_LEVEL
         )
     
     @app.on_event("shutdown")

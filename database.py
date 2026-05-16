@@ -1,13 +1,17 @@
+"""Compatibility shim for the original monolithic `database.py`.
+
+The project has moved models and CRUD helpers into the `db/` package, but many
+existing imports still point at `database`. This module re-exports the pieces
+needed by the current codebase and keeps the authentication/OTP security path
+working while the refactor continues.
 """
-Database models for deadline tracking and notification management.
-Uses SQLAlchemy ORM with SQLite for persistence.
-"""
+
+from __future__ import annotations
 
 import datetime as dt
 import hashlib
 import logging
 from typing import Optional, List
-import threading
 from sqlalchemy import (
     create_engine,
     Column,
@@ -21,63 +25,29 @@ from sqlalchemy import (
     JSON,
     UniqueConstraint,
     Index,
-    event,
 )
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
 import enum
 from contextlib import contextmanager
-from config import Config
+from typing import Optional, List
 
+import enum
 try:
     import redis
-except ImportError:  # pragma: no cover - handled at runtime if Redis is unavailable
+except ImportError:  # pragma: no cover - runtime optional dependency
     redis = None
-"""Thin compatibility shim. Re-exports core database symbols from the new db package.
 
-# Database setup
-DATABASE_URL = Config.DATABASE_URL
-_db_url = make_url(DATABASE_URL)
-_is_sqlite = _db_url.get_backend_name() == "sqlite"
-engine = create_engine(
-    DATABASE_URL, 
-    connect_args={"check_same_thread": False, "timeout": 30} if _is_sqlite else {}
-)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, expire_on_commit=False, bind=engine)
-Base = declarative_base()
-
-# SQLite specific concurrency optimizations
-if _is_sqlite:
-    @event.listens_for(engine, "connect")
-    def set_sqlite_pragma(dbapi_connection, connection_record):
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA synchronous=NORMAL")
-        cursor.close()
-
-    @event.listens_for(engine, "begin")
-    def do_begin(conn):
-        conn.execute("BEGIN IMMEDIATE")
-
-# Thread-local storage for session re-entrancy
-_session_registry = threading.local()
-
-logger = logging.getLogger(__name__)
-auth_logger = logging.getLogger("auth.otp")
-
-_OTP_RATE_LIMIT_WINDOW_SECONDS = 60 * 60
-_OTP_RATE_LIMIT_SCRIPT = """
-local current = redis.call('INCR', KEYS[1])
-if current == 1 then
-    redis.call('EXPIRE', KEYS[1], ARGV[1])
-end
-return current
+This file keeps existing imports in the codebase working while models and CRUD
+helpers are moved into `db/` package.
 """
 
+from config import Config
+from db.base import Base
 from db.session import engine, SessionLocal, init_db, db_session, get_db, _to_utc_datetime, _datetime_for_db
+from db.models.auth import User, OTPVerification
 from db.models.notifications import NotificationStatus, NotificationChannel, NotificationLog, NotificationTemplate, UserPreference
 from db.models.cases import CaseDeadline, Case, CaseDocument, Attachment, CaseTimeline
-from db.models.auth import User, OTPVerification
 from db.crud.notifications import (
     create_case_deadline,
     get_upcoming_deadlines,
@@ -209,7 +179,7 @@ class ModelFeedback(Base):
     __tablename__ = "model_feedback"
 
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(String(255), nullable=False, index=True)
     model_name = Column(String(255), nullable=False, index=True)
     task = Column(String(100), nullable=False, index=True)  # summary, remedy, appeal_estimate, etc.
     case_id = Column(Integer, ForeignKey("case_records.id", ondelete="SET NULL"), nullable=True, index=True)
@@ -573,11 +543,10 @@ class OTPVerification(Base):
 
 
 class RevokedToken(Base):
-    """Model for storing revoked JWT tokens (logout blacklist)"""
     __tablename__ = "revoked_tokens"
 
     id = Column(Integer, primary_key=True)
-    jti = Column(String(255), unique=True, nullable=False, index=True)  # JWT ID
+    jti = Column(String(255), unique=True, nullable=False, index=True)
     revoked_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     expires_at = Column(DateTime(timezone=True), nullable=False, index=True)  # When the token would naturally expire
 
@@ -636,7 +605,7 @@ class CaseDocument(Base):
     id = Column(Integer, primary_key=True)
     case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
     document_type = Column(SQLEnum(DocumentType), nullable=False)
-    document_content = Column(Text(length=50000), nullable=True)  # Extracted text (limited to 50k chars for stability)
+    document_content = Column(Text, nullable=True)  # Extracted text from PDF
     file_path = Column(String(255), nullable=True)  # Optional: path to stored PDF
     uploaded_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     summary = Column(Text, nullable=True)  # LLM-generated 3-bullet summary
@@ -868,15 +837,8 @@ def db_session():
     """
     Context manager for database sessions.
     Ensures the session is closed after use, even if an exception occurs.
-    Supports nesting by re-using an existing session in the current thread.
     """
-    # Check if a session is already active in this thread
-    if hasattr(_session_registry, "session") and _session_registry.session is not None:
-        yield _session_registry.session
-        return
-
     db = SessionLocal()
-    _session_registry.session = db
     try:
         yield db
         db.commit()
@@ -885,7 +847,6 @@ def db_session():
         raise
     finally:
         db.close()
-        _session_registry.session = None
 
 
 def get_db():
@@ -1223,7 +1184,7 @@ def get_user_feedback(db: Session, user_id: int, limit: int = 50) -> List[UserFe
 
 def submit_model_feedback(
     db: Session,
-    user_id: int,
+    user_id: str,
     model_name: str,
     task: str,
     case_id: Optional[int] = None,
@@ -1233,7 +1194,7 @@ def submit_model_feedback(
 ) -> ModelFeedback:
     """Persist model output feedback for training and evaluation"""
     fb = ModelFeedback(
-        user_id=user_id,
+        user_id=str(user_id),
         model_name=model_name,
         task=task,
         case_id=case_id,
@@ -1373,13 +1334,13 @@ def _get_otp_rate_limit_script():
     return _otp_rate_limit_script
 
 
-def _reserve_otp_rate_limit_slot(email: str, max_requests_per_hour: int) -> int:
-    normalized_email = str(email).strip().lower()
-    if not normalized_email:
-        raise ValueError("Email is required for OTP rate limiting")
+def _reserve_otp_rate_limit_slot(identifier: str, max_requests_per_hour: int, label: str = "identifier") -> int:
+    normalized_identifier = str(identifier).strip().lower()
+    if not normalized_identifier:
+        raise ValueError(f"{label} is required for OTP rate limiting")
 
     script = _get_otp_rate_limit_script()
-    current = int(script(keys=[_otp_rate_limit_key(normalized_email)], args=[_OTP_RATE_LIMIT_WINDOW_SECONDS]))
+    current = int(script(keys=[_otp_rate_limit_key(normalized_identifier)], args=[_OTP_RATE_LIMIT_WINDOW_SECONDS]))
 
     if current > max_requests_per_hour:
         raise ValueError("Too many OTP requests. Please try again later.")
@@ -1393,9 +1354,12 @@ def create_otp_verification(
     otp_hash: str,
     expires_at: dt.datetime,
     max_requests_per_hour: int = 5,
+    requester_ip: Optional[str] = None,
 ) -> OTPVerification:
-    """Create a new OTP verification record with rate limiting"""
-    _reserve_otp_rate_limit_slot(email, max_requests_per_hour)
+    """Create a new OTP verification record with rate limiting."""
+    _reserve_otp_rate_limit_slot(email, max_requests_per_hour, label="Email")
+    if requester_ip:
+        _reserve_otp_rate_limit_slot(requester_ip, max_requests_per_hour, label="IP")
 
     otp = OTPVerification(
         email=email,
@@ -1409,7 +1373,6 @@ def create_otp_verification(
 
 
 def get_pending_otp(db: Session, email: str) -> Optional[OTPVerification]:
-    """Get unused, non-expired OTP for email"""
     now = dt.datetime.now(dt.timezone.utc)
     return db.query(OTPVerification).filter(
         OTPVerification.email == email,
@@ -1419,16 +1382,6 @@ def get_pending_otp(db: Session, email: str) -> Optional[OTPVerification]:
 
 
 def mark_otp_as_used(db: Session, otp_id: int) -> bool:
-    """
-    Mark an OTP as used to prevent reuse.
-    
-    Args:
-        db: Database session
-        otp_id: OTP record ID to mark as used
-    
-    Returns:
-        True if OTP was found and marked used, False otherwise
-    """
     try:
         otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
         if otp:
@@ -1443,30 +1396,11 @@ def mark_otp_as_used(db: Session, otp_id: int) -> bool:
 
 
 def record_otp_failed_attempt(db: Session, otp_id: int, lockout_duration_minutes: int = 15, max_failed_attempts: int = 5) -> bool:
-    """
-    Record a failed OTP verification attempt and implement lockout after max attempts.
-    
-    Args:
-        db: Database session
-        otp_id: OTP record ID
-        lockout_duration_minutes: Minutes to lock OTP after max attempts exceeded
-        max_failed_attempts: Maximum failed attempts before lockout
-    
-    Returns:
-        True if updated, False if OTP not found
-    """
     otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
     if otp:
         otp.failed_attempts += 1
-        
-        # Lock OTP if max attempts exceeded
         if otp.failed_attempts >= max_failed_attempts:
             otp.locked_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=lockout_duration_minutes)
-            auth_logger.warning(
-                f"OTP for {otp.email} locked after {otp.failed_attempts} failed attempts. "
-                f"Locked until {otp.locked_until}"
-            )
-        
         db.commit()
         db.refresh(otp)
         return True
@@ -1474,7 +1408,6 @@ def record_otp_failed_attempt(db: Session, otp_id: int, lockout_duration_minutes
 
 
 def reset_otp_failed_attempts(db: Session, otp_id: int) -> bool:
-    """Reset failed attempt counter on successful verification"""
     otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
     if otp:
         otp.failed_attempts = 0
@@ -1486,17 +1419,34 @@ def reset_otp_failed_attempts(db: Session, otp_id: int) -> bool:
 
 
 def cleanup_expired_otps(db: Session) -> int:
-    """Delete expired OTPs, return count of deleted"""
     now = dt.datetime.now(dt.timezone.utc)
-    deleted = db.query(OTPVerification).filter(
-        OTPVerification.expires_at < now
-    ).delete()
+    deleted = db.query(OTPVerification).filter(OTPVerification.expires_at < now).delete()
     db.commit()
     return deleted
 
 
+def get_user_by_email(db: Session, email: str) -> Optional[User]:
+    return db.query(User).filter(User.email == email).first()
+
+
+def create_user(db: Session, email: str) -> User:
+    user = User(email=email)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def update_user_last_login(db: Session, user_id: int) -> Optional[User]:
+    user = db.query(User).filter(User.id == user_id).first()
+    if user:
+        user.last_login = dt.datetime.now(dt.timezone.utc)
+        db.commit()
+        db.refresh(user)
+    return user
+
+
 def revoke_token(db: Session, jti: str, expires_at: dt.datetime) -> RevokedToken:
-    """Add a token JTI to the revoked list"""
     token = RevokedToken(jti=jti, expires_at=expires_at)
     db.add(token)
     db.commit()
@@ -1505,16 +1455,12 @@ def revoke_token(db: Session, jti: str, expires_at: dt.datetime) -> RevokedToken
 
 
 def is_token_revoked(db: Session, jti: str) -> bool:
-    """Check if a token has been revoked"""
     return db.query(RevokedToken).filter(RevokedToken.jti == jti).first() is not None
 
 
 def cleanup_expired_revoked_tokens(db: Session) -> int:
-    """Delete revoked tokens that have naturally expired"""
     now = dt.datetime.now(dt.timezone.utc)
-    deleted = db.query(RevokedToken).filter(
-        RevokedToken.expires_at < now
-    ).delete()
+    deleted = db.query(RevokedToken).filter(RevokedToken.expires_at < now).delete()
     db.commit()
     return deleted
 
@@ -1650,11 +1596,6 @@ def create_case_document(
             "case_id not found or not owned by the provided user_id"
         )
 
-    # Truncate content to prevent unbounded memory usage and DB bloat
-    limit = Config.MAX_DOCUMENT_TEXT_STORAGE_LIMIT
-    if document_content and len(document_content) > limit:
-        document_content = document_content[:limit] + "\n\n... [TRUNCATED DUE TO SIZE LIMIT] ..."
-
     doc = CaseDocument(
         case_id=normalized_case_id,
         document_type=document_type,
@@ -1692,9 +1633,6 @@ def update_case_document(
     doc = db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
     if doc:
         if document_content is not None:
-            limit = Config.MAX_DOCUMENT_TEXT_STORAGE_LIMIT
-            if len(document_content) > limit:
-                document_content = document_content[:limit] + "\n\n... [TRUNCATED DUE TO SIZE LIMIT] ..."
             doc.document_content = document_content
         if summary is not None:
             doc.summary = summary

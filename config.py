@@ -57,6 +57,7 @@ class Config:
     APP_ENV = _get_val("APP_ENV", _get_val("ENVIRONMENT", "development")).lower()
     DEBUG = _get_bool_env("DEBUG", APP_ENV in ("dev", "development", "local"))
     TESTING = _get_bool_env("TESTING", False)
+    REQUIRE_HTTPS = _get_bool_env("REQUIRE_HTTPS", True)
     
     # --- Logging ---
     LOG_LEVEL = _get_val("LOG_LEVEL", "INFO")
@@ -127,9 +128,14 @@ class Config:
     
     # --- Authentication (JWT & OTP) ---
     JWT_ALGORITHM = "HS256"
+    JWT_ISSUER = _get_val("JWT_ISSUER", "legalassist.ai")
+    JWT_AUDIENCE = _get_val("JWT_AUDIENCE", "legalassist-users")
     JWT_EXPIRY_HOURS = _get_int_env("JWT_EXPIRY_HOURS", 7 * 24)
+    JWT_SECRET_PREVIOUS = _get_val("JWT_SECRET_PREVIOUS", _get_val("JWT_SECRET_OLD", ""))
     OTP_EXPIRY_MINUTES = _get_int_env("OTP_EXPIRY_MINUTES", 10)
     OTP_MAX_ATTEMPTS = _get_int_env("OTP_MAX_ATTEMPTS", 3)
+    OTP_REQUEST_RATE_LIMIT_MAX = _get_int_env("OTP_REQUEST_RATE_LIMIT_MAX", 5)
+    OTP_REQUEST_RATE_LIMIT_HOURS = _get_int_env("OTP_REQUEST_RATE_LIMIT_HOURS", 1)
     
     @classmethod
     def get_jwt_secret(cls):
@@ -142,7 +148,7 @@ class Config:
         Raises:
             RuntimeError: If JWT_SECRET is not configured in environment variables.
         """
-        secret = str(_get_val("JWT_SECRET", "")).strip()
+        secret = cls.get_current_jwt_secret()
         if secret:
             return secret
         
@@ -153,6 +159,20 @@ class Config:
             "environment variable. Consider using AWS Secrets Manager or HashiCorp Vault "
             "for production secret management."
         )
+
+    @classmethod
+    def get_current_jwt_secret(cls) -> str:
+        """Return the active JWT signing secret without falling back to placeholders."""
+        return str(_get_val("JWT_SECRET", _get_val("JWT_SECRET_CURRENT", ""))).strip()
+
+    @classmethod
+    def get_jwt_secrets(cls) -> list[str]:
+        """Return JWT secrets in verification order: current first, then previous."""
+        secrets_to_try = [
+            cls.get_current_jwt_secret(),
+            str(cls.JWT_SECRET_PREVIOUS).strip(),
+        ]
+        return [secret for secret in dict.fromkeys(secrets_to_try) if secret]
 
     # --- Notification Settings (SMS) ---
     TWILIO_ACCOUNT_SID = _get_val("TWILIO_ACCOUNT_SID", "")
@@ -171,9 +191,37 @@ class Config:
         """Return the SendGrid API key, retrieved on demand to limit exposure."""
         return str(_get_val("SENDGRID_API_KEY", "") or "")
 
+    @classmethod
+    def validate_runtime_security(cls):
+        """Fail fast when production settings are insecure or missing required secrets."""
+        if cls.is_production() and (cls.DEBUG or cls.TESTING):
+            raise RuntimeError("DEBUG and TESTING must be disabled in production")
+
+        if cls.is_production():
+            required = {
+                "JWT_SECRET": cls.get_current_jwt_secret(),
+                "OPENROUTER_API_KEY": str(cls.OPENROUTER_API_KEY).strip(),
+                "SENDGRID_API_KEY": cls.get_sendgrid_api_key(),
+            }
+            missing = [name for name, value in required.items() if not value]
+            if missing:
+                raise RuntimeError(
+                    "Missing required production secrets: " + ", ".join(sorted(missing))
+                )
+
+            if cls.REQUIRE_HTTPS:
+                if not str(cls.BASE_URL).lower().startswith("https://"):
+                    raise RuntimeError("BASE_URL must use https:// in production")
+                if cls.API_BASE_URL and not str(cls.API_BASE_URL).lower().startswith("https://"):
+                    raise RuntimeError("API_BASE_URL must use https:// in production")
+
     # --- Application URLs ---
     BASE_URL = _get_val("BASE_URL", "https://legalassist.ai")
 
     @classmethod
     def is_development(cls):
         return cls.APP_ENV in ("dev", "development", "local") or cls.DEBUG or cls.TESTING
+
+    @classmethod
+    def is_production(cls):
+        return cls.APP_ENV in ("production", "prod", "live")

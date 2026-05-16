@@ -1,6 +1,6 @@
 import datetime as dt
 import enum
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, ForeignKey, Enum as SQLEnum, Index
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, ForeignKey, Enum as SQLEnum, Index, UniqueConstraint
 from sqlalchemy.orm import relationship
 from db.base import Base
 
@@ -56,6 +56,9 @@ class NotificationTemplate(Base):
 
 class NotificationLog(Base):
     __tablename__ = "notification_logs"
+    __table_args__ = (
+        UniqueConstraint("deadline_id", "days_before", "channel", name="uq_notification_deadline_days_channel"),
+    )
 
     id = Column(Integer, primary_key=True)
     deadline_id = Column(Integer, ForeignKey("case_deadlines.id", ondelete="CASCADE"), nullable=False, index=True)
