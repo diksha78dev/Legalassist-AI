@@ -1,7 +1,12 @@
+"""Compatibility shim for the original monolithic `database.py`.
+
+The project has moved models and CRUD helpers into the `db/` package, but many
+existing imports still point at `database`. This module re-exports the pieces
+needed by the current codebase and keeps the authentication/OTP security path
+working while the refactor continues.
 """
-Database models for deadline tracking and notification management.
-Uses SQLAlchemy ORM with SQLite for persistence.
-"""
+
+from __future__ import annotations
 
 import datetime as dt
 import hashlib
@@ -27,11 +32,12 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
 import enum
 from contextlib import contextmanager
-from config import Config
+from typing import Optional, List
 
+import enum
 try:
     import redis
-except ImportError:  # pragma: no cover - handled at runtime if Redis is unavailable
+except ImportError:  # pragma: no cover - runtime optional dependency
     redis = None
 """Thin compatibility shim. Re-exports core database symbols from the new db package.
 
@@ -1373,13 +1379,13 @@ def _get_otp_rate_limit_script():
     return _otp_rate_limit_script
 
 
-def _reserve_otp_rate_limit_slot(email: str, max_requests_per_hour: int) -> int:
-    normalized_email = str(email).strip().lower()
-    if not normalized_email:
-        raise ValueError("Email is required for OTP rate limiting")
+def _reserve_otp_rate_limit_slot(identifier: str, max_requests_per_hour: int, label: str = "identifier") -> int:
+    normalized_identifier = str(identifier).strip().lower()
+    if not normalized_identifier:
+        raise ValueError(f"{label} is required for OTP rate limiting")
 
     script = _get_otp_rate_limit_script()
-    current = int(script(keys=[_otp_rate_limit_key(normalized_email)], args=[_OTP_RATE_LIMIT_WINDOW_SECONDS]))
+    current = int(script(keys=[_otp_rate_limit_key(normalized_identifier)], args=[_OTP_RATE_LIMIT_WINDOW_SECONDS]))
 
     if current > max_requests_per_hour:
         raise ValueError("Too many OTP requests. Please try again later.")
@@ -1393,9 +1399,12 @@ def create_otp_verification(
     otp_hash: str,
     expires_at: dt.datetime,
     max_requests_per_hour: int = 5,
+    requester_ip: Optional[str] = None,
 ) -> OTPVerification:
-    """Create a new OTP verification record with rate limiting"""
-    _reserve_otp_rate_limit_slot(email, max_requests_per_hour)
+    """Create a new OTP verification record with rate limiting."""
+    _reserve_otp_rate_limit_slot(email, max_requests_per_hour, label="Email")
+    if requester_ip:
+        _reserve_otp_rate_limit_slot(requester_ip, max_requests_per_hour, label="IP")
 
     otp = OTPVerification(
         email=email,
@@ -1409,7 +1418,6 @@ def create_otp_verification(
 
 
 def get_pending_otp(db: Session, email: str) -> Optional[OTPVerification]:
-    """Get unused, non-expired OTP for email"""
     now = dt.datetime.now(dt.timezone.utc)
     return db.query(OTPVerification).filter(
         OTPVerification.email == email,
@@ -1419,16 +1427,6 @@ def get_pending_otp(db: Session, email: str) -> Optional[OTPVerification]:
 
 
 def mark_otp_as_used(db: Session, otp_id: int) -> bool:
-    """
-    Mark an OTP as used to prevent reuse.
-    
-    Args:
-        db: Database session
-        otp_id: OTP record ID to mark as used
-    
-    Returns:
-        True if OTP was found and marked used, False otherwise
-    """
     try:
         otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
         if otp:
@@ -1443,30 +1441,11 @@ def mark_otp_as_used(db: Session, otp_id: int) -> bool:
 
 
 def record_otp_failed_attempt(db: Session, otp_id: int, lockout_duration_minutes: int = 15, max_failed_attempts: int = 5) -> bool:
-    """
-    Record a failed OTP verification attempt and implement lockout after max attempts.
-    
-    Args:
-        db: Database session
-        otp_id: OTP record ID
-        lockout_duration_minutes: Minutes to lock OTP after max attempts exceeded
-        max_failed_attempts: Maximum failed attempts before lockout
-    
-    Returns:
-        True if updated, False if OTP not found
-    """
     otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
     if otp:
         otp.failed_attempts += 1
-        
-        # Lock OTP if max attempts exceeded
         if otp.failed_attempts >= max_failed_attempts:
             otp.locked_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=lockout_duration_minutes)
-            auth_logger.warning(
-                f"OTP for {otp.email} locked after {otp.failed_attempts} failed attempts. "
-                f"Locked until {otp.locked_until}"
-            )
-        
         db.commit()
         db.refresh(otp)
         return True
@@ -1474,7 +1453,6 @@ def record_otp_failed_attempt(db: Session, otp_id: int, lockout_duration_minutes
 
 
 def reset_otp_failed_attempts(db: Session, otp_id: int) -> bool:
-    """Reset failed attempt counter on successful verification"""
     otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
     if otp:
         otp.failed_attempts = 0
@@ -1486,17 +1464,34 @@ def reset_otp_failed_attempts(db: Session, otp_id: int) -> bool:
 
 
 def cleanup_expired_otps(db: Session) -> int:
-    """Delete expired OTPs, return count of deleted"""
     now = dt.datetime.now(dt.timezone.utc)
-    deleted = db.query(OTPVerification).filter(
-        OTPVerification.expires_at < now
-    ).delete()
+    deleted = db.query(OTPVerification).filter(OTPVerification.expires_at < now).delete()
     db.commit()
     return deleted
 
 
+def get_user_by_email(db: Session, email: str) -> Optional[User]:
+    return db.query(User).filter(User.email == email).first()
+
+
+def create_user(db: Session, email: str) -> User:
+    user = User(email=email)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def update_user_last_login(db: Session, user_id: int) -> Optional[User]:
+    user = db.query(User).filter(User.id == user_id).first()
+    if user:
+        user.last_login = dt.datetime.now(dt.timezone.utc)
+        db.commit()
+        db.refresh(user)
+    return user
+
+
 def revoke_token(db: Session, jti: str, expires_at: dt.datetime) -> RevokedToken:
-    """Add a token JTI to the revoked list"""
     token = RevokedToken(jti=jti, expires_at=expires_at)
     db.add(token)
     db.commit()
@@ -1505,16 +1500,12 @@ def revoke_token(db: Session, jti: str, expires_at: dt.datetime) -> RevokedToken
 
 
 def is_token_revoked(db: Session, jti: str) -> bool:
-    """Check if a token has been revoked"""
     return db.query(RevokedToken).filter(RevokedToken.jti == jti).first() is not None
 
 
 def cleanup_expired_revoked_tokens(db: Session) -> int:
-    """Delete revoked tokens that have naturally expired"""
     now = dt.datetime.now(dt.timezone.utc)
-    deleted = db.query(RevokedToken).filter(
-        RevokedToken.expires_at < now
-    ).delete()
+    deleted = db.query(RevokedToken).filter(RevokedToken.expires_at < now).delete()
     db.commit()
     return deleted
 

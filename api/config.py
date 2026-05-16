@@ -49,6 +49,8 @@ class APISettings(BaseSettings):
     JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "your-secret-key-change-in-production")
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRATION_HOURS: int = 24
+    JWT_ISSUER: str = os.getenv("JWT_ISSUER", "legalassist.ai")
+    JWT_AUDIENCE: str = os.getenv("JWT_AUDIENCE", "legalassist-users")
     API_KEY_HEADER: str = "X-API-Key"
     
     # Database
