@@ -511,6 +511,7 @@ def main():
         # the same name correctly invalidates the cached result.
         file_bytes = uploaded_file.getvalue()
         content_hash = hashlib.md5(file_bytes).hexdigest()
+        cache_key = f"{uploaded_file.name}_{content_hash}_{language}"
         st.session_state.processed_file = uploaded_file.name
         st.session_state.processed_file_hash = content_hash
         st.session_state.last_language = language
@@ -524,10 +525,7 @@ def main():
 
         with st.spinner(ui["processing"]):
             try:
-                # Build the same content-based cache key used when the button was clicked.
-                file_bytes = uploaded_file.getvalue()
-                content_hash = hashlib.md5(file_bytes).hexdigest()
-                cache_key = f"{uploaded_file.name}_{content_hash}_{language}"
+                # Cache key already computed above with content_hash for content integrity
 
                 # Only call LLM if we haven't processed this exact file/content/language combo
                 if st.session_state.get("last_processed") != cache_key:
