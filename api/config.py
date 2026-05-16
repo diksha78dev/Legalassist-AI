@@ -63,10 +63,7 @@ class APISettings(BaseSettings):
         return v
     
     # Database
-    DATABASE_URL: str = os.getenv(
-        "DATABASE_URL", 
-        "postgresql://user:password@localhost:5432/legalassist"
-    )
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "")
     DATABASE_POOL_SIZE: int = 20
     DATABASE_MAX_OVERFLOW: int = 10
     
