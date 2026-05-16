@@ -39,6 +39,7 @@ try:
     import redis
 except ImportError:  # pragma: no cover - runtime optional dependency
     redis = None
+"""Thin compatibility shim. Re-exports core database symbols from the new db package.
 
 # Database setup
 DATABASE_URL = Config.DATABASE_URL
@@ -78,162 +79,46 @@ if current == 1 then
 end
 return current
 """
-_otp_rate_limit_client = None
-_otp_rate_limit_script = None
 
+from db.session import engine, SessionLocal, init_db, db_session, get_db, _to_utc_datetime, _datetime_for_db
+from db.models.notifications import NotificationStatus, NotificationChannel, NotificationLog, NotificationTemplate, UserPreference
+from db.models.cases import CaseDeadline, Case, CaseDocument, Attachment, CaseTimeline
+from db.models.auth import User, OTPVerification
+from db.crud.notifications import (
+    create_case_deadline,
+    get_upcoming_deadlines,
+    has_notification_been_sent,
+    log_notification,
+    get_notification_history,
+)
 
-def _to_utc_datetime(value: dt.datetime) -> dt.datetime:
-    """Convert a datetime to timezone-aware UTC."""
-    if value.tzinfo is None:
-        return value.replace(tzinfo=dt.timezone.utc)
-    return value.astimezone(dt.timezone.utc)
+__all__ = [
+    "engine",
+    "SessionLocal",
+    "init_db",
+    "db_session",
+    "get_db",
+    "_to_utc_datetime",
+    "_datetime_for_db",
+    "NotificationStatus",
+    "NotificationChannel",
+    "UserPreference",
+    "NotificationLog",
+    "NotificationTemplate",
+    "CaseDeadline",
+    "Case",
+    "CaseDocument",
+    "Attachment",
+    "CaseTimeline",
+    "User",
+    "OTPVerification",
+    "create_case_deadline",
+    "get_upcoming_deadlines",
+    "has_notification_been_sent",
+    "log_notification",
+    "get_notification_history",
+]
 
-
-def _datetime_for_db(value: dt.datetime) -> dt.datetime:
-    """Return a datetime in the format best suited for the current backend."""
-    utc_value = _to_utc_datetime(value)
-    if _is_sqlite:
-        return utc_value.replace(tzinfo=None)
-    return utc_value
-
-
-class NotificationStatus(str, enum.Enum):
-    """Status of sent notifications"""
-    PENDING = "pending"
-    SENT = "sent"
-    FAILED = "failed"
-    BOUNCED = "bounced"
-    OPENED = "opened"
-
-
-class NotificationChannel(str, enum.Enum):
-    """Channel for sending notifications"""
-    SMS = "sms"
-    EMAIL = "email"
-    BOTH = "both"
-
-
-class CaseDeadline(Base):
-    """Model for case deadlines"""
-    __tablename__ = "case_deadlines"
-
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
-    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
-    case_title = Column(String(255), nullable=False)
-    deadline_date = Column(DateTime(timezone=True), nullable=False, index=True)
-    deadline_type = Column(String(255), nullable=False)  # appeal, filing, submission, etc.
-    description = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
-    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
-    is_completed = Column(Boolean, default=False, index=True)
-
-    # Relationships
-    case = relationship("Case", back_populates="deadlines")
-    notifications = relationship("NotificationLog", back_populates="deadline", cascade="all, delete-orphan")
-    attachments = relationship("Attachment", back_populates="deadline", cascade="all, delete-orphan")
-
-    def days_until_deadline(self) -> int:
-        """Calculate days remaining until deadline"""
-        now = dt.datetime.now(dt.timezone.utc)
-        deadline = self.deadline_date
-        if deadline and deadline.tzinfo is None:
-            deadline = deadline.replace(tzinfo=dt.timezone.utc)
-        delta = deadline - now
-        return max(0, delta.days)
-
-    def __repr__(self):
-        return f"<CaseDeadline(user_id={self.user_id}, case_id={self.case_id}, deadline_date={self.deadline_date})>"
-
-
-class UserPreference(Base):
-    """Model for user notification preferences"""
-    __tablename__ = "user_preferences"
-
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
-    phone_number = Column(String(255), nullable=True)
-    email = Column(String(255), nullable=False)
-    notification_channel = Column(SQLEnum(NotificationChannel), default=NotificationChannel.BOTH)
-    timezone = Column(String(255), default="UTC")  # e.g., "Asia/Kolkata", "America/New_York"
-    notify_30_days = Column(Boolean, default=True)
-    notify_10_days = Column(Boolean, default=True)
-    notify_3_days = Column(Boolean, default=True)
-    notify_1_day = Column(Boolean, default=True)
-
-    # Holiday-aware reminder engine (MVP)
-    holiday_aware_reminders = Column(Boolean, default=False)
-    holiday_country = Column(String(255), nullable=True)  # e.g., "IN" (optional in MVP)
-    holiday_region = Column(String(255), nullable=True)   # e.g., "MH" / state/province (optional in MVP)
-    # JSON array of ISO dates: ["2026-01-26", "2026-03-29", ...]
-    holiday_calendar_json = Column(Text, nullable=True)
-
-    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
-    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
-
-
-    # Relationships
-    user = relationship("User", back_populates="preferences")
-
-    def __repr__(self):
-        return f"<UserPreference(user_id={self.user_id}, channel={self.notification_channel})>"
-
-
-class NotificationLog(Base):
-    """Model for tracking sent notifications"""
-    __tablename__ = "notification_logs"
-
-    id = Column(Integer, primary_key=True)
-    deadline_id = Column(Integer, ForeignKey("case_deadlines.id", ondelete="CASCADE"), nullable=False, index=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    channel = Column(SQLEnum(NotificationChannel), nullable=False)
-    status = Column(SQLEnum(NotificationStatus), default=NotificationStatus.PENDING, index=True)
-    recipient = Column(String(255), nullable=False)  # phone or email
-    days_before = Column(Integer, nullable=False)  # 30, 10, 3, or 1 day reminder
-    message_id = Column(String(255), nullable=True)  # From Twilio or SendGrid
-    error_message = Column(Text, nullable=True)
-    message_preview = Column(Text, nullable=True)
-    sent_at = Column(DateTime(timezone=True), nullable=True)
-    delivered_at = Column(DateTime(timezone=True), nullable=True)
-    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
-
-    # Relationships
-    deadline = relationship("CaseDeadline", back_populates="notifications")
-
-    def __repr__(self):
-        return f"<NotificationLog(user_id={self.user_id}, status={self.status}, channel={self.channel})>"
-
-
-class CaseRecord(Base):
-    """Model for tracking individual case records (anonymized)"""
-    __tablename__ = "case_records"
-
-    id = Column(Integer, primary_key=True)
-    hashed_case_id = Column(String(255), unique=True, nullable=False, index=True)  # Hashed ID for privacy
-    case_type = Column(String(255), nullable=False, index=True)  # civil, criminal, family, etc.
-    jurisdiction = Column(String(255), nullable=False, index=True)  # Delhi, Maharashtra, etc.
-    court_name = Column(String(255), nullable=True, index=True)  # District court, High court, etc.
-    judge_name = Column(String(255), nullable=True, index=True)  # Anonymized judge reference
-    plaintiff_type = Column(String(255), nullable=True)  # individual, organization, government
-    defendant_type = Column(String(255), nullable=True)
-    case_value = Column(String(255), nullable=True)  # value range: <1L, 1-5L, 5-10L, >10L
-    outcome = Column(String(255), nullable=False, index=True)  # plaintiff_won, defendant_won, settlement, dismissal
-    judgment_summary = Column(Text, nullable=True)  # Brief summary of judgment
-    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
-    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
-
-    # Relationships
-    outcome_data = relationship("CaseOutcome", back_populates="case_record", uselist=False, cascade="all, delete-orphan")
-
-    def __repr__(self):
-        return f"<CaseRecord(case_type={self.case_type}, jurisdiction={self.jurisdiction}, outcome={self.outcome})>"
-
-
-class CaseOutcome(Base):
-    """Model for tracking appeal outcomes and follow-ups"""
-    __tablename__ = "case_outcomes"
-
-    id = Column(Integer, primary_key=True)
     case_id = Column(Integer, ForeignKey("case_records.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
     appeal_filed = Column(Boolean, default=False, nullable=False)
     appeal_date = Column(DateTime(timezone=True), nullable=True)
