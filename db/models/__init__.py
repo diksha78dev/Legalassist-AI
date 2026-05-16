@@ -1,7 +1,22 @@
 from .notifications import NotificationStatus, NotificationChannel, NotificationLog, NotificationTemplate, UserPreference
-from .cases import CaseDeadline, Case, CaseDocument, Attachment, CaseTimeline
+from .cases import CaseDeadline, Case, CaseDocument, Attachment, CaseTimeline, CaseStatus, DocumentType
 from .auth import User, OTPVerification
 from .feedback import UserFeedback
+from .analytics import (
+    CaseRecord,
+    CaseOutcome,
+    CaseAnalytics,
+    ModelFeedback,
+    ModelPerformance,
+    ModelRoutingRule,
+    SimilarityFeedback,
+    RevokedToken,
+    CaseEmbedding,
+    CaseIssue,
+    CaseArgument,
+    KnowledgeGraphEdge,
+    PrecedentMatch,
+)
 
 __all__ = [
     "NotificationStatus",
@@ -14,7 +29,22 @@ __all__ = [
     "CaseDocument",
     "Attachment",
     "CaseTimeline",
+    "CaseStatus",
+    "DocumentType",
     "User",
     "OTPVerification",
     "UserFeedback",
+    "CaseRecord",
+    "CaseOutcome",
+    "CaseAnalytics",
+    "ModelFeedback",
+    "ModelPerformance",
+    "ModelRoutingRule",
+    "SimilarityFeedback",
+    "RevokedToken",
+    "CaseEmbedding",
+    "CaseIssue",
+    "CaseArgument",
+    "KnowledgeGraphEdge",
+    "PrecedentMatch",
 ]
