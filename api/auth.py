@@ -35,6 +35,11 @@ security = HTTPBearer()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
 
 
+def _get_jwt_secrets_to_try() -> list[str]:
+    secrets_to_try = [settings.JWT_SECRET_KEY, settings.JWT_SECRET_KEY_PREVIOUS]
+    return [secret for secret in dict.fromkeys(secret.strip() for secret in secrets_to_try if secret and secret.strip())]
+
+
 # ============================================================================
 # JWT Token Management
 # ============================================================================
@@ -66,14 +71,31 @@ def create_access_token(data: Dict, expires_delta: Optional[timedelta] = None) -
 def verify_token(token: str) -> Dict:
     """Verify JWT token - raises domain-specific auth errors"""
     try:
-        payload = jwt.decode(
-            token,
-            settings.JWT_SECRET_KEY,
-            algorithms=[settings.JWT_ALGORITHM],
-            issuer=settings.JWT_ISSUER,
-            audience=settings.JWT_AUDIENCE,
-            options={"require": ["exp", "iat", "iss", "aud", "jti", "type"]},
-        )
+        payload = None
+        last_error = None
+        for secret in _get_jwt_secrets_to_try():
+            try:
+                payload = jwt.decode(
+                    token,
+                    secret,
+                    algorithms=[settings.JWT_ALGORITHM],
+                    issuer=settings.JWT_ISSUER,
+                    audience=settings.JWT_AUDIENCE,
+                    options={"require": ["exp", "iat", "iss", "aud", "jti", "type"]},
+                )
+                break
+            except jwt.InvalidTokenError as exc:
+                last_error = exc
+                continue
+
+        if payload is None:
+            if isinstance(last_error, jwt.ExpiredSignatureError):
+                raise last_error
+            if isinstance(last_error, jwt.InvalidIssuerError):
+                raise last_error
+            if isinstance(last_error, jwt.InvalidAudienceError):
+                raise last_error
+            raise jwt.InvalidTokenError(str(last_error) if last_error else "Invalid token")
         if payload.get("type") != "access":
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -108,11 +130,12 @@ def verify_token(token: str) -> Dict:
 
 class APIKey:
     """API Key model"""
-    def __init__(self, key_id: str, name: str, key_hash: str, created_at: datetime, 
+    def __init__(self, key_id: str, name: str, key_hash: str, key_salt: str, created_at: datetime, 
                  expires_at: Optional[datetime] = None):
         self.key_id = key_id
         self.name = name
         self.key_hash = key_hash
+        self.key_salt = key_salt
         self.created_at = created_at
         self.expires_at = expires_at
     
@@ -128,9 +151,14 @@ def generate_api_key() -> str:
     return secrets.token_urlsafe(32)
 
 
-def hash_api_key(key: str) -> str:
-    """Hash API key for storage"""
-    return hashlib.sha256(key.encode()).hexdigest()
+def hash_api_key(key: str, salt: str) -> str:
+    """Hash API key for storage with salt"""
+    return hashlib.sha256((salt + key).encode()).hexdigest()
+
+
+def verify_api_key(key: str, salt: str, key_hash: str) -> bool:
+    """Verify API key against salt and hash"""
+    return hash_api_key(key, salt) == key_hash
 
 
 def create_api_key_record(name: str, expires_in_days: Optional[int] = None) -> tuple[str, APIKey]:
@@ -140,7 +168,8 @@ def create_api_key_record(name: str, expires_in_days: Optional[int] = None) -> t
     that contains only the hashed value for persistence.
     """
     key = generate_api_key()
-    key_hash = hash_api_key(key)
+    salt = secrets.token_hex(16)
+    key_hash = hash_api_key(key, salt)
     created_at = datetime.utcnow()
     expires_at = None
 
@@ -151,6 +180,7 @@ def create_api_key_record(name: str, expires_in_days: Optional[int] = None) -> t
         key_id=f"key_{secrets.token_hex(8)}",
         name=name,
         key_hash=key_hash,
+        key_salt=salt,
         created_at=created_at,
         expires_at=expires_at,
     )

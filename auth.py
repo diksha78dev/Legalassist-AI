@@ -49,6 +49,13 @@ def _is_development_mode() -> bool:
     return Config.is_development()
 
 
+def _get_jwt_secrets_to_try() -> list[str]:
+    secrets_to_try = Config.get_jwt_secrets()
+    if not secrets_to_try:
+        raise RuntimeError("JWT_SECRET is not configured")
+    return secrets_to_try
+
+
 # Configuration
 JWT_SECRET = Config.get_jwt_secret()
 JWT_ALGORITHM = Config.JWT_ALGORITHM
@@ -374,7 +381,7 @@ def create_jwt_token(user_id: int, email: str) -> str:
     # Cryptographically sign the payload using our secret key and specified algorithm
     encoded_token = jwt.encode(
         payload=payload, 
-        key=JWT_SECRET, 
+        key=Config.get_current_jwt_secret(), 
         algorithm=JWT_ALGORITHM
     )
     
@@ -424,14 +431,31 @@ def verify_jwt_token(token: str) -> Optional[dict]:
         # This completely prevents "Cross-JWT Confusion" attacks.
         # =====================================================================
         
-        payload = jwt.decode(
-            jwt=token,
-            key=JWT_SECRET,
-            algorithms=[JWT_ALGORITHM],
-            issuer=Config.JWT_ISSUER,
-            audience=Config.JWT_AUDIENCE,
-            options={"require": ["exp", "iat", "iss", "aud", "jti", "type"]},
-        )
+        last_error = None
+        payload = None
+        for secret in _get_jwt_secrets_to_try():
+            try:
+                payload = jwt.decode(
+                    jwt=token,
+                    key=secret,
+                    algorithms=[JWT_ALGORITHM],
+                    issuer=Config.JWT_ISSUER,
+                    audience=Config.JWT_AUDIENCE,
+                    options={"require": ["exp", "iat", "iss", "aud", "jti", "type"]},
+                )
+                break
+            except jwt.InvalidTokenError as exc:
+                last_error = exc
+                continue
+
+        if payload is None:
+            if isinstance(last_error, jwt.ExpiredSignatureError):
+                raise last_error
+            if isinstance(last_error, jwt.InvalidIssuerError):
+                raise last_error
+            if isinstance(last_error, jwt.InvalidAudienceError):
+                raise last_error
+            raise jwt.InvalidTokenError(str(last_error) if last_error else "Invalid token")
         
         # =====================================================================
         # LAYER 3: TOKEN PURPOSE VALIDATION
@@ -562,14 +586,25 @@ def revoke_jwt_token(token: str) -> bool:
         # issuer and audience checks remain enforced to reject foreign tokens.
         # =====================================================================
 
-        payload = jwt.decode(
-            jwt=token,
-            key=JWT_SECRET,
-            algorithms=[JWT_ALGORITHM],
-            issuer=Config.JWT_ISSUER,
-            audience=Config.JWT_AUDIENCE,
-            options={"verify_exp": False, "verify_signature": True, "require": ["exp", "iat", "iss", "aud", "jti", "type"]},
-        )
+        payload = None
+        last_error = None
+        for secret in _get_jwt_secrets_to_try():
+            try:
+                payload = jwt.decode(
+                    jwt=token,
+                    key=secret,
+                    algorithms=[JWT_ALGORITHM],
+                    issuer=Config.JWT_ISSUER,
+                    audience=Config.JWT_AUDIENCE,
+                    options={"verify_exp": False, "verify_signature": True, "require": ["exp", "iat", "iss", "aud", "jti", "type"]},
+                )
+                break
+            except jwt.InvalidTokenError as exc:
+                last_error = exc
+                continue
+
+        if payload is None:
+            raise last_error or jwt.InvalidTokenError("Invalid token")
         
         jti = payload.get("jti")
         exp = payload.get("exp")

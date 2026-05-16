@@ -43,6 +43,7 @@ from observability.integration import initialize_observability_for_environment
 
 # Initialize database
 from config import Config
+Config.validate_runtime_security()
 init_db()
 
 # ==================== Logging Setup ====================
