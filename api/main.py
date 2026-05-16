@@ -1,7 +1,7 @@
 """
 Main FastAPI Application
 """
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
@@ -30,6 +30,7 @@ from api.validation import (
 
 # Import routes
 from api.routes import documents, cases, reports, analytics, deadlines, auth, health, case_search
+from api.auth import get_current_user_optional
 
 settings = get_settings()
 logger = structlog.get_logger(__name__)
@@ -234,14 +235,16 @@ def create_app() -> FastAPI:
     # ========================================================================
     
     @app.get("/")
-    async def root():
+    async def root(user=Depends(get_current_user_optional)):
         """API root endpoint"""
+        user_info = {"authenticated": True, "user_id": user.user_id} if user else {"authenticated": False}
         return {
             "name": settings.API_TITLE,
             "version": settings.API_VERSION,
             "docs": "/docs",
             "redoc": "/redoc",
-            "openapi": "/openapi.json"
+            "openapi": "/openapi.json",
+            "user": user_info
         }
 
     @app.get("/metrics")
