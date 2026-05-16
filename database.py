@@ -480,7 +480,7 @@ def create_or_update_user_preference(
 
 def submit_model_feedback(
     db: Session,
-    user_id: int,
+    user_id: str,
     model_name: str,
     task: str,
     case_id: Optional[int] = None,
@@ -490,7 +490,7 @@ def submit_model_feedback(
 ) -> ModelFeedback:
     """Submit model output feedback"""
     fb = ModelFeedback(
-        user_id=user_id,
+        user_id=str(user_id),
         model_name=model_name,
         task=task,
         case_id=case_id,
@@ -524,11 +524,77 @@ def create_timeline_event(
         description=description,
         event_date=event_date or dt.datetime.now(dt.timezone.utc),
         event_metadata=metadata,
+    document_type: DocumentType,
+    user_id: int,
+    document_content: Optional[str] = None,
+    file_path: Optional[str] = None,
+    summary: Optional[str] = None,
+    remedies: Optional[dict] = None,
+) -> CaseDocument:
+    """Create a new case document.
+
+    Security: enforce that `case_id` belongs to `user_id` (server-side ownership
+    validation), consistent with create_case_deadline.
+    """
+    try:
+        normalized_case_id = int(case_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("case_id must be an integer matching cases.id") from exc
+
+    # Ownership validation (prevents attaching documents to another user's case)
+    case = db.query(Case).filter(Case.id == normalized_case_id).first()
+    if not case or case.user_id != user_id:
+        raise PermissionError(
+            "case_id not found or not owned by the provided user_id"
+        )
+
+    doc = CaseDocument(
+        case_id=normalized_case_id,
+        document_type=document_type,
+        document_content=document_content,
+        file_path=file_path,
+        summary=summary,
+        remedies=remedies,
     )
     db.add(event)
     db.commit()
     db.refresh(event)
     return event
+    db.refresh(doc)
+    return doc
+
+
+def get_case_documents(db: Session, case_id: int) -> List[CaseDocument]:
+    """Get all documents for a case"""
+    return db.query(CaseDocument).filter(
+        CaseDocument.case_id == case_id
+    ).order_by(CaseDocument.uploaded_at).all()
+
+
+def get_case_document_by_id(db: Session, document_id: int) -> Optional[CaseDocument]:
+    """Get a case document by ID"""
+    return db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
+
+
+def update_case_document(
+    db: Session,
+    document_id: int,
+    document_content: Optional[str] = None,
+    summary: Optional[str] = None,
+    remedies: Optional[dict] = None,
+) -> Optional[CaseDocument]:
+    """Update case document"""
+    doc = db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
+    if doc:
+        if document_content is not None:
+            doc.document_content = document_content
+        if summary is not None:
+            doc.summary = summary
+        if remedies is not None:
+            doc.remedies = remedies
+        db.commit()
+        db.refresh(doc)
+    return doc
 
 
 def create_attachment(
