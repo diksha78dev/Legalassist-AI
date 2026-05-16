@@ -15,6 +15,21 @@ from api.config import get_settings
 from database import SessionLocal, is_token_revoked
 
 
+class AuthError(Exception):
+    """Base authentication error"""
+    pass
+
+
+class TokenExpiredError(AuthError):
+    """Token has expired"""
+    pass
+
+
+class InvalidTokenError(AuthError):
+    """Token is invalid"""
+    pass
+
+
 settings = get_settings()
 security = HTTPBearer()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
@@ -54,7 +69,7 @@ def create_access_token(data: Dict, expires_delta: Optional[timedelta] = None) -
 
 
 def verify_token(token: str) -> Dict:
-    """Verify JWT token"""
+    """Verify JWT token - raises domain-specific auth errors"""
     try:
         payload = None
         last_error = None
@@ -100,25 +115,13 @@ def verify_token(token: str) -> Dict:
                 db.close()
         return payload
     except jwt.ExpiredSignatureError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token has expired"
-        )
+        raise TokenExpiredError("Token has expired")
     except jwt.InvalidIssuerError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token issuer"
-        )
+        raise InvalidTokenError("Invalid token issuer")
     except jwt.InvalidAudienceError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token audience"
-        )
+        raise InvalidTokenError("Invalid token audience")
     except jwt.InvalidTokenError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token"
-        )
+        raise InvalidTokenError("Invalid token")
 
 
 # ============================================================================
@@ -199,39 +202,51 @@ async def get_current_user(
     if token:
         try:
             payload = verify_token(token)
-            user_id = payload.get("sub")
-            email = payload.get("email")
-            role = payload.get("role", "user")
-            
-            if not user_id:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Invalid token payload"
-                )
-            
-            return CurrentUser(user_id, email, role)
-        except HTTPException:
-            raise
+        except TokenExpiredError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token has expired"
+            )
+        except InvalidTokenError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token"
+            )
+        
+        user_id = payload.get("sub")
+        email = payload.get("email")
+        role = payload.get("role", "user")
+        
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token payload"
+            )
+        
+        return CurrentUser(user_id, email, role)
     
     # Try API Key from header — validate as a signed JWT.
-    # Arbitrary or unsigned tokens are rejected by verify_token with a 401.
     if http_auth:
         api_key = http_auth.credentials
         try:
             payload = verify_token(api_key)
-            user_id = payload.get("sub")
-            email = payload.get("email", "api@example.com")
-            role = payload.get("role", "user")
+        except (TokenExpiredError, InvalidTokenError):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token"
+            )
+        
+        user_id = payload.get("sub")
+        email = payload.get("email", "api@example.com")
+        role = payload.get("role", "user")
 
-            if not user_id:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Invalid API key payload"
-                )
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid API key payload"
+            )
 
-            return CurrentUser(user_id, email, role)
-        except HTTPException:
-            raise
+        return CurrentUser(user_id, email, role)
     
     # Try X-API-Key header
     # This would typically be validated against database
