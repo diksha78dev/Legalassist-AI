@@ -8,6 +8,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.openapi.utils import get_openapi
 from fastapi import status
+from contextlib import asynccontextmanager
 import structlog
 import asyncio
 
@@ -69,10 +70,31 @@ def create_app() -> FastAPI:
 
     settings.validate_runtime_security()
     
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        """Application lifespan manager"""
+        initialize_observability_for_environment()
+        
+        if settings.RATE_LIMIT_ENABLED:
+            logger.info(
+                "Rate limiter enabled",
+                redis_url=settings.REDIS_URL,
+                requests=settings.RATE_LIMIT_REQUESTS,
+                window=settings.RATE_LIMIT_WINDOW
+            )
+        
+        logger.info("API Starting", version=settings.API_VERSION)
+        
+        yield
+        
+        await cleanup_limiter()
+        logger.info("API Shutting down")
+    
     app = FastAPI(
         title=settings.API_TITLE,
         description="Comprehensive legal case analysis and deadline management API",
         version=settings.API_VERSION,
+        lifespan=lifespan,
         middleware=middleware
     )
     
@@ -88,7 +110,7 @@ def create_app() -> FastAPI:
     if settings.RATE_LIMIT_ENABLED:
         app.middleware("http")(rate_limit_middleware)
     
-    # ========================================================================
+# ========================================================================
     # Include Routers
     # ========================================================================
     
@@ -107,94 +129,6 @@ def create_app() -> FastAPI:
     # ========================================================================
     # Global Exception Handlers
     # ========================================================================
-    
-    @app.exception_handler(ValidationError)
-    async def validation_error_handler(request: Request, exc: ValidationError):
-        """Handle validation errors"""
-        logger.warning(
-            "validation_error",
-            path=request.url.path,
-            detail=exc.detail
-        )
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={
-                "error_code": "VALIDATION_ERROR",
-                "message": exc.detail
-            }
-        )
-    
-    @app.exception_handler(PayloadTooLargeError)
-    async def payload_too_large_handler(request: Request, exc: PayloadTooLargeError):
-        """Handle payload too large errors"""
-        logger.warning(
-            "payload_too_large",
-            path=request.url.path,
-            detail=exc.detail
-        )
-        return JSONResponse(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            content={
-                "error_code": "PAYLOAD_TOO_LARGE",
-                "message": exc.detail,
-                "status_code": 413
-            },
-            headers={"Retry-After": "60"}
-        )
-    
-    @app.exception_handler(Exception)
-    async def generic_exception_handler(request: Request, exc: Exception):
-        """Handle all uncaught exceptions"""
-        logger.error(
-            "Unhandled exception",
-            path=request.url.path,
-            error=_sanitize_log_text(str(exc)),
-            exception_type=exc.__class__.__name__
-        )
-        return JSONResponse(
-            status_code=500,
-            content={
-                "error_code": "INTERNAL_SERVER_ERROR",
-                "message": "An internal error occurred"
-            }
-        )
-    
-    # ========================================================================
-    # Startup/Shutdown Events
-    # ========================================================================
-    
-    @app.on_event("startup")
-    async def startup_event():
-        """Initialize on startup"""
-        initialize_observability_for_environment()
-        
-        if settings.RATE_LIMIT_ENABLED:
-            logger.info(
-                "Rate limiter enabled",
-                redis_url=settings.REDIS_URL,
-                requests=settings.RATE_LIMIT_REQUESTS,
-                window=settings.RATE_LIMIT_WINDOW
-            )
-        
-        logger.info(
-            "API Starting",
-            version=settings.API_VERSION,
-        )
-    
-    @app.on_event("shutdown")
-    async def shutdown_event():
-        """Cleanup on shutdown"""
-        await cleanup_limiter()
-        logger.info("API Shutting down")
-    
-    # ========================================================================
-    # OpenAPI Customization
-    # ========================================================================
-    
-    def custom_openapi():
-        """Customize OpenAPI schema"""
-        if app.openapi_schema:
-            return app.openapi_schema
         
         openapi_schema = get_openapi(
             title=settings.API_TITLE,
