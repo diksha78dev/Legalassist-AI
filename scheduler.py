@@ -72,8 +72,8 @@ from apscheduler.executors.pool import ThreadPoolExecutor, ProcessPoolExecutor
 
 # APPLICATION-SPECIFIC IMPORTS
 # ------------------------------------------------------------------------------
-from database import (
-    engine,          # Imported to provide the connection for the job store
+from db import (
+    engine,
     init_db,
     SessionLocal,
     get_upcoming_deadlines,
