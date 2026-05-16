@@ -21,6 +21,11 @@ class APISettings(BaseSettings):
     API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
     API_PORT: int = int(os.getenv("API_PORT", "8000"))
     API_WORKERS: int = int(os.getenv("API_WORKERS", "4"))
+    TRUSTED_HOSTS: list = [
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    ]
     
     # CORS
     CORS_ORIGINS: list = [
@@ -50,6 +55,8 @@ class APISettings(BaseSettings):
     JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "")
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRATION_HOURS: int = 24
+    JWT_ISSUER: str = os.getenv("JWT_ISSUER", "legalassist.ai")
+    JWT_AUDIENCE: str = os.getenv("JWT_AUDIENCE", "legalassist-users")
     API_KEY_HEADER: str = "X-API-Key"
     
     @field_validator("JWT_SECRET_KEY")
