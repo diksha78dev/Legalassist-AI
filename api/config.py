@@ -39,9 +39,9 @@ class APISettings(BaseSettings):
     ]
     
     # Allowed Hosts for TrustedHostMiddleware
+    # MUST be set via APP_ALLOWED_HOSTS environment variable in production
     # Format: comma-separated (localhost,127.0.0.1,example.com) or JSON array
-    # Default: localhost, 127.0.0.1
-    ALLOWED_HOSTS: list = None
+    ALLOWED_HOSTS: list = []
     
     # Rate Limiting
     RATE_LIMIT_ENABLED: bool = True
@@ -123,21 +123,23 @@ class APISettings(BaseSettings):
     def __init__(self, **data):
         super().__init__(**data)
         # Parse ALLOWED_HOSTS from environment
-        if self.ALLOWED_HOSTS is None:
-            hosts_env = os.getenv("APP_ALLOWED_HOSTS", "")
-            if hosts_env.strip():
-                # Support both comma-separated and JSON formats
-                if hosts_env.startswith('['):
-                    import json
-                    try:
-                        self.ALLOWED_HOSTS = json.loads(hosts_env)
-                    except (json.JSONDecodeError, ValueError):
-                        self.ALLOWED_HOSTS = [h.strip() for h in hosts_env.split(',') if h.strip()]
-                else:
+        hosts_env = os.getenv("APP_ALLOWED_HOSTS", "")
+        if hosts_env.strip():
+            # Support both comma-separated and JSON formats
+            if hosts_env.startswith('['):
+                import json
+                try:
+                    self.ALLOWED_HOSTS = json.loads(hosts_env)
+                except (json.JSONDecodeError, ValueError):
                     self.ALLOWED_HOSTS = [h.strip() for h in hosts_env.split(',') if h.strip()]
             else:
-                # Safe defaults for development
-                self.ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
+                self.ALLOWED_HOSTS = [h.strip() for h in hosts_env.split(',') if h.strip()]
+        else:
+            # Refuse to run without explicit host configuration
+            raise ValueError(
+                "APP_ALLOWED_HOSTS environment variable must be set. "
+                "Cannot start with empty allowed hosts list for security."
+            )
     
     class Config:
         env_file = ".env"
