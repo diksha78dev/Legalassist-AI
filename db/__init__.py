@@ -19,6 +19,7 @@ from .crud.notifications import (
     log_notification,
     get_notification_history,
 )
+from .crud.feedback import submit_user_feedback, get_user_feedback
 
 __all__ = [
     "engine",
@@ -42,4 +43,6 @@ __all__ = [
     "has_notification_been_sent",
     "log_notification",
     "get_notification_history",
+    "submit_user_feedback",
+    "get_user_feedback",
 ]

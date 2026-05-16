@@ -39,7 +39,6 @@ try:
     import redis
 except ImportError:  # pragma: no cover - runtime optional dependency
     redis = None
-"""Thin compatibility shim. Re-exports core database symbols from the new db package.
 
 # Database setup
 DATABASE_URL = Config.DATABASE_URL
@@ -80,10 +79,12 @@ end
 return current
 """
 
+from config import Config
+from db.base import Base
 from db.session import engine, SessionLocal, init_db, db_session, get_db, _to_utc_datetime, _datetime_for_db
+from db.models.auth import User, OTPVerification
 from db.models.notifications import NotificationStatus, NotificationChannel, NotificationLog, NotificationTemplate, UserPreference
 from db.models.cases import CaseDeadline, Case, CaseDocument, Attachment, CaseTimeline
-from db.models.auth import User, OTPVerification
 from db.crud.notifications import (
     create_case_deadline,
     get_upcoming_deadlines,
@@ -579,11 +580,10 @@ class OTPVerification(Base):
 
 
 class RevokedToken(Base):
-    """Model for storing revoked JWT tokens (logout blacklist)"""
     __tablename__ = "revoked_tokens"
 
     id = Column(Integer, primary_key=True)
-    jti = Column(String(255), unique=True, nullable=False, index=True)  # JWT ID
+    jti = Column(String(255), unique=True, nullable=False, index=True)
     revoked_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     expires_at = Column(DateTime(timezone=True), nullable=False, index=True)  # When the token would naturally expire
 
@@ -1273,95 +1273,21 @@ def aggregate_model_performance(db: Session, task: Optional[str] = None) -> List
         if r.is_accurate:
             stats[key]["accurate"] += 1
 
-    results = []
-    for (model_name, task_name, case_type, jurisdiction), v in stats.items():
-        samples = v["samples"]
-        accurate = v["accurate"]
-        accuracy = f"{(accurate / samples * 100):.1f}%" if samples > 0 else "0%"
-        mp = ModelPerformance(
-            model_name=model_name,
-            task=task_name,
-            case_type=case_type,
-            jurisdiction=jurisdiction,
-            samples=samples,
-            accurate_count=accurate,
-            accuracy=accuracy,
-        )
-        results.append(mp)
-
-    return results
+_OTP_RATE_LIMIT_WINDOW_SECONDS = 60 * 60
+_OTP_RATE_LIMIT_SCRIPT = """
+local current = redis.call('INCR', KEYS[1])
+if current == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return current
+"""
+_otp_rate_limit_client = None
+_otp_rate_limit_script = None
 
 
-def submit_similarity_feedback(
-    db: Session,
-    user_id: str,
-    candidate_case_id: int,
-    query_signature: str,
-    relevance: bool,
-) -> SimilarityFeedback:
-    """Persist feedback for a similarity search result"""
-    feedback = SimilarityFeedback(
-        user_id=str(user_id),
-        candidate_case_id=candidate_case_id,
-        query_signature=query_signature,
-        relevance=relevance,
-    )
-    db.add(feedback)
-    db.commit()
-    db.refresh(feedback)
-    return feedback
-
-
-def get_similarity_feedback(
-    db: Session,
-    user_id: Optional[str] = None,
-    query_signature: Optional[str] = None,
-    candidate_case_id: Optional[int] = None,
-    limit: int = 100,
-) -> List[SimilarityFeedback]:
-    """Get similarity feedback rows filtered by user, query, or candidate case"""
-    query = db.query(SimilarityFeedback)
-
-    if user_id is not None:
-        query = query.filter(SimilarityFeedback.user_id == str(user_id))
-    if query_signature is not None:
-        query = query.filter(SimilarityFeedback.query_signature == query_signature)
-    if candidate_case_id is not None:
-        query = query.filter(SimilarityFeedback.candidate_case_id == candidate_case_id)
-
-    return query.order_by(SimilarityFeedback.created_at.desc()).limit(limit).all()
-
-
-# ==================== User & Authentication Helper Functions ====================
-
-
-def get_user_by_email(db: Session, email: str) -> Optional[User]:
-    """Get user by email address"""
-    return db.query(User).filter(User.email == email).first()
-
-
-def create_user(db: Session, email: str) -> User:
-    """Create a new user"""
-    user = User(email=email)
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-    return user
-
-
-def update_user_last_login(db: Session, user_id: int) -> User:
-    """Update user's last login timestamp"""
-    user = db.query(User).filter(User.id == user_id).first()
-    if user:
-        user.last_login = dt.datetime.now(dt.timezone.utc)
-        db.commit()
-        db.refresh(user)
-    return user
-
-
-def _otp_rate_limit_key(email: str) -> str:
-    normalized_email = str(email).strip().lower()
-    digest = hashlib.sha256(normalized_email.encode("utf-8")).hexdigest()
+def _otp_rate_limit_key(identifier: str) -> str:
+    normalized = str(identifier).strip().lower()
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     return f"otp:rate:{digest}"
 
 
