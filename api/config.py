@@ -1,7 +1,7 @@
 """
 API Configuration
 """
-import os
+from functools import lru_cache
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -132,6 +132,7 @@ class APISettings(BaseSettings):
         case_sensitive = True
 
 
+@lru_cache()
 def get_settings() -> APISettings:
-    """Get API settings"""
+    """Get API settings (cached)"""
     return APISettings()
