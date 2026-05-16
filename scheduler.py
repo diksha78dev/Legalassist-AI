@@ -72,12 +72,17 @@ from apscheduler.executors.pool import ThreadPoolExecutor, ProcessPoolExecutor
 
 # APPLICATION-SPECIFIC IMPORTS
 # ------------------------------------------------------------------------------
-from database import (
-    engine,          # Imported to provide the connection for the job store
+from db import (
+    engine,
     init_db,
     SessionLocal,
     get_upcoming_deadlines,
     UserPreference,
+)
+from notifications.reminder_engine import (
+    should_process_threshold,
+    is_notify_enabled,
+    is_reminder_time_for_user,
 )
 from notification_service import NotificationService
 
@@ -91,30 +96,7 @@ _scheduler: Optional[BackgroundScheduler] = None
 notification_service = NotificationService()
 
 
-def is_reminder_time_for_user(user_timezone: str, reminder_hour: int = 8) -> bool:
-
-    """
-
-    Check if current time matches the reminder hour in user's local timezone.
-    
-    Args:
-        user_timezone: User's timezone as IANA string (e.g., "Asia/Kolkata")
-        reminder_hour: Hour to send reminders (default 8 AM)
-    
-    Returns:
-        True if current time in user's timezone is within the reminder hour
-    """
-    try:
-        if not user_timezone or not isinstance(user_timezone, str):
-            raise ValueError("Invalid timezone type")
-        tz = pytz.timezone(user_timezone)
-        user_now = datetime.now(tz)
-        return user_now.hour == reminder_hour
-    except (pytz.exceptions.UnknownTimeZoneError, ValueError, AttributeError):
-        logger.warning(f"Invalid timezone '{user_timezone}', falling back to UTC")
-        # Fallback to UTC if timezone is invalid
-        user_now = datetime.now(timezone.utc)
-        return user_now.hour == reminder_hour
+# Reminder time logic moved to notifications.reminder_engine.build_reminder_jobs
 
 
 def check_and_send_reminders():
@@ -199,52 +181,44 @@ def check_and_send_reminders():
         logger.info(f"Found {len(upcoming_deadlines)} upcoming deadlines")
 
         sent_count = 0
-        for deadline in upcoming_deadlines:
-            days_left = deadline.days_until_deadline()
-            
-            # Only process deadlines at reminder thresholds
-            if days_left not in [30, 10, 3, 1]:
-                continue
 
-            logger.info(f"Processing deadline: Case={deadline.case_id}, Days Left={days_left}")
+        # Prefetch user preferences for eligible deadlines to avoid N+1 queries
+        eligible = []
+        for dl in upcoming_deadlines:
+            days_left = dl.days_until_deadline()
+            if should_process_threshold(days_left):
+                eligible.append((dl, days_left))
 
-            # Get user preferences
-            user_preference = db.query(UserPreference).filter(
-                UserPreference.user_id == deadline.user_id
-            ).first()
+        user_ids = {d.user_id for d, _ in eligible}
+        prefs_by_user = {}
+        if user_ids:
+            prefs = db.query(UserPreference).filter(UserPreference.user_id.in_(list(user_ids))).all()
+            prefs_by_user = {p.user_id: p for p in prefs}
 
+        for deadline, days_left in eligible:
+            user_preference = prefs_by_user.get(deadline.user_id)
             if not user_preference:
                 logger.warning(f"No preferences found for user {deadline.user_id}. Skipping.")
                 continue
-            
-            # Check if it's currently 8 AM in the user's local timezone
+
+            # Check if reminders should be sent based on preferences and time
+            if not is_notify_enabled(days_left, user_preference):
+                logger.debug(f"Notifications disabled for this threshold ({days_left} days) for user {deadline.user_id}")
+                continue
+
             if not is_reminder_time_for_user(user_preference.timezone):
                 logger.debug(
-
-                    f"Not 8 AM yet in user's timezone",
+                    f"Not reminder hour yet in user's timezone",
                     user_id=deadline.user_id,
                     user_timezone=user_preference.timezone,
                 )
                 continue
 
-            # Check if reminders should be sent based on preferences
-            should_notify = False
-            if days_left == 30 and user_preference.notify_30_days:
-                should_notify = True
-            if days_left == 10 and user_preference.notify_10_days:
-                should_notify = True
-            if days_left == 3 and user_preference.notify_3_days:
-                should_notify = True
-            if days_left == 1 and user_preference.notify_1_day:
-                should_notify = True
-
-            if not should_notify:
-                logger.debug(f"Notifications disabled for this threshold ({days_left} days)")
-                continue
+            logger.info(f"Processing deadline: Case={deadline.case_id}, Days Left={days_left}")
 
             # Send reminders using the notification service
             results = notification_service.send_reminders(db, deadline, user_preference, days_left)
-            
+
             for res in results:
                 if res.success:
                     sent_count += 1

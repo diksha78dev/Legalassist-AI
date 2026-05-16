@@ -2,7 +2,8 @@
 Authentication and Authorization
 """
 import os
-from datetime import datetime, timedelta
+import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict
 import jwt
 from fastapi import Depends, HTTPException, status
@@ -11,6 +12,7 @@ import secrets
 import hashlib
 
 from api.config import get_settings
+from database import SessionLocal, is_token_revoked
 
 
 class AuthError(Exception):
@@ -29,6 +31,36 @@ class InvalidTokenError(AuthError):
 
 
 settings = get_settings()
+security = HTTPBearer()
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
+
+
+# ============================================================================
+# JWT Token Management
+# ============================================================================
+
+def create_access_token(data: Dict, expires_delta: Optional[timedelta] = None) -> str:
+    """Create JWT access token"""
+    to_encode = data.copy()
+    to_encode.setdefault("jti", str(uuid.uuid4()))
+    to_encode.setdefault("iat", datetime.now(timezone.utc))
+    to_encode.setdefault("iss", settings.JWT_ISSUER)
+    to_encode.setdefault("aud", settings.JWT_AUDIENCE)
+    to_encode.setdefault("type", "access")
+    
+    if expires_delta:
+        expire = datetime.now(timezone.utc) + expires_delta
+    else:
+        expire = datetime.now(timezone.utc) + timedelta(hours=settings.JWT_EXPIRATION_HOURS)
+    
+    to_encode.update({"exp": expire})
+    
+    encoded_jwt = jwt.encode(
+        to_encode,
+        settings.JWT_SECRET_KEY,
+        algorithm=settings.JWT_ALGORITHM
+    )
+    return encoded_jwt
 
 
 def verify_token(token: str) -> Dict:
@@ -37,11 +69,35 @@ def verify_token(token: str) -> Dict:
         payload = jwt.decode(
             token,
             settings.JWT_SECRET_KEY,
-            algorithms=["HS256"]
+            algorithms=[settings.JWT_ALGORITHM],
+            issuer=settings.JWT_ISSUER,
+            audience=settings.JWT_AUDIENCE,
+            options={"require": ["exp", "iat", "iss", "aud", "jti", "type"]},
         )
+        if payload.get("type") != "access":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token type",
+            )
+
+        jti = payload.get("jti")
+        if jti:
+            db = SessionLocal()
+            try:
+                if is_token_revoked(db, jti):
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Token has been revoked",
+                    )
+            finally:
+                db.close()
         return payload
     except jwt.ExpiredSignatureError:
         raise TokenExpiredError("Token has expired")
+    except jwt.InvalidIssuerError:
+        raise InvalidTokenError("Invalid token issuer")
+    except jwt.InvalidAudienceError:
+        raise InvalidTokenError("Invalid token audience")
     except jwt.InvalidTokenError:
         raise InvalidTokenError("Invalid token")
 
