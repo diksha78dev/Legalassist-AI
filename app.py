@@ -525,7 +525,10 @@ def main():
 
         with st.spinner(ui["processing"]):
             try:
-                # Cache key already computed above with content_hash for content integrity
+                # Compute content hash for cache validation
+                file_bytes = uploaded_file.getvalue()
+                content_hash = hashlib.md5(file_bytes).hexdigest()
+                cache_key = f"{uploaded_file.name}_{content_hash}_{language}"
 
                 # Only call LLM if we haven't processed this exact file/content/language combo
                 if st.session_state.get("last_processed") != cache_key:
