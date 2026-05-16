@@ -202,18 +202,37 @@ app = create_app()
 # ============================================================================
 
 if settings.ENABLE_WEBSOCKET:
-    from fastapi import WebSocket
+    from fastapi import WebSocket, Query
     from celery_app import TaskStatus
+    from api.auth import AuthError, TokenExpiredError, InvalidTokenError
     
     @app.websocket("/ws/progress/{job_id}")
-    async def websocket_progress_endpoint(websocket: WebSocket, job_id: str):
+    async def websocket_progress_endpoint(
+        websocket: WebSocket,
+        job_id: str,
+        token: str = Query(None)
+    ):
         """
         WebSocket endpoint for real-time job progress
         
-        Usage:
-        ws = new WebSocket('ws://localhost:8000/ws/progress/job_id')
-        ws.onmessage = (event) => console.log(event.data)
+        Requires authentication via token query parameter.
         """
+        if not token:
+            await websocket.close(code=4001, reason="Authentication required")
+            return
+        
+        try:
+            from api.auth import verify_token
+            payload = verify_token(token)
+            user_id = payload.get("sub")
+            
+            if not user_id:
+                await websocket.close(code=4003, reason="Invalid token")
+                return
+        except (TokenExpiredError, InvalidTokenError, AuthError):
+            await websocket.close(code=4001, reason="Invalid or expired token")
+            return
+        
         await websocket.accept()
         
         try:
