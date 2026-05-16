@@ -7,6 +7,7 @@ import datetime as dt
 import hashlib
 import logging
 from typing import Optional, List
+import threading
 from sqlalchemy import (
     create_engine,
     Column,
@@ -20,6 +21,7 @@ from sqlalchemy import (
     JSON,
     UniqueConstraint,
     Index,
+    event,
 )
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
@@ -33,8 +35,43 @@ except ImportError:  # pragma: no cover - handled at runtime if Redis is unavail
     redis = None
 """Thin compatibility shim. Re-exports core database symbols from the new db package.
 
-This file keeps existing imports in the codebase working while models and CRUD
-helpers are moved into `db/` package.
+# Database setup
+DATABASE_URL = Config.DATABASE_URL
+_db_url = make_url(DATABASE_URL)
+_is_sqlite = _db_url.get_backend_name() == "sqlite"
+engine = create_engine(
+    DATABASE_URL, 
+    connect_args={"check_same_thread": False, "timeout": 30} if _is_sqlite else {}
+)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, expire_on_commit=False, bind=engine)
+Base = declarative_base()
+
+# SQLite specific concurrency optimizations
+if _is_sqlite:
+    @event.listens_for(engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.close()
+
+    @event.listens_for(engine, "begin")
+    def do_begin(conn):
+        conn.execute("BEGIN IMMEDIATE")
+
+# Thread-local storage for session re-entrancy
+_session_registry = threading.local()
+
+logger = logging.getLogger(__name__)
+auth_logger = logging.getLogger("auth.otp")
+
+_OTP_RATE_LIMIT_WINDOW_SECONDS = 60 * 60
+_OTP_RATE_LIMIT_SCRIPT = """
+local current = redis.call('INCR', KEYS[1])
+if current == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return current
 """
 
 from db.session import engine, SessionLocal, init_db, db_session, get_db, _to_utc_datetime, _datetime_for_db
@@ -172,7 +209,7 @@ class ModelFeedback(Base):
     __tablename__ = "model_feedback"
 
     id = Column(Integer, primary_key=True)
-    user_id = Column(String(255), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     model_name = Column(String(255), nullable=False, index=True)
     task = Column(String(100), nullable=False, index=True)  # summary, remedy, appeal_estimate, etc.
     case_id = Column(Integer, ForeignKey("case_records.id", ondelete="SET NULL"), nullable=True, index=True)
@@ -599,7 +636,7 @@ class CaseDocument(Base):
     id = Column(Integer, primary_key=True)
     case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
     document_type = Column(SQLEnum(DocumentType), nullable=False)
-    document_content = Column(Text, nullable=True)  # Extracted text from PDF
+    document_content = Column(Text(length=50000), nullable=True)  # Extracted text (limited to 50k chars for stability)
     file_path = Column(String(255), nullable=True)  # Optional: path to stored PDF
     uploaded_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     summary = Column(Text, nullable=True)  # LLM-generated 3-bullet summary
@@ -831,8 +868,15 @@ def db_session():
     """
     Context manager for database sessions.
     Ensures the session is closed after use, even if an exception occurs.
+    Supports nesting by re-using an existing session in the current thread.
     """
+    # Check if a session is already active in this thread
+    if hasattr(_session_registry, "session") and _session_registry.session is not None:
+        yield _session_registry.session
+        return
+
     db = SessionLocal()
+    _session_registry.session = db
     try:
         yield db
         db.commit()
@@ -841,6 +885,7 @@ def db_session():
         raise
     finally:
         db.close()
+        _session_registry.session = None
 
 
 def get_db():
@@ -1178,7 +1223,7 @@ def get_user_feedback(db: Session, user_id: int, limit: int = 50) -> List[UserFe
 
 def submit_model_feedback(
     db: Session,
-    user_id: str,
+    user_id: int,
     model_name: str,
     task: str,
     case_id: Optional[int] = None,
@@ -1188,7 +1233,7 @@ def submit_model_feedback(
 ) -> ModelFeedback:
     """Persist model output feedback for training and evaluation"""
     fb = ModelFeedback(
-        user_id=str(user_id),
+        user_id=user_id,
         model_name=model_name,
         task=task,
         case_id=case_id,
@@ -1605,6 +1650,11 @@ def create_case_document(
             "case_id not found or not owned by the provided user_id"
         )
 
+    # Truncate content to prevent unbounded memory usage and DB bloat
+    limit = Config.MAX_DOCUMENT_TEXT_STORAGE_LIMIT
+    if document_content and len(document_content) > limit:
+        document_content = document_content[:limit] + "\n\n... [TRUNCATED DUE TO SIZE LIMIT] ..."
+
     doc = CaseDocument(
         case_id=normalized_case_id,
         document_type=document_type,
@@ -1642,6 +1692,9 @@ def update_case_document(
     doc = db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
     if doc:
         if document_content is not None:
+            limit = Config.MAX_DOCUMENT_TEXT_STORAGE_LIMIT
+            if len(document_content) > limit:
+                document_content = document_content[:limit] + "\n\n... [TRUNCATED DUE TO SIZE LIMIT] ..."
             doc.document_content = document_content
         if summary is not None:
             doc.summary = summary
