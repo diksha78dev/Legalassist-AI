@@ -93,18 +93,29 @@ def hash_api_key(key: str) -> str:
     return hashlib.sha256(key.encode()).hexdigest()
 
 
-def create_api_key_record(name: str, expires_in_days: Optional[int] = None) -> tuple:
-    """Create new API key record
-    Returns: (key_to_display, key_hash_for_storage)
+def create_api_key_record(name: str, expires_in_days: Optional[int] = None) -> tuple[str, APIKey]:
+    """Create a new API key and its storage record.
+
+    Returns the one-time secret for immediate display plus an APIKey record
+    that contains only the hashed value for persistence.
     """
     key = generate_api_key()
     key_hash = hash_api_key(key)
+    created_at = datetime.utcnow()
     expires_at = None
-    
+
     if expires_in_days:
-        expires_at = datetime.utcnow() + timedelta(days=expires_in_days)
-    
-    return key, key_hash, expires_at
+        expires_at = created_at + timedelta(days=expires_in_days)
+
+    key_record = APIKey(
+        key_id=f"key_{secrets.token_hex(8)}",
+        name=name,
+        key_hash=key_hash,
+        created_at=created_at,
+        expires_at=expires_at,
+    )
+
+    return key, key_record
 
 
 # ============================================================================
@@ -113,7 +124,7 @@ def create_api_key_record(name: str, expires_in_days: Optional[int] = None) -> t
 
 class CurrentUser:
     """Current authenticated user"""
-    def __init__(self, user_id: str, email: str, role: str = "user"):
+    def __init__(self, user_id: int, email: str, role: str = "user"):
         self.user_id = user_id
         self.email = email
         self.role = role

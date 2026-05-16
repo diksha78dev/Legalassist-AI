@@ -11,7 +11,7 @@ import re
 from routes import PAGE_LOGIN
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Any
 import logging
 from config import Config
 
@@ -35,7 +35,6 @@ from database import (
     is_token_revoked,
     cleanup_expired_revoked_tokens,
     User,
-    OTPVerification,  # Added to fix NameError in request_otp rate limiting
 )
 
 logger = logging.getLogger(__name__)
@@ -58,8 +57,6 @@ JWT_EXPIRY_HOURS = Config.JWT_EXPIRY_HOURS
 EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
 
 OTP_EXPIRY_MINUTES = Config.OTP_EXPIRY_MINUTES
-OTP_RATE_LIMIT_HOURS = 1
-OTP_RATE_LIMIT_MAX = 3  # Max OTP requests per email per hour
 
 # OTP Verification Security - Failed Attempt Lockout
 OTP_MAX_FAILED_ATTEMPTS = int(os.getenv("OTP_MAX_FAILED_ATTEMPTS", "5"))  # Max failed verification attempts
@@ -173,7 +170,10 @@ def request_otp(email: str) -> Tuple[bool, str]:
         expires_at = now + timedelta(minutes=OTP_EXPIRY_MINUTES)
 
         # Store OTP
-        create_otp_verification(db, email, otp_hash, expires_at)
+        try:
+            create_otp_verification(db, email, otp_hash, expires_at)
+        except ValueError as exc:
+            return False, str(exc)
 
         # Send OTP email
         email_sent = send_otp_email(email, otp)
@@ -869,18 +869,19 @@ def require_auth() -> bool:
             # authentication fails, no further code in the current execution context 
             # is permitted to run, completely neutralizing the risk of accidental exposure.
             # 
-            # 4. THE SOLUTION: IMMEDIATE CONTEXT ABORT VIA ST.RERUN()
+            # 4. THE SOLUTION: IMMEDIATE CONTEXT ABORT VIA ST.SWITCH_PAGE()
             # -------------------------------------------------------
             # To fix this architectural flaw, we must explicitly tell Streamlit to abandon
-            # the current execution run immediately after clearing the session state.
+            # the current execution run immediately after clearing the session state and
+            # navigate directly to the login page.
             # 
-            # We achieve this by calling `st.rerun()`. 
+            # We achieve this by calling `st.switch_page(PAGE_LOGIN)`. 
             # 
-            # How `st.rerun()` works under the hood:
-            #   - It raises a special internal exception (`RerunException`).
+            # How `st.switch_page()` works under the hood:
+            #   - It raises a special internal navigation exception.
             #   - This exception is caught by the Streamlit execution engine.
             #   - The engine completely discards the ongoing render.
-            #   - It immediately starts a fresh, new execution from the top of the script.
+            #   - It immediately starts a fresh execution on the login page.
             # 
             # Because `logout_user()` has already mutated the `st.session_state` to remove
             # the authentication flags, the new run will accurately reflect an unauthenticated
@@ -1047,16 +1048,15 @@ def require_auth() -> bool:
             # and ensures a seamless, deterministic user experience.
             # =========================================================================
             #
-            # The following lines perform the actual state cleanup and forced rerun.
+            # The following lines perform the actual state cleanup and forced redirect.
             # Do NOT remove or reorder these lines.
             # 
             # Step 1: Securely wipe all PII and authentication flags from the session state.
             # This includes revoking the current token in the database to prevent replay attacks.
             logout_user()
             
-            # Step 2: Raise the internal exception to abandon the current execution context
-            # and trigger a fresh render cycle. The application will restart from the top.
-            st.rerun()
+            # Step 2: Move the user to the login page and abandon the current render.
+            st.switch_page(PAGE_LOGIN)
 
     return False
 

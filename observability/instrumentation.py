@@ -250,6 +250,7 @@ def setup_structured_logging():
     """Configure structlog for JSON-formatted logging with correlation IDs"""
     structlog.configure(
         processors=[
+            structlog.contextvars.merge_contextvars,
             structlog.stdlib.filter_by_level,
             structlog.stdlib.add_logger_name,
             structlog.stdlib.add_log_level,
@@ -332,10 +333,13 @@ def bind_request_context(*, request_id: str | None = None, user_id: str | None =
     """Bind request-scoped context for logs and traces."""
     if request_id is not None:
         _REQUEST_ID.set(request_id)
+        structlog.contextvars.bind_contextvars(request_id=request_id)
     if user_id is not None:
         _USER_ID.set(user_id)
+        structlog.contextvars.bind_contextvars(user_id=user_id)
     if session_id is not None:
         _SESSION_ID.set(session_id)
+        structlog.contextvars.bind_contextvars(session_id=session_id)
 
 
 def get_request_context() -> dict:
@@ -347,7 +351,10 @@ def get_request_context() -> dict:
 
 
 def clear_request_context():
-    bind_request_context(request_id=None, user_id=None, session_id=None)
+    _REQUEST_ID.set(None)
+    _USER_ID.set(None)
+    _SESSION_ID.set(None)
+    structlog.contextvars.clear_contextvars()
 
 
 def record_api_error(endpoint: str, error: Exception | str):

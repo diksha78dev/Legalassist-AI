@@ -37,7 +37,15 @@ from database import (
     update_case_status,
     delete_case,
     create_case_document,
+    create_case_deadline,
+    get_user_deadlines,
+    get_upcoming_deadlines,
 )
+
+
+@pytest.fixture(autouse=True)
+def disable_otp_rate_limiter(monkeypatch):
+    monkeypatch.setattr("database._reserve_otp_rate_limit_slot", lambda email, max_requests_per_hour: 1)
 
 @pytest.fixture(scope="function")
 def test_db():
@@ -95,6 +103,58 @@ class TestDatabaseExtended:
         
         results = get_cases_by_criteria(test_db, jurisdiction="Mumbai")
         assert len(results) == 0
+
+    def test_deadline_queries_handle_naive_datetimes(self, test_db):
+        """Test deadline comparisons and ordering when stored values are naive."""
+        now = datetime.now(timezone.utc)
+
+        case1 = Case(
+            user_id=1,
+            case_number="CASE-NAIVE-1",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Case Naive 1",
+        )
+        case2 = Case(
+            user_id=1,
+            case_number="CASE-NAIVE-2",
+            case_type="civil",
+            jurisdiction="Delhi",
+            status=CaseStatus.ACTIVE,
+            title="Case Naive 2",
+        )
+        test_db.add_all([case1, case2])
+        test_db.commit()
+        test_db.refresh(case1)
+        test_db.refresh(case2)
+
+        deadline_one = create_case_deadline(
+            test_db,
+            1,
+            case1.id,
+            "Case Naive 1",
+            now + timedelta(days=8),
+            "appeal",
+        )
+        deadline_two = create_case_deadline(
+            test_db,
+            1,
+            case2.id,
+            "Case Naive 2",
+            now + timedelta(days=18),
+            "filing",
+        )
+
+        deadline_one.deadline_date = deadline_one.deadline_date.replace(tzinfo=None)
+        deadline_two.deadline_date = deadline_two.deadline_date.replace(tzinfo=None)
+        test_db.commit()
+
+        upcoming = get_upcoming_deadlines(test_db, days_before=30)
+        assert [deadline.id for deadline in upcoming] == [deadline_one.id, deadline_two.id]
+
+        user_deadlines = get_user_deadlines(test_db, 1)
+        assert [deadline.id for deadline in user_deadlines] == [deadline_one.id, deadline_two.id]
 
     def test_case_outcome_operations(self, test_db):
         """Test CaseOutcome updates"""

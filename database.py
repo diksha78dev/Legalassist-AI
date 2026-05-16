@@ -4,8 +4,10 @@ Uses SQLAlchemy ORM with SQLite for persistence.
 """
 
 import datetime as dt
+import hashlib
 import logging
 from typing import Optional, List
+import threading
 from sqlalchemy import (
     create_engine,
     Column,
@@ -19,6 +21,7 @@ from sqlalchemy import (
     JSON,
     UniqueConstraint,
     Index,
+    event,
 )
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
@@ -26,16 +29,66 @@ import enum
 from contextlib import contextmanager
 from config import Config
 
+try:
+    import redis
+except ImportError:  # pragma: no cover - handled at runtime if Redis is unavailable
+    redis = None
+
 # Database setup
 DATABASE_URL = Config.DATABASE_URL
 _db_url = make_url(DATABASE_URL)
 _is_sqlite = _db_url.get_backend_name() == "sqlite"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if _is_sqlite else {})
+engine = create_engine(
+    DATABASE_URL, 
+    connect_args={"check_same_thread": False, "timeout": 30} if _is_sqlite else {}
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, expire_on_commit=False, bind=engine)
 Base = declarative_base()
 
+# SQLite specific concurrency optimizations
+if _is_sqlite:
+    @event.listens_for(engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.close()
+
+    @event.listens_for(engine, "begin")
+    def do_begin(conn):
+        conn.execute("BEGIN IMMEDIATE")
+
+# Thread-local storage for session re-entrancy
+_session_registry = threading.local()
+
 logger = logging.getLogger(__name__)
 auth_logger = logging.getLogger("auth.otp")
+
+_OTP_RATE_LIMIT_WINDOW_SECONDS = 60 * 60
+_OTP_RATE_LIMIT_SCRIPT = """
+local current = redis.call('INCR', KEYS[1])
+if current == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return current
+"""
+_otp_rate_limit_client = None
+_otp_rate_limit_script = None
+
+
+def _to_utc_datetime(value: dt.datetime) -> dt.datetime:
+    """Convert a datetime to timezone-aware UTC."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=dt.timezone.utc)
+    return value.astimezone(dt.timezone.utc)
+
+
+def _datetime_for_db(value: dt.datetime) -> dt.datetime:
+    """Return a datetime in the format best suited for the current backend."""
+    utc_value = _to_utc_datetime(value)
+    if _is_sqlite:
+        return utc_value.replace(tzinfo=None)
+    return utc_value
 
 
 class NotificationStatus(str, enum.Enum):
@@ -271,7 +324,7 @@ class ModelFeedback(Base):
     __tablename__ = "model_feedback"
 
     id = Column(Integer, primary_key=True)
-    user_id = Column(String(255), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     model_name = Column(String(255), nullable=False, index=True)
     task = Column(String(100), nullable=False, index=True)  # summary, remedy, appeal_estimate, etc.
     case_id = Column(Integer, ForeignKey("case_records.id", ondelete="SET NULL"), nullable=True, index=True)
@@ -698,7 +751,7 @@ class CaseDocument(Base):
     id = Column(Integer, primary_key=True)
     case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
     document_type = Column(SQLEnum(DocumentType), nullable=False)
-    document_content = Column(Text, nullable=True)  # Extracted text from PDF
+    document_content = Column(Text(length=50000), nullable=True)  # Extracted text (limited to 50k chars for stability)
     file_path = Column(String(255), nullable=True)  # Optional: path to stored PDF
     uploaded_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     summary = Column(Text, nullable=True)  # LLM-generated 3-bullet summary
@@ -752,6 +805,173 @@ class CaseTimeline(Base):
         return f"<CaseTimeline(case_id={self.case_id}, event_type={self.event_type})>"
 
 
+# ==================== Case Search & Precedent Matching Models ====================
+
+
+class CaseEmbedding(Base):
+    """Model for storing semantic embeddings of cases for similarity search"""
+    __tablename__ = "case_embeddings"
+
+    id = Column(Integer, primary_key=True)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    document_id = Column(Integer, ForeignKey("case_documents.id", ondelete="SET NULL"), nullable=True)
+    
+    # Embedding vector (stored as JSON array for SQLite compatibility)
+    embedding_vector = Column(Text, nullable=False)  # JSON-encoded list of floats
+    embedding_model = Column(String(255), default="text-embedding-3-small")  # Model used to generate
+    embedding_dimension = Column(Integer, default=1536)
+    
+    # Metadata for filtering
+    case_type = Column(String(255), nullable=False, index=True)
+    jurisdiction = Column(String(255), nullable=False, index=True)
+    outcome = Column(String(255), nullable=True, index=True)  # plaintiff_won, defendant_won, settlement, etc.
+    
+    # Timestamps
+    indexed_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+
+    # Relationships
+    case = relationship("Case")
+    document = relationship("CaseDocument")
+
+    def __repr__(self):
+        return f"<CaseEmbedding(case_id={self.case_id}, model={self.embedding_model})>"
+
+
+class CaseIssue(Base):
+    """Model for tracking legal issues/topics extracted from cases"""
+    __tablename__ = "case_issues"
+
+    id = Column(Integer, primary_key=True)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    # Issue details
+    issue_name = Column(String(255), nullable=False, index=True)  # e.g., "wrongful termination", "property dispute"
+    issue_description = Column(Text, nullable=True)
+    issue_category = Column(String(255), nullable=True, index=True)  # civil, criminal, family, labor, etc.
+    
+    # Confidence score (0-1) from extraction model
+    confidence_score = Column(String(50), default="1.0")  # JSON-safe string
+    
+    # Metadata
+    extracted_from_document = Column(Integer, ForeignKey("case_documents.id", ondelete="SET NULL"), nullable=True)
+    extraction_method = Column(String(255), default="llm")  # llm, keyword, manual
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+
+    # Relationships
+    case = relationship("Case")
+    document = relationship("CaseDocument")
+    arguments = relationship("CaseArgument", back_populates="issue", cascade="all, delete-orphan")
+
+    __table_args__ = (UniqueConstraint("case_id", "issue_name", name="uq_case_issue"),)
+
+    def __repr__(self):
+        return f"<CaseIssue(case_id={self.case_id}, issue={self.issue_name})>"
+
+
+class CaseArgument(Base):
+    """Model for tracking legal arguments used in cases"""
+    __tablename__ = "case_arguments"
+
+    id = Column(Integer, primary_key=True)
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    issue_id = Column(Integer, ForeignKey("case_issues.id", ondelete="CASCADE"), nullable=True)
+    
+    # Argument details
+    argument_text = Column(Text, nullable=False)  # The actual argument made
+    argument_type = Column(String(255), nullable=True, index=True)  # witness_testimony, precedent_citation, legal_principle, etc.
+    
+    # Whether the argument succeeded in this case
+    argument_succeeded = Column(Boolean, nullable=True)  # True=won, False=lost, None=unknown
+    
+    # Supporting evidence
+    supporting_evidence = Column(Text, nullable=True)  # Quote or reference from judgment
+    citation_references = Column(JSON, nullable=True)  # List of law citations
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+
+    # Relationships
+    case = relationship("Case")
+    issue = relationship("CaseIssue", back_populates="arguments")
+
+    def __repr__(self):
+        return f"<CaseArgument(case_id={self.case_id}, type={self.argument_type})>"
+
+
+class KnowledgeGraphEdge(Base):
+    """Model for building a knowledge graph: Case → Issue → Argument → Outcome"""
+    __tablename__ = "knowledge_graph_edges"
+
+    id = Column(Integer, primary_key=True)
+    
+    # Source: Issue
+    issue_id = Column(Integer, ForeignKey("case_issues.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    # Edge: Argument
+    argument_id = Column(Integer, ForeignKey("case_arguments.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    # Target: Outcome
+    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    outcome = Column(String(255), nullable=False, index=True)  # plaintiff_won, defendant_won, settlement, etc.
+    
+    # Weight: How strongly the argument led to this outcome (frequency + confidence)
+    weight = Column(String(50), default="1.0")  # String for JSON safety
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
+
+    # Relationships
+    issue = relationship("CaseIssue")
+    argument = relationship("CaseArgument")
+    case = relationship("Case")
+
+    __table_args__ = (UniqueConstraint("issue_id", "argument_id", "case_id", name="uq_graph_edge"),)
+
+    def __repr__(self):
+        return f"<KnowledgeGraphEdge(issue={self.issue_id}, argument={self.argument_id}, outcome={self.outcome})>"
+
+
+class PrecedentMatch(Base):
+    """Model for storing precedent matching results for quick lookup"""
+    __tablename__ = "precedent_matches"
+
+    id = Column(Integer, primary_key=True)
+    
+    # Case that's being analyzed
+    query_case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    # Similar precedent case
+    precedent_case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    # Matching type
+    match_type = Column(String(255), nullable=False, index=True)  # similar_case, precedent_with_winning_argument, etc.
+    
+    # Similarity score (0-1)
+    similarity_score = Column(String(50), default="0.0")  # String for JSON safety
+    
+    # Reason for match
+    match_reason = Column(Text, nullable=True)  # "Similar issues", "Winning argument", etc.
+    
+    # Metadata about the match
+    shared_issues = Column(JSON, nullable=True)  # List of shared issue names
+    shared_arguments = Column(JSON, nullable=True)  # List of matching argument texts
+    precedent_outcome = Column(String(255), nullable=True)  # Outcome in precedent case
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=True)  # Cache expiration
+
+    # Relationships
+    query_case = relationship("Case", foreign_keys=[query_case_id])
+    precedent_case = relationship("Case", foreign_keys=[precedent_case_id])
+
+    __table_args__ = (UniqueConstraint("query_case_id", "precedent_case_id", "match_type", name="uq_precedent_match"),)
+
+    def __repr__(self):
+        return f"<PrecedentMatch(query={self.query_case_id}, precedent={self.precedent_case_id}, type={self.match_type})>"
+
+
 # Database initialization
 def init_db():
     """Create all tables"""
@@ -763,8 +983,15 @@ def db_session():
     """
     Context manager for database sessions.
     Ensures the session is closed after use, even if an exception occurs.
+    Supports nesting by re-using an existing session in the current thread.
     """
+    # Check if a session is already active in this thread
+    if hasattr(_session_registry, "session") and _session_registry.session is not None:
+        yield _session_registry.session
+        return
+
     db = SessionLocal()
+    _session_registry.session = db
     try:
         yield db
         db.commit()
@@ -773,6 +1000,7 @@ def db_session():
         raise
     finally:
         db.close()
+        _session_registry.session = None
 
 
 def get_db():
@@ -881,8 +1109,16 @@ def create_case_deadline(
 
 def get_upcoming_deadlines(db: Session, days_before: int = 30) -> List[CaseDeadline]:
     """Get all deadlines that are X days away"""
-    now = dt.datetime.now(dt.timezone.utc)
-    target_date = dt.datetime.fromtimestamp(now.timestamp() + (days_before * 86400), tz=dt.timezone.utc)
+    now_utc = dt.datetime.now(dt.timezone.utc)
+    target_utc = (now_utc + dt.timedelta(days=days_before)).replace(
+        hour=23,
+        minute=59,
+        second=59,
+        microsecond=999999,
+    )
+
+    now = _datetime_for_db(now_utc)
+    target_date = _datetime_for_db(target_utc)
     
     return db.query(CaseDeadline).filter(
         CaseDeadline.is_completed == False,
@@ -893,7 +1129,7 @@ def get_upcoming_deadlines(db: Session, days_before: int = 30) -> List[CaseDeadl
 
 def get_user_deadlines(db: Session, user_id: int) -> List[CaseDeadline]:
     """Get all active deadlines for a user"""
-    now = dt.datetime.now(dt.timezone.utc)
+    now = _datetime_for_db(dt.datetime.now(dt.timezone.utc))
     return db.query(CaseDeadline).filter(
         CaseDeadline.user_id == user_id,
         CaseDeadline.is_completed == False,
@@ -928,7 +1164,12 @@ def log_notification(
     error_message: Optional[str] = None,
     message_preview: Optional[str] = None,
 ) -> NotificationLog:
-    """Log a notification attempt"""
+    """Log a notification attempt.
+
+    NOTE: This helper does NOT commit the transaction. The caller is
+    responsible for committing or rolling back the session to avoid
+    partial commits (e.g., when used inside a larger business transaction).
+    """
     log = NotificationLog(
         deadline_id=deadline_id,
         user_id=user_id,
@@ -942,7 +1183,8 @@ def log_notification(
         sent_at=dt.datetime.now(dt.timezone.utc) if status != NotificationStatus.PENDING else None,
     )
     db.add(log)
-    db.commit()
+    # flush so the newly-added object's PK and defaults are populated without committing
+    db.flush()
     db.refresh(log)
     return log
 
@@ -1096,7 +1338,7 @@ def get_user_feedback(db: Session, user_id: int, limit: int = 50) -> List[UserFe
 
 def submit_model_feedback(
     db: Session,
-    user_id: str,
+    user_id: int,
     model_name: str,
     task: str,
     case_id: Optional[int] = None,
@@ -1106,7 +1348,7 @@ def submit_model_feedback(
 ) -> ModelFeedback:
     """Persist model output feedback for training and evaluation"""
     fb = ModelFeedback(
-        user_id=str(user_id),
+        user_id=user_id,
         model_name=model_name,
         task=task,
         case_id=case_id,
@@ -1226,6 +1468,40 @@ def update_user_last_login(db: Session, user_id: int) -> User:
     return user
 
 
+def _otp_rate_limit_key(email: str) -> str:
+    normalized_email = str(email).strip().lower()
+    digest = hashlib.sha256(normalized_email.encode("utf-8")).hexdigest()
+    return f"otp:rate:{digest}"
+
+
+def _get_otp_rate_limit_script():
+    global _otp_rate_limit_client, _otp_rate_limit_script
+
+    if _otp_rate_limit_script is None:
+        if redis is None:
+            raise RuntimeError("Redis is required for OTP rate limiting but is not installed.")
+
+        redis_url = getattr(Config, "REDIS_URL", "redis://localhost:6379/0")
+        _otp_rate_limit_client = redis.from_url(redis_url, decode_responses=True)
+        _otp_rate_limit_script = _otp_rate_limit_client.register_script(_OTP_RATE_LIMIT_SCRIPT)
+
+    return _otp_rate_limit_script
+
+
+def _reserve_otp_rate_limit_slot(email: str, max_requests_per_hour: int) -> int:
+    normalized_email = str(email).strip().lower()
+    if not normalized_email:
+        raise ValueError("Email is required for OTP rate limiting")
+
+    script = _get_otp_rate_limit_script()
+    current = int(script(keys=[_otp_rate_limit_key(normalized_email)], args=[_OTP_RATE_LIMIT_WINDOW_SECONDS]))
+
+    if current > max_requests_per_hour:
+        raise ValueError("Too many OTP requests. Please try again later.")
+
+    return current
+
+
 def create_otp_verification(
     db: Session,
     email: str,
@@ -1234,15 +1510,7 @@ def create_otp_verification(
     max_requests_per_hour: int = 5,
 ) -> OTPVerification:
     """Create a new OTP verification record with rate limiting"""
-    # Check recent OTPs
-    one_hour_ago = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)
-    recent_otps = db.query(OTPVerification).filter(
-        OTPVerification.email == email,
-        OTPVerification.created_at > one_hour_ago,
-    ).count()
-
-    if recent_otps >= max_requests_per_hour:
-        raise ValueError("Too many OTP requests. Please try again later.")
+    _reserve_otp_rate_limit_slot(email, max_requests_per_hour)
 
     otp = OTPVerification(
         email=email,
@@ -1497,6 +1765,11 @@ def create_case_document(
             "case_id not found or not owned by the provided user_id"
         )
 
+    # Truncate content to prevent unbounded memory usage and DB bloat
+    limit = Config.MAX_DOCUMENT_TEXT_STORAGE_LIMIT
+    if document_content and len(document_content) > limit:
+        document_content = document_content[:limit] + "\n\n... [TRUNCATED DUE TO SIZE LIMIT] ..."
+
     doc = CaseDocument(
         case_id=normalized_case_id,
         document_type=document_type,
@@ -1534,6 +1807,9 @@ def update_case_document(
     doc = db.query(CaseDocument).filter(CaseDocument.id == document_id).first()
     if doc:
         if document_content is not None:
+            limit = Config.MAX_DOCUMENT_TEXT_STORAGE_LIMIT
+            if len(document_content) > limit:
+                document_content = document_content[:limit] + "\n\n... [TRUNCATED DUE TO SIZE LIMIT] ..."
             doc.document_content = document_content
         if summary is not None:
             doc.summary = summary

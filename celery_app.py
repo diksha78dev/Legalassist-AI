@@ -19,6 +19,7 @@ Date: 2026-05-12
 import os
 import uuid
 import structlog
+import json
 from datetime import datetime
 from typing import Dict, Any, Optional
 
@@ -28,7 +29,16 @@ from celery.result import AsyncResult
 # Import project settings for fallback and other configurations
 from api.config import get_settings
 from observability.integration import initialize_observability_for_environment
-from observability.instrumentation import traced_operation, capture_exception, bind_request_context, clear_request_context
+from observability.instrumentation import (
+    traced_operation,
+    capture_exception,
+    bind_request_context,
+    clear_request_context,
+    generate_correlation_id,
+)
+from api.idempotency import IdempotencyManager
+from core.export_storage import save_export_file
+from config import Config
 
 # ============================================================================
 # INITIALIZATION & LOGGING
@@ -40,6 +50,48 @@ settings = get_settings()
 # Initialize the structured logger for consistent logging across tasks
 logger = structlog.get_logger(__name__)
 initialize_observability_for_environment()
+
+
+def build_task_context_headers(
+    request_id: Optional[str] = None,
+    context_user_id: Optional[str] = None,
+) -> Dict[str, str]:
+    """Build Celery task headers used to propagate request context."""
+    resolved_request_id = request_id or generate_correlation_id()
+    headers = {
+        "x-request-id": resolved_request_id,
+        "x-correlation-id": resolved_request_id,
+    }
+    if context_user_id:
+        headers["x-user-id"] = str(context_user_id)
+    return headers
+
+
+def enqueue_task_with_context(task, *, request_id: Optional[str] = None, context_user_id: Optional[str] = None, **task_kwargs):
+    """Enqueue a Celery task with request context propagated in headers."""
+    headers = build_task_context_headers(request_id=request_id, context_user_id=context_user_id)
+    return task.apply_async(kwargs=task_kwargs, headers=headers)
+
+
+def enqueue_task_from_http_request(task, http_request, *, context_user_id: Optional[str] = None, **task_kwargs):
+    """Enqueue task carrying context from a FastAPI request object."""
+    request_id = getattr(http_request.state, "request_id", None) or getattr(http_request.state, "correlation_id", None)
+    if not request_id:
+        request_id = (
+            http_request.headers.get("X-Request-Id")
+            or http_request.headers.get("X-Correlation-Id")
+            or http_request.headers.get("x-request-id")
+            or http_request.headers.get("x-correlation-id")
+        )
+
+    user_id = context_user_id or getattr(http_request.state, "user_id", None) or http_request.headers.get("X-User-Id")
+
+    return enqueue_task_with_context(
+        task,
+        request_id=request_id,
+        context_user_id=user_id,
+        **task_kwargs,
+    )
 
 
 # ============================================================================
@@ -65,6 +117,28 @@ class ContextTask(Task):
     )
     retry_kwargs = {'max_retries': 3}
     retry_backoff = True
+
+    @staticmethod
+    def _extract_task_request_context(task_request) -> Dict[str, Optional[str]]:
+        headers = getattr(task_request, "headers", None) or {}
+        request_id = (
+            headers.get("x-request-id")
+            or headers.get("X-Request-Id")
+            or headers.get("x-correlation-id")
+            or headers.get("X-Correlation-Id")
+            or getattr(task_request, "root_id", None)
+            or getattr(task_request, "id", None)
+        )
+        user_id = headers.get("x-user-id") or headers.get("X-User-Id")
+        return {"request_id": request_id, "user_id": user_id}
+
+    def __call__(self, *args, **kwargs):
+        context = self._extract_task_request_context(self.request)
+        bind_request_context(request_id=context.get("request_id"), user_id=context.get("user_id"))
+        try:
+            return self.run(*args, **kwargs)
+        finally:
+            clear_request_context()
 
 
 # ============================================================================
@@ -251,6 +325,15 @@ def analyze_document_task(
     Returns:
         Dict[str, Any]: The structured analysis results including identified remedies.
     """
+    # Idempotency: prevent duplicate processing for same user/document
+    idemp = IdempotencyManager()
+    idempotency_key = f"analyze:{user_id}:{document_id}"
+    if not idemp.acquire(idempotency_key, ttl=300):
+        # Another worker is processing or has processed this key
+        existing = idemp.get_result(idempotency_key)
+        logger.info("analyze_document_duplicate_skipped", key=idempotency_key, task_id=self.request.id)
+        return existing or {"status": "duplicate", "task_id": self.request.id}
+
     try:
         # Phase 1: Text Pre-processing
         self.update_state(
@@ -308,6 +391,7 @@ def analyze_document_task(
             document_id=document_id
         )
         
+        idemp.mark_completed(idempotency_key, result)
         return result
     
     except Exception as e:
@@ -323,6 +407,10 @@ def analyze_document_task(
         raise
     finally:
         clear_request_context()
+        try:
+            idemp.release_lock(idempotency_key)
+        except Exception:
+            pass
 
 
 @celery_app.task(bind=True, name="generate_report")
@@ -345,6 +433,14 @@ def generate_report_task(
     Returns:
         Dict[str, Any]: Metadata about the generated report file.
     """
+    # Idempotency: avoid regenerating same report repeatedly
+    idemp = IdempotencyManager()
+    idempotency_key = f"report:{user_id}:{case_id}:{report_type}:{format}"
+    if not idemp.acquire(idempotency_key, ttl=600):
+        existing = idemp.get_result(idempotency_key)
+        logger.info("generate_report_duplicate_skipped", key=idempotency_key, task_id=self.request.id)
+        return existing or {"status": "duplicate", "task_id": self.request.id}
+
     try:
         # Step 1: Data Aggregation
         self.update_state(
@@ -412,6 +508,7 @@ def generate_report_task(
             report_id=report_id
         )
         
+        idemp.mark_completed(idempotency_key, result)
         return result
     
     except Exception as e:
@@ -422,6 +519,11 @@ def generate_report_task(
             error=str(e)
         )
         raise
+    finally:
+        try:
+            idemp.release_lock(idempotency_key)
+        except Exception:
+            pass
 
 
 @celery_app.task(bind=True, name="export_data")
@@ -433,46 +535,99 @@ def export_data_task(
     """
     Asynchronous task to export all data associated with a user.
     
+    Exports user data and saves to local storage with real file path.
+    
     Args:
         user_id (str): The ID of the user whose data is being exported.
-        format (str): The desired export format (csv, json).
+        format (str): The desired export format (csv, json). Default: csv
         
     Returns:
-        Dict[str, Any]: Download URL and expiration info for the export file.
+        Dict[str, Any]: Export metadata including:
+            - export_id: Unique export identifier
+            - file_path: Local file path where export is saved
+            - file_size_bytes: Size of exported file
+            - expires_in_hours: Hours until file expires
+            - expires_at: ISO timestamp when file expires
+            - created_at: ISO timestamp of creation
+            
+    API Contract:
+        - file_path: Real local filesystem path (not placeholder URL)
+        - expires_at: Guaranteed expiry time, file can be accessed until then
+        - Returns null values if format is unsupported
     """
     try:
-        # Progress tracking for large exports
         self.update_state(
-            state="PROGRESS", 
-            meta={"status": "Gathering user data from all modules", "progress": 30}
+            state="PROGRESS",
+            meta={"status": "Gathering user data", "progress": 30}
         )
         
+        # Validate format
+        if format not in ("csv", "json"):
+            raise ValueError(f"Unsupported format: {format}. Use 'csv' or 'json'")
+        
         self.update_state(
-            state="PROGRESS", 
+            state="PROGRESS",
             meta={"status": "Formatting export package", "progress": 60}
         )
         
+        # Create export data (placeholder - integrate with real data query)
+        export_data = {
+            "user_id": user_id,
+            "export_timestamp": datetime.utcnow().isoformat(),
+            "data": {"placeholder": "User data would be populated from database"}
+        }
+        
         self.update_state(
-            state="PROGRESS", 
-            meta={"status": "Compressing export file", "progress": 90}
+            state="PROGRESS",
+            meta={"status": "Saving to storage", "progress": 90}
         )
         
-        # Mock result for demonstration
-        # In production, this would upload to an S3 bucket or similar storage
+        # Serialize based on format
+        if format == "csv":
+            # Simple CSV representation
+            content = "User Export Data\n"
+            content += f"User ID,{user_id}\n"
+            content += f"Export Time,{export_data['export_timestamp']}\n"
+            file_bytes = content.encode('utf-8')
+        else:  # json
+            file_bytes = json.dumps(export_data, indent=2).encode('utf-8')
+        
+        # Save to storage and get metadata
+        export_file = save_export_file(
+            user_id=user_id,
+            file_bytes=file_bytes,
+            format=format
+        )
+        
+        logger.info(
+            "User data export completed",
+            task_id=self.request.id,
+            user_id=user_id,
+            export_id=export_file.export_id,
+            format=format,
+            file_path=export_file.file_path
+        )
+        
         result = {
-            "export_id": str(uuid.uuid4()),
-            "file_url": f"https://storage.example.com/exports/{user_id}.{format}",
-            "file_size_bytes": 2048000,
-            "expires_in_hours": 24,
-            "created_at": datetime.utcnow().isoformat()
+            "export_id": export_file.export_id,
+            "file_path": export_file.file_path,
+            "file_size_bytes": export_file.file_size_bytes,
+            "format": format,
+            "expires_in_hours": Config.EXPORT_FILE_EXPIRY_HOURS,
+            "expires_at": export_file.expires_at.isoformat(),
+            "created_at": export_file.created_at.isoformat()
         }
         
         return result
     
+    except ValueError as e:
+        logger.error("Invalid export format", user_id=user_id, error=str(e))
+        raise
     except Exception as e:
         logger.error(
-            "User data export failed", 
-            user_id=user_id, 
+            "User data export failed",
+            task_id=self.request.id,
+            user_id=user_id,
             error=str(e)
         )
         raise

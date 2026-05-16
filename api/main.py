@@ -7,23 +7,37 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.openapi.utils import get_openapi
+from fastapi import status
 import structlog
+import asyncio
 
 from api.config import get_settings
 from api.middleware import (
     rate_limit_middleware,
     add_correlation_id_middleware,
     error_handling_middleware,
-    logging_middleware
+    logging_middleware,
+    request_size_limit_middleware
 )
+from api.limiter import cleanup_limiter
 from observability.integration import initialize_observability_for_environment
 from observability.instrumentation import get_metrics
+from api.validation import (
+    ValidationConfig,
+    ValidationError,
+    PayloadTooLargeError,
+)
 
 # Import routes
-from api.routes import documents, cases, reports, analytics, deadlines, auth, health
+from api.routes import documents, cases, reports, analytics, deadlines, auth, health, case_search
 
 settings = get_settings()
 logger = structlog.get_logger(__name__)
+
+
+def _sanitize_log_text(value: str) -> str:
+    """Make log text single-line and safe for structured log sinks."""
+    return value.replace("\r", "\\r").replace("\n", "\\n")
 
 
 # ============================================================================
@@ -40,7 +54,7 @@ middleware = [
     ),
     Middleware(
         TrustedHostMiddleware,
-        allowed_hosts=["localhost", "127.0.0.1", "*.example.com"]
+        allowed_hosts=settings.ALLOWED_HOSTS
     ),
 ]
 
@@ -59,7 +73,11 @@ def create_app() -> FastAPI:
         middleware=middleware
     )
     
+    # Initialize validation config from settings
+    ValidationConfig.from_settings(settings)
+    
     # Add middleware
+    app.middleware("http")(request_size_limit_middleware)
     app.middleware("http")(add_correlation_id_middleware)
     app.middleware("http")(logging_middleware)
     app.middleware("http")(error_handling_middleware)
@@ -78,6 +96,7 @@ def create_app() -> FastAPI:
     app.include_router(analytics.router)
     app.include_router(deadlines.router)
     app.include_router(auth.router)
+    app.include_router(case_search.router)  # Case search and precedent matching
     # Model feedback & optimization
     from api.routes import models as models_router
     app.include_router(models_router.router)
@@ -86,13 +105,48 @@ def create_app() -> FastAPI:
     # Global Exception Handlers
     # ========================================================================
     
+    @app.exception_handler(ValidationError)
+    async def validation_error_handler(request: Request, exc: ValidationError):
+        """Handle validation errors"""
+        logger.warning(
+            "validation_error",
+            path=request.url.path,
+            detail=exc.detail
+        )
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "error_code": "VALIDATION_ERROR",
+                "message": exc.detail
+            }
+        )
+    
+    @app.exception_handler(PayloadTooLargeError)
+    async def payload_too_large_handler(request: Request, exc: PayloadTooLargeError):
+        """Handle payload too large errors"""
+        logger.warning(
+            "payload_too_large",
+            path=request.url.path,
+            detail=exc.detail
+        )
+        return JSONResponse(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            content={
+                "error_code": "PAYLOAD_TOO_LARGE",
+                "message": exc.detail,
+                "status_code": 413
+            },
+            headers={"Retry-After": "60"}
+        )
+    
     @app.exception_handler(Exception)
     async def generic_exception_handler(request: Request, exc: Exception):
         """Handle all uncaught exceptions"""
         logger.error(
             "Unhandled exception",
             path=request.url.path,
-            error=str(exc)
+            error=_sanitize_log_text(str(exc)),
+            exception_type=exc.__class__.__name__
         )
         return JSONResponse(
             status_code=500,
@@ -110,6 +164,15 @@ def create_app() -> FastAPI:
     async def startup_event():
         """Initialize on startup"""
         initialize_observability_for_environment()
+        
+        if settings.RATE_LIMIT_ENABLED:
+            logger.info(
+                "Rate limiter enabled",
+                redis_url=settings.REDIS_URL,
+                requests=settings.RATE_LIMIT_REQUESTS,
+                window=settings.RATE_LIMIT_WINDOW
+            )
+        
         logger.info(
             "API Starting",
             version=settings.API_VERSION,
@@ -119,6 +182,7 @@ def create_app() -> FastAPI:
     @app.on_event("shutdown")
     async def shutdown_event():
         """Cleanup on shutdown"""
+        await cleanup_limiter()
         logger.info("API Shutting down")
     
     # ========================================================================
@@ -198,6 +262,7 @@ app = create_app()
 
 if settings.ENABLE_WEBSOCKET:
     from fastapi import WebSocket
+    from celery_app import TaskStatus
     
     @app.websocket("/ws/progress/{job_id}")
     async def websocket_progress_endpoint(websocket: WebSocket, job_id: str):
@@ -211,11 +276,7 @@ if settings.ENABLE_WEBSOCKET:
         await websocket.accept()
         
         try:
-            from celery_app import TaskStatus
-            
             while True:
-                import asyncio
-                
                 status_info = TaskStatus.get_task_status(job_id)
                 
                 await websocket.send_json({

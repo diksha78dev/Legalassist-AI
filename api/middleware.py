@@ -18,85 +18,69 @@ from observability.instrumentation import (
     traced_operation,
 )
 
+from api.limiter import limiter, RateLimitExceeded, resolve_rate_limit_identifier
+from api.config import get_settings
+
+settings = get_settings()
 logger = structlog.get_logger(__name__)
 
 
-class RateLimiter:
-    """Token bucket rate limiter using Redis"""
-
-    # Lua script: atomically increment the counter and set TTL on first write.
-    # Redis executes Lua scripts as a single atomic operation, so there is no
-    # window between INCR and EXPIRE where the key can be left without a TTL.
-    _INCR_EXPIRE_SCRIPT = """
-local current = redis.call('INCR', KEYS[1])
-if current == 1 then
-    redis.call('EXPIRE', KEYS[1], ARGV[1])
-end
-return current
-"""
-
-    def __init__(self, redis_url: str = "redis://localhost:6379/0"):
-        self.redis = redis.from_url(redis_url, decode_responses=True)
-        self.requests = 100  # requests
-        self.window = 60  # seconds
-        self._script = self.redis.register_script(self._INCR_EXPIRE_SCRIPT)
-
-    def is_allowed(self, key: str) -> bool:
-        """Check if request is allowed"""
-        try:
-            current = int(self._script(keys=[key], args=[self.window]))
-            return current <= self.requests
-        except Exception as e:
-            logger.error("Rate limiter error", error=str(e))
-            # Fail open - allow request if Redis unavailable
-            return True
-    
-    def get_retry_after(self, key: str) -> int:
-        """Get seconds until next request allowed"""
-        try:
-            ttl = self.redis.ttl(key)
-            return ttl if ttl > 0 else self.window
-        except:
-            return self.window
-
-
 async def rate_limit_middleware(request: Request, call_next: Callable):
-    """Rate limiting middleware"""
+    """
+    Global rate limiting middleware.
+    Applies default limits to all requests unless overridden at the route level.
+    """
     
-    # Skip rate limiting for health checks
-    if request.url.path in ["/api/v1/health", "/api/v1/health/ready", "/api/v1/health/live"]:
+    if not settings.RATE_LIMIT_ENABLED:
+        return await call_next(request)
+
+    # Skip rate limiting for health checks and internal metrics
+    path = request.url.path
+    if path in ["/api/v1/health", "/api/v1/health/ready", "/api/v1/health/live", "/metrics", "/"]:
         return await call_next(request)
     
-    # Get client identifier
-    client_ip = request.client.host if request.client else "unknown"
-    user_id = request.headers.get("X-User-Id", client_ip)
+    # Identify the client using validated credentials first, then source IP.
+    identifier = resolve_rate_limit_identifier(request)
     
-    rate_limiter = RateLimiter()
-    rate_limit_key = f"ratelimit:{user_id}:{int(time.time() // 60)}"
+    # Check rate limit using the sliding window engine
+    # We use a broad 'global' endpoint identifier for the middleware limit
+    is_allowed = await limiter.check_rate_limit(
+        identifier=identifier,
+        endpoint="GLOBAL_API_LIMIT",
+        limit=settings.RATE_LIMIT_REQUESTS,
+        window_seconds=settings.RATE_LIMIT_WINDOW
+    )
     
-    if not rate_limiter.is_allowed(rate_limit_key):
-        logger.warning(
-            "Rate limit exceeded",
-            user_id=user_id,
-            ip=client_ip
+    if not is_allowed:
+        retry_after = await limiter.get_remaining_ttl(
+            identifier=identifier,
+            endpoint="GLOBAL_API_LIMIT",
+            window_seconds=settings.RATE_LIMIT_WINDOW
         )
+        
+        logger.warning(
+            "global_rate_limit_exceeded",
+            identifier=identifier,
+            path=path,
+            retry_after=retry_after
+        )
+        
         return JSONResponse(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             content={
                 "error_code": "RATE_LIMIT_EXCEEDED",
-                "message": f"Rate limit exceeded. Max {rate_limiter.requests} requests per {rate_limiter.window} seconds",
-                "retry_after": rate_limiter.get_retry_after(rate_limit_key)
+                "message": f"Global rate limit exceeded. Max {settings.RATE_LIMIT_REQUESTS} requests per {settings.RATE_LIMIT_WINDOW} seconds",
+                "retry_after": retry_after
             },
-            headers={"Retry-After": str(rate_limiter.get_retry_after(rate_limit_key))}
+            headers={"Retry-After": str(retry_after)}
         )
     
+    # Process the request
     response = await call_next(request)
-    response.headers["X-RateLimit-Limit"] = str(rate_limiter.requests)
-    try:
-        current_count = int(rate_limiter.redis.get(rate_limit_key) or 0)
-    except Exception:
-        current_count = 0
-    response.headers["X-RateLimit-Remaining"] = str(max(0, rate_limiter.requests - current_count))
+    
+    # Add rate limit headers for transparency
+    response.headers["X-RateLimit-Limit"] = str(settings.RATE_LIMIT_REQUESTS)
+    # Note: Precise remaining count is available in the Lua script result if needed
     
     return response
 
@@ -110,7 +94,7 @@ async def add_correlation_id_middleware(request: Request, call_next: Callable):
     
     request.state.correlation_id = correlation_id
     request.state.request_id = correlation_id
-    request.state.user_id = request.headers.get("X-User-Id") or request.headers.get("Authorization")
+    request.state.user_id = identifier
     
     try:
         response = await call_next(request)
@@ -201,3 +185,41 @@ async def logging_middleware(request: Request, call_next: Callable):
     response.headers["X-Process-Time"] = str(process_time)
     response.headers["X-Request-Id"] = request_id
     return response
+
+
+async def request_size_limit_middleware(request: Request, call_next: Callable):
+    """Enforce request body size limits to prevent DOS attacks"""
+    from api.validation import ValidationConfig, PayloadTooLargeError
+    
+    # Skip size checks for certain endpoints
+    if request.url.path in ["/api/v1/health", "/api/v1/health/ready", "/api/v1/health/live", "/metrics"]:
+        return await call_next(request)
+    
+    # Get content length header
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            content_length_bytes = int(content_length)
+            max_json_body = ValidationConfig.MAX_JSON_BODY
+            
+            # For file uploads, allow larger sizes
+            if request.url.path.startswith("/api/v1/analyze/upload") or request.url.path.startswith("/api/v1/documents"):
+                max_size = ValidationConfig.MAX_UPLOAD_SIZE
+            else:
+                max_size = max_json_body
+            
+            if content_length_bytes > max_size:
+                logger.warning(
+                    "request_size_limit_exceeded",
+                    path=request.url.path,
+                    content_length=content_length_bytes,
+                    max_size=max_size,
+                    size_mb=round(content_length_bytes / 1024 / 1024, 2),
+                )
+                raise PayloadTooLargeError(
+                    detail=f"Request body too large: {round(content_length_bytes / 1024 / 1024, 2)} MB (max {round(max_size / 1024 / 1024, 2)} MB)"
+                )
+        except (ValueError, TypeError):
+            pass  # Invalid content-length, let the request proceed
+    
+    return await call_next(request)

@@ -5,14 +5,14 @@ GET /api/v1/reports/{report_id} - Get report status
 GET /api/v1/reports/{report_id}/download - Download report
 """
 import uuid
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, status, Depends, Request
 from fastapi.responses import FileResponse
 from pathlib import Path
 from report_service import _get_reports_base_dir
 
 from api.models import ReportGenerationRequest, ReportGenerationResponse
 from api.auth import get_current_user, CurrentUser
-from celery_app import generate_report_task, TaskStatus
+from celery_app import generate_report_task, TaskStatus, enqueue_task_from_http_request
 import structlog
 from datetime import datetime
 
@@ -27,6 +27,7 @@ logger = structlog.get_logger(__name__)
 )
 async def generate_report(
     request: ReportGenerationRequest,
+    http_request: Request,
     current_user: CurrentUser = Depends(get_current_user)
 ) -> ReportGenerationResponse:
     """
@@ -51,7 +52,10 @@ async def generate_report(
     )
     
     # Queue async task
-    task = generate_report_task.delay(
+    task = enqueue_task_from_http_request(
+        generate_report_task,
+        http_request,
+        context_user_id=current_user.user_id,
         user_id=current_user.user_id,
         case_id=request.case_id,
         report_type=request.report_type,
