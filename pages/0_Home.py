@@ -13,6 +13,7 @@ import routes
 import sys
 import os
 from config import Config
+from pages.ui_components import render_header, SESSION_KEYS
 
 # Add parent directory to sys.path to resolve 'core' module
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -92,16 +93,15 @@ def render_page():
     # Get client early for translation
     client = get_client()
     
-    current_language = st.session_state.get("judgment_language", "English")
+    current_language = st.session_state.get(SESSION_KEYS["judgment_language"], "English")
     ui = get_localized_ui_text(current_language, client)
 
-    st.title("⚡ LegalEase AI")
-    st.subheader(ui["app_subtitle"])
+    render_header("⚡ LegalEase AI", ui["app_subtitle"])
 
     st.markdown(ui["app_intro"])
     st.markdown("---")
 
-    language = st.selectbox(ui["language_label"], LANGUAGES, key="judgment_language")
+    language = st.selectbox(ui["language_label"], LANGUAGES, key=SESSION_KEYS["judgment_language"])
     ui = get_localized_ui_text(language, client)
     
     input_method = st.radio(
