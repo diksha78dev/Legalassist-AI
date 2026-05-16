@@ -35,6 +35,11 @@ settings = get_settings()
 logger = structlog.get_logger(__name__)
 
 
+def _sanitize_log_text(value: str) -> str:
+    """Make log text single-line and safe for structured log sinks."""
+    return value.replace("\r", "\\r").replace("\n", "\\n")
+
+
 # ============================================================================
 # Middleware Configuration
 # ============================================================================
@@ -140,7 +145,8 @@ def create_app() -> FastAPI:
         logger.error(
             "Unhandled exception",
             path=request.url.path,
-            error=str(exc)
+            error=_sanitize_log_text(str(exc)),
+            exception_type=exc.__class__.__name__
         )
         return JSONResponse(
             status_code=500,
