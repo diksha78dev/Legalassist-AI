@@ -520,31 +520,23 @@ def revoke_jwt_token(token: str) -> bool:
         return False
         
     try:
-        # =====================================================================
-        # DECODING FOR REVOCATION (SIGNATURE VERIFIED, EXPIRATION SKIPPED)
-        # =====================================================================
-        # We need to extract the `jti` and `exp` claims to add them to our
-        # database blacklist.
-        #
-        # verify_exp=False: allows revoking tokens that expired moments ago,
-        # so the logout flow completes gracefully even for just-expired sessions.
-        #
-        # verify_signature=True (explicit): the HMAC signature MUST still be
-        # validated against JWT_SECRET.  Without this, an attacker could submit
-        # a forged token with an arbitrary jti and pollute the revocation store.
-        # PyJWT's behaviour when only verify_exp is set can vary across versions,
-        # so we make the signature requirement unambiguous here.
-        #
-        # issuer and audience checks remain enforced to reject foreign tokens.
-        # =====================================================================
-
+        # Fast path: extract claims without signature verification
+        unverified = jwt.get_unverified_claims(token)
+        jti = unverified.get("jti")
+        exp = unverified.get("exp")
+        
+        if not jti or not exp:
+            logger.error("Token payload missing required claims for revocation (jti or exp).")
+            return False
+        
+        # Full decode with signature verification to prevent forged tokens
         payload = jwt.decode(
             jwt=token,
             key=JWT_SECRET,
             algorithms=[JWT_ALGORITHM],
             issuer=JWT_ISSUER,
             audience=JWT_AUDIENCE,
-            options={"verify_exp": False, "verify_signature": True},
+            options={"verify_exp": False},
         )
         
         jti = payload.get("jti")
