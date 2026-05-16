@@ -85,7 +85,6 @@ from db.crud.notifications import (
     log_notification,
     get_notification_history,
 )
-from db.crud.feedback import submit_user_feedback, get_user_feedback
 
 __all__ = [
     "engine",
@@ -112,8 +111,6 @@ __all__ = [
     "has_notification_been_sent",
     "log_notification",
     "get_notification_history",
-    "submit_user_feedback",
-    "get_user_feedback",
 ]
 
     case_id = Column(Integer, ForeignKey("case_records.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
