@@ -47,7 +47,7 @@ class ValidationConfig:
     @classmethod
     def from_settings(cls, settings):
         """Initialize from API settings object"""
-        cls.MAX_UPLOAD_SIZE = getattr(settings, "UPLOAD_MAX_SIZE", 500 * 1024 * 1024)
+        cls.MAX_UPLOAD_SIZE = getattr(settings, "UPLOAD_MAX_SIZE", 25 * 1024 * 1024)
         cls.ALLOWED_EXTENSIONS = set(getattr(settings, "UPLOAD_EXTENSIONS", [".pdf", ".doc", ".docx", ".txt", ".html"]))
         return cls
 

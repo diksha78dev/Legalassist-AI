@@ -1,9 +1,14 @@
-import os
+
 import tempfile
+"""
+API Configuration
+"""
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 from pydantic_settings import BaseSettings
+from pydantic import field_validator
 
 
 class APISettings(BaseSettings):
@@ -49,18 +54,25 @@ class APISettings(BaseSettings):
     
     # Authentication
     AUTH_ENABLED: bool = True
-    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "your-secret-key-change-in-production")
+    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "")
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRATION_HOURS: int = 24
     JWT_ISSUER: str = os.getenv("JWT_ISSUER", "legalassist.ai")
     JWT_AUDIENCE: str = os.getenv("JWT_AUDIENCE", "legalassist-users")
     API_KEY_HEADER: str = "X-API-Key"
     
+    @field_validator("JWT_SECRET_KEY")
+    @classmethod
+    def validate_jwt_secret(cls, v: str) -> str:
+        if not v or v == "your-secret-key-change-in-production":
+            raise ValueError(
+                "JWT_SECRET_KEY must be set to a secure value. "
+                "Do not use default or placeholder values in production."
+            )
+        return v
+    
     # Database
-    DATABASE_URL: str = os.getenv(
-        "DATABASE_URL", 
-        "postgresql://user:password@localhost:5432/legalassist"
-    )
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "")
     DATABASE_POOL_SIZE: int = 20
     DATABASE_MAX_OVERFLOW: int = 10
     
@@ -75,7 +87,7 @@ class APISettings(BaseSettings):
     CELERY_TASK_SOFT_TIME_LIMIT: int = 3300  # 55 minutes
     
     # File Upload
-    UPLOAD_MAX_SIZE: int = 500 * 1024 * 1024  # 500 MB
+    UPLOAD_MAX_SIZE: int = 25 * 1024 * 1024  # 25 MB
     UPLOAD_EXTENSIONS: list = [".pdf", ".doc", ".docx", ".txt"]
     UPLOAD_TEMP_DIR: str = os.getenv(
         "UPLOAD_TEMP_DIR",
