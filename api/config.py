@@ -77,7 +77,7 @@ class APISettings(BaseSettings):
     CELERY_TASK_SOFT_TIME_LIMIT: int = 3300  # 55 minutes
     
     # File Upload
-    UPLOAD_MAX_SIZE: int = 500 * 1024 * 1024  # 500 MB
+    UPLOAD_MAX_SIZE: int = 25 * 1024 * 1024  # 25 MB
     UPLOAD_EXTENSIONS: list = [".pdf", ".doc", ".docx", ".txt"]
     UPLOAD_TEMP_DIR: str = os.getenv(
         "UPLOAD_TEMP_DIR",
