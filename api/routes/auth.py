@@ -6,7 +6,7 @@ GET /api/v1/auth/me - Get current user
 """
 from fastapi import APIRouter, HTTPException, status, Depends
 from datetime import datetime, timedelta
-from api.auth import create_access_token, generate_api_key, hash_api_key, CurrentUser, get_current_user
+from api.auth import create_access_token, create_api_key_record, CurrentUser, get_current_user
 from api.models import TokenResponse, APIKeyCreate, APIKeyResponse
 from api.limiter import RateLimit
 import structlog
@@ -70,10 +70,9 @@ async def create_api_key(
         key_name=request.name
     )
     
-    key = generate_api_key()
-    key_hash = hash_api_key(key)
+    key, _api_key_record = create_api_key_record(request.name, request.expires_in_days)
     expires_at = None
-    
+
     if request.expires_in_days:
         expires_at = datetime.utcnow() + timedelta(days=request.expires_in_days)
     
