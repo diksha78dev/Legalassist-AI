@@ -18,6 +18,11 @@ class APISettings(BaseSettings):
     API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
     API_PORT: int = int(os.getenv("API_PORT", "8000"))
     API_WORKERS: int = int(os.getenv("API_WORKERS", "4"))
+    TRUSTED_HOSTS: list = [
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    ]
     
     # CORS
     CORS_ORIGINS: list = [
