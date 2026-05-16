@@ -34,7 +34,7 @@ try:
 except ImportError:
     SendGridAPIClient = None
     Mail = None
-from database import (
+from db import (
     Case,
     NotificationStatus,
     NotificationChannel,
