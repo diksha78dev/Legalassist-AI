@@ -59,7 +59,7 @@ class APISettings(BaseSettings):
     
     # File Upload
     UPLOAD_MAX_SIZE: int = 500 * 1024 * 1024  # 500 MB
-    UPLOAD_EXTENSIONS: list = [".pdf", ".doc", ".docx", ".txt", ".html"]
+    UPLOAD_EXTENSIONS: list = [".pdf", ".doc", ".docx", ".txt"]
     UPLOAD_TEMP_DIR: str = "/tmp/legalassist-uploads"
     
     # PDF Export
