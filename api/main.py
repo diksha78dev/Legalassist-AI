@@ -64,6 +64,8 @@ middleware = [
 
 def create_app() -> FastAPI:
     """Create FastAPI application"""
+
+    settings.validate_runtime_security()
     
     app = FastAPI(
         title=settings.API_TITLE,
@@ -163,6 +165,12 @@ def create_app() -> FastAPI:
     async def startup_event():
         """Initialize on startup"""
         initialize_observability_for_environment()
+        if settings.ENVIRONMENT in {"production", "prod", "live"} and settings.REQUIRE_HTTPS:
+            logger.info(
+                "production_transport_policy_enabled",
+                require_https=True,
+                trusted_hosts=settings.TRUSTED_HOSTS,
+            )
         logger.info(
             "API Starting",
             version=settings.API_VERSION,

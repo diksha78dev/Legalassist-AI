@@ -20,6 +20,11 @@ security = HTTPBearer()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
 
 
+def _get_jwt_secrets_to_try() -> list[str]:
+    secrets_to_try = [settings.JWT_SECRET_KEY, settings.JWT_SECRET_KEY_PREVIOUS]
+    return [secret for secret in dict.fromkeys(secret.strip() for secret in secrets_to_try if secret and secret.strip())]
+
+
 # ============================================================================
 # JWT Token Management
 # ============================================================================
@@ -51,14 +56,31 @@ def create_access_token(data: Dict, expires_delta: Optional[timedelta] = None) -
 def verify_token(token: str) -> Dict:
     """Verify JWT token"""
     try:
-        payload = jwt.decode(
-            token,
-            settings.JWT_SECRET_KEY,
-            algorithms=[settings.JWT_ALGORITHM],
-            issuer=settings.JWT_ISSUER,
-            audience=settings.JWT_AUDIENCE,
-            options={"require": ["exp", "iat", "iss", "aud", "jti", "type"]},
-        )
+        payload = None
+        last_error = None
+        for secret in _get_jwt_secrets_to_try():
+            try:
+                payload = jwt.decode(
+                    token,
+                    secret,
+                    algorithms=[settings.JWT_ALGORITHM],
+                    issuer=settings.JWT_ISSUER,
+                    audience=settings.JWT_AUDIENCE,
+                    options={"require": ["exp", "iat", "iss", "aud", "jti", "type"]},
+                )
+                break
+            except jwt.InvalidTokenError as exc:
+                last_error = exc
+                continue
+
+        if payload is None:
+            if isinstance(last_error, jwt.ExpiredSignatureError):
+                raise last_error
+            if isinstance(last_error, jwt.InvalidIssuerError):
+                raise last_error
+            if isinstance(last_error, jwt.InvalidAudienceError):
+                raise last_error
+            raise jwt.InvalidTokenError(str(last_error) if last_error else "Invalid token")
         if payload.get("type") != "access":
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,

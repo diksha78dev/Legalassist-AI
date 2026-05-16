@@ -18,6 +18,8 @@ class APISettings(BaseSettings):
     API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
     API_PORT: int = int(os.getenv("API_PORT", "8000"))
     API_WORKERS: int = int(os.getenv("API_WORKERS", "4"))
+    ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development").lower()
+    REQUIRE_HTTPS: bool = os.getenv("REQUIRE_HTTPS", "true").lower() == "true"
     TRUSTED_HOSTS: list = [
         "localhost",
         "127.0.0.1",
@@ -44,7 +46,8 @@ class APISettings(BaseSettings):
     
     # Authentication
     AUTH_ENABLED: bool = True
-    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "your-secret-key-change-in-production")
+    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "")
+    JWT_SECRET_KEY_PREVIOUS: str = os.getenv("JWT_SECRET_KEY_PREVIOUS", os.getenv("JWT_SECRET_KEY_OLD", ""))
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRATION_HOURS: int = 24
     JWT_ISSUER: str = os.getenv("JWT_ISSUER", "legalassist.ai")
@@ -101,6 +104,23 @@ class APISettings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = True
+
+    def validate_runtime_security(self):
+        if self.ENVIRONMENT in {"production", "prod", "live"}:
+            missing = []
+            if not self.JWT_SECRET_KEY:
+                missing.append("JWT_SECRET_KEY")
+            if not os.getenv("SENDGRID_API_KEY", "").strip():
+                missing.append("SENDGRID_API_KEY")
+            if not os.getenv("TWILIO_AUTH_TOKEN", "").strip():
+                missing.append("TWILIO_AUTH_TOKEN")
+            if missing:
+                raise RuntimeError("Missing required production secrets: " + ", ".join(sorted(missing)))
+
+            if self.REQUIRE_HTTPS:
+                api_base = os.getenv("API_BASE_URL", "").strip()
+                if api_base and not api_base.lower().startswith("https://"):
+                    raise RuntimeError("API_BASE_URL must use https:// in production")
 
 
 def get_settings() -> APISettings:
