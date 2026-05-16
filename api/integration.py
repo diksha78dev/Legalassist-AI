@@ -6,6 +6,13 @@ import uuid
 from celery_app import celery_app
 import structlog
 
+try:
+    from flask import Blueprint
+    _FLASK_AVAILABLE = True
+except ImportError:
+    _FLASK_AVAILABLE = False
+    Blueprint = None
+
 logger = structlog.get_logger(__name__)
 
 _integration_done = False
@@ -52,7 +59,10 @@ class FlaskAPIAdapter:
     @staticmethod
     def create_flask_blueprint():
         """Create Flask blueprint for API"""
-        from flask import Blueprint
+        if not _FLASK_AVAILABLE:
+            raise ImportError(
+                "Flask is not installed. Install it with: pip install flask"
+            )
         
         bp = Blueprint("api", __name__, url_prefix="/api-bridge")
         
