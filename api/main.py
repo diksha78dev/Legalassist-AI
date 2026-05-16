@@ -65,6 +65,8 @@ middleware = [
 
 def create_app() -> FastAPI:
     """Create FastAPI application"""
+
+    settings.validate_runtime_security()
     
     app = FastAPI(
         title=settings.API_TITLE,
@@ -176,7 +178,6 @@ def create_app() -> FastAPI:
         logger.info(
             "API Starting",
             version=settings.API_VERSION,
-            environment=settings.LOG_LEVEL
         )
     
     @app.on_event("shutdown")

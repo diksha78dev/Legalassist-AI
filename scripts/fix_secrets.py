@@ -16,7 +16,7 @@ TWILIO_FROM_NUMBER = ""
 SENDGRID_API_KEY = ""
 SENDGRID_FROM_EMAIL = ""
 
-JWT_SECRET = "test_secret_key_do_not_use_in_production"
+JWT_SECRET = ""
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_HOURS = 24
 """

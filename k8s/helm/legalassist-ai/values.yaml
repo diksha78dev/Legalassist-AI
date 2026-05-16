@@ -94,7 +94,7 @@ postgresql:
   enabled: true
   auth:
     username: legal_user
-    password: changeme  # Change in production!
+    password: ""
     database: legalassist_db
   primary:
     persistence:
@@ -113,7 +113,7 @@ redis:
   enabled: true
   auth:
     enabled: true
-    password: changeme  # Change in production!
+    password: ""
   master:
     persistence:
       enabled: true
@@ -135,7 +135,7 @@ prometheus:
 # Grafana Configuration
 grafana:
   enabled: true
-  adminPassword: changeme  # Change in production!
+  adminPassword: ""
   persistence:
     enabled: true
     size: 5Gi
@@ -161,9 +161,14 @@ env:
 
 # Secrets (reference external secret management)
 secrets:
+  create: false
   externalSecrets:
     enabled: false
     backendType: aws-secrets-manager  # or vault, etc.
+  openaiApiKey: ""
+  twilioAccountSid: ""
+  twilioAuthToken: ""
+  sendgridApiKey: ""
 
 # Network Policies
 networkPolicy:
