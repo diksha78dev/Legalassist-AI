@@ -1116,7 +1116,7 @@ UI_TEXT = {
     "simplified_judgment": "✅ Simplified Judgment",
     "summary_success": "The judgment has been simplified successfully.",
     "remedies_title": "⚖️ What Can You Do Now?",
-    "remedies_spinner": "Analyzing your legal options...",
+    "remedies_spinner": "Fetching remedies advice...",
     "what_happened": "What Happened?",
     "can_appeal": "Can You Appeal?",
     "appeal_details": "Appeal Details",
