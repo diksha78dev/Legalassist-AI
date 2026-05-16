@@ -1,6 +1,7 @@
 """
 API Configuration
 """
+import os
 from functools import lru_cache
 import tempfile
 from pathlib import Path
