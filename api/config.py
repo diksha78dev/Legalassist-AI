@@ -21,6 +21,8 @@ class APISettings(BaseSettings):
     API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
     API_PORT: int = int(os.getenv("API_PORT", "8000"))
     API_WORKERS: int = int(os.getenv("API_WORKERS", "4"))
+    ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development").lower()
+    REQUIRE_HTTPS: bool = os.getenv("REQUIRE_HTTPS", "true").lower() == "true"
     TRUSTED_HOSTS: list = [
         "localhost",
         "127.0.0.1",
