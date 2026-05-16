@@ -183,7 +183,7 @@ def create_api_key_record(name: str, expires_in_days: Optional[int] = None) -> t
 
 class CurrentUser:
     """Current authenticated user"""
-    def __init__(self, user_id: str, email: str, role: str = "user"):
+    def __init__(self, user_id: int, email: str, role: str = "user"):
         self.user_id = user_id
         self.email = email
         self.role = role

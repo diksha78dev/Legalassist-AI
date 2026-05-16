@@ -16,14 +16,27 @@ if PROJECT_ENV_PATH.exists():
 else:
     load_dotenv()
 
+# Detection of the environment should be done only once at startup.
+try:
+    import streamlit as st
+    # Verify st.secrets is accessible
+    _ = st.secrets
+    _HAS_STREAMLIT = True
+except (ImportError, RuntimeError, AttributeError, FileNotFoundError):
+    st = None
+    _HAS_STREAMLIT = False
+
 def _get_val(key, default=None):
-    # Try Streamlit secrets first (if in a Streamlit context)
-    try:
-        import streamlit as st
-        if key in st.secrets:
-            return st.secrets[key]
-    except (ImportError, RuntimeError, AttributeError, FileNotFoundError):
-        pass
+    """
+    Retrieve configuration value from Streamlit secrets or environment variables.
+    Refactored to avoid redundant dynamic imports.
+    """
+    if _HAS_STREAMLIT and st is not None:
+        try:
+            if key in st.secrets:
+                return st.secrets[key]
+        except Exception:
+            pass
     
     # Fallback to environment variables
     return os.getenv(key, default)
@@ -93,11 +106,18 @@ class Config:
     MAX_FILE_SIZE_MB = _get_int_env("MAX_FILE_SIZE_MB", 25)
     WARN_FILE_SIZE_MB = _get_int_env("WARN_FILE_SIZE_MB", 10)
     TEXT_COMPRESSION_LIMIT = _get_int_env("TEXT_COMPRESSION_LIMIT", 6000)
+    MAX_DOCUMENT_TEXT_STORAGE_LIMIT = _get_int_env("MAX_DOCUMENT_TEXT_STORAGE_LIMIT", 50000)
     # --- Attachments ---
     # Directory where uploaded attachments are stored (development)
     ATTACHMENTS_DIR = _get_val("ATTACHMENTS_DIR", str(PROJECT_ROOT / "attachments"))
     # Use randomized filenames to avoid collisions and leaking original names
     ATTACHMENTS_RANDOMIZE_FILENAMES = _get_bool_env("ATTACHMENTS_RANDOMIZE_FILENAMES", True)
+    
+    # --- Export Settings ---
+    # Directory where user data exports are saved (local storage)
+    EXPORTS_DIR = _get_val("EXPORTS_DIR", str(PROJECT_ROOT / ".exports"))
+    # Hours before export files expire and can be deleted
+    EXPORT_FILE_EXPIRY_HOURS = _get_int_env("EXPORT_FILE_EXPIRY_HOURS", 24)
     
     # --- Database Settings ---
     DATABASE_URL = _get_val("DATABASE_URL", "sqlite:///./legalassist.db")

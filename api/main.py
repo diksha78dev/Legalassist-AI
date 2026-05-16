@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.openapi.utils import get_openapi
 from fastapi import status
 import structlog
+import asyncio
 
 from api.config import get_settings
 from api.middleware import (
@@ -53,7 +54,7 @@ middleware = [
     ),
     Middleware(
         TrustedHostMiddleware,
-        allowed_hosts=settings.TRUSTED_HOSTS,
+        allowed_hosts=settings.ALLOWED_HOSTS
     ),
 ]
 
@@ -165,12 +166,15 @@ def create_app() -> FastAPI:
     async def startup_event():
         """Initialize on startup"""
         initialize_observability_for_environment()
-        if settings.ENVIRONMENT in {"production", "prod", "live"} and settings.REQUIRE_HTTPS:
+        
+        if settings.RATE_LIMIT_ENABLED:
             logger.info(
-                "production_transport_policy_enabled",
-                require_https=True,
-                trusted_hosts=settings.TRUSTED_HOSTS,
+                "Rate limiter enabled",
+                redis_url=settings.REDIS_URL,
+                requests=settings.RATE_LIMIT_REQUESTS,
+                window=settings.RATE_LIMIT_WINDOW
             )
+        
         logger.info(
             "API Starting",
             version=settings.API_VERSION,
@@ -260,6 +264,7 @@ app = create_app()
 
 if settings.ENABLE_WEBSOCKET:
     from fastapi import WebSocket
+    from celery_app import TaskStatus
     
     @app.websocket("/ws/progress/{job_id}")
     async def websocket_progress_endpoint(websocket: WebSocket, job_id: str):
@@ -273,11 +278,7 @@ if settings.ENABLE_WEBSOCKET:
         await websocket.accept()
         
         try:
-            from celery_app import TaskStatus
-            
             while True:
-                import asyncio
-                
                 status_info = TaskStatus.get_task_status(job_id)
                 
                 await websocket.send_json({
