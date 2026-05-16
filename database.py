@@ -1,7 +1,12 @@
+"""Compatibility shim for the original monolithic `database.py`.
+
+The project has moved models and CRUD helpers into the `db/` package, but many
+existing imports still point at `database`. This module re-exports the pieces
+needed by the current codebase and keeps the authentication/OTP security path
+working while the refactor continues.
 """
-Database models for deadline tracking and notification management.
-Uses SQLAlchemy ORM with SQLite for persistence.
-"""
+
+from __future__ import annotations
 
 import datetime as dt
 import hashlib
@@ -27,11 +32,12 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
 import enum
 from contextlib import contextmanager
-from config import Config
+from typing import Optional, List
 
+import enum
 try:
     import redis
-except ImportError:  # pragma: no cover - handled at runtime if Redis is unavailable
+except ImportError:  # pragma: no cover - runtime optional dependency
     redis = None
 
 # Database setup
@@ -72,162 +78,48 @@ if current == 1 then
 end
 return current
 """
-_otp_rate_limit_client = None
-_otp_rate_limit_script = None
 
+from config import Config
+from db.base import Base
+from db.session import engine, SessionLocal, init_db, db_session, get_db, _to_utc_datetime, _datetime_for_db
+from db.models.auth import User, OTPVerification
+from db.models.notifications import NotificationStatus, NotificationChannel, NotificationLog, NotificationTemplate, UserPreference
+from db.models.cases import CaseDeadline, Case, CaseDocument, Attachment, CaseTimeline
+from db.crud.notifications import (
+    create_case_deadline,
+    get_upcoming_deadlines,
+    has_notification_been_sent,
+    log_notification,
+    get_notification_history,
+)
 
-def _to_utc_datetime(value: dt.datetime) -> dt.datetime:
-    """Convert a datetime to timezone-aware UTC."""
-    if value.tzinfo is None:
-        return value.replace(tzinfo=dt.timezone.utc)
-    return value.astimezone(dt.timezone.utc)
+__all__ = [
+    "engine",
+    "SessionLocal",
+    "init_db",
+    "db_session",
+    "get_db",
+    "_to_utc_datetime",
+    "_datetime_for_db",
+    "NotificationStatus",
+    "NotificationChannel",
+    "UserPreference",
+    "NotificationLog",
+    "NotificationTemplate",
+    "CaseDeadline",
+    "Case",
+    "CaseDocument",
+    "Attachment",
+    "CaseTimeline",
+    "User",
+    "OTPVerification",
+    "create_case_deadline",
+    "get_upcoming_deadlines",
+    "has_notification_been_sent",
+    "log_notification",
+    "get_notification_history",
+]
 
-
-def _datetime_for_db(value: dt.datetime) -> dt.datetime:
-    """Return a datetime in the format best suited for the current backend."""
-    utc_value = _to_utc_datetime(value)
-    if _is_sqlite:
-        return utc_value.replace(tzinfo=None)
-    return utc_value
-
-
-class NotificationStatus(str, enum.Enum):
-    """Status of sent notifications"""
-    PENDING = "pending"
-    SENT = "sent"
-    FAILED = "failed"
-    BOUNCED = "bounced"
-    OPENED = "opened"
-
-
-class NotificationChannel(str, enum.Enum):
-    """Channel for sending notifications"""
-    SMS = "sms"
-    EMAIL = "email"
-    BOTH = "both"
-
-
-class CaseDeadline(Base):
-    """Model for case deadlines"""
-    __tablename__ = "case_deadlines"
-
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
-    case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
-    case_title = Column(String(255), nullable=False)
-    deadline_date = Column(DateTime(timezone=True), nullable=False, index=True)
-    deadline_type = Column(String(255), nullable=False)  # appeal, filing, submission, etc.
-    description = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
-    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
-    is_completed = Column(Boolean, default=False, index=True)
-
-    # Relationships
-    case = relationship("Case", back_populates="deadlines")
-    notifications = relationship("NotificationLog", back_populates="deadline", cascade="all, delete-orphan")
-    attachments = relationship("Attachment", back_populates="deadline", cascade="all, delete-orphan")
-
-    def days_until_deadline(self) -> int:
-        """Calculate days remaining until deadline"""
-        now = dt.datetime.now(dt.timezone.utc)
-        deadline = self.deadline_date
-        if deadline and deadline.tzinfo is None:
-            deadline = deadline.replace(tzinfo=dt.timezone.utc)
-        delta = deadline - now
-        return max(0, delta.days)
-
-    def __repr__(self):
-        return f"<CaseDeadline(user_id={self.user_id}, case_id={self.case_id}, deadline_date={self.deadline_date})>"
-
-
-class UserPreference(Base):
-    """Model for user notification preferences"""
-    __tablename__ = "user_preferences"
-
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
-    phone_number = Column(String(255), nullable=True)
-    email = Column(String(255), nullable=False)
-    notification_channel = Column(SQLEnum(NotificationChannel), default=NotificationChannel.BOTH)
-    timezone = Column(String(255), default="UTC")  # e.g., "Asia/Kolkata", "America/New_York"
-    notify_30_days = Column(Boolean, default=True)
-    notify_10_days = Column(Boolean, default=True)
-    notify_3_days = Column(Boolean, default=True)
-    notify_1_day = Column(Boolean, default=True)
-
-    # Holiday-aware reminder engine (MVP)
-    holiday_aware_reminders = Column(Boolean, default=False)
-    holiday_country = Column(String(255), nullable=True)  # e.g., "IN" (optional in MVP)
-    holiday_region = Column(String(255), nullable=True)   # e.g., "MH" / state/province (optional in MVP)
-    # JSON array of ISO dates: ["2026-01-26", "2026-03-29", ...]
-    holiday_calendar_json = Column(Text, nullable=True)
-
-    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc))
-    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
-
-
-    # Relationships
-    user = relationship("User", back_populates="preferences")
-
-    def __repr__(self):
-        return f"<UserPreference(user_id={self.user_id}, channel={self.notification_channel})>"
-
-
-class NotificationLog(Base):
-    """Model for tracking sent notifications"""
-    __tablename__ = "notification_logs"
-
-    id = Column(Integer, primary_key=True)
-    deadline_id = Column(Integer, ForeignKey("case_deadlines.id", ondelete="CASCADE"), nullable=False, index=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    channel = Column(SQLEnum(NotificationChannel), nullable=False)
-    status = Column(SQLEnum(NotificationStatus), default=NotificationStatus.PENDING, index=True)
-    recipient = Column(String(255), nullable=False)  # phone or email
-    days_before = Column(Integer, nullable=False)  # 30, 10, 3, or 1 day reminder
-    message_id = Column(String(255), nullable=True)  # From Twilio or SendGrid
-    error_message = Column(Text, nullable=True)
-    message_preview = Column(Text, nullable=True)
-    sent_at = Column(DateTime(timezone=True), nullable=True)
-    delivered_at = Column(DateTime(timezone=True), nullable=True)
-    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
-
-    # Relationships
-    deadline = relationship("CaseDeadline", back_populates="notifications")
-
-    def __repr__(self):
-        return f"<NotificationLog(user_id={self.user_id}, status={self.status}, channel={self.channel})>"
-
-
-class CaseRecord(Base):
-    """Model for tracking individual case records (anonymized)"""
-    __tablename__ = "case_records"
-
-    id = Column(Integer, primary_key=True)
-    hashed_case_id = Column(String(255), unique=True, nullable=False, index=True)  # Hashed ID for privacy
-    case_type = Column(String(255), nullable=False, index=True)  # civil, criminal, family, etc.
-    jurisdiction = Column(String(255), nullable=False, index=True)  # Delhi, Maharashtra, etc.
-    court_name = Column(String(255), nullable=True, index=True)  # District court, High court, etc.
-    judge_name = Column(String(255), nullable=True, index=True)  # Anonymized judge reference
-    plaintiff_type = Column(String(255), nullable=True)  # individual, organization, government
-    defendant_type = Column(String(255), nullable=True)
-    case_value = Column(String(255), nullable=True)  # value range: <1L, 1-5L, 5-10L, >10L
-    outcome = Column(String(255), nullable=False, index=True)  # plaintiff_won, defendant_won, settlement, dismissal
-    judgment_summary = Column(Text, nullable=True)  # Brief summary of judgment
-    created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
-    updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
-
-    # Relationships
-    outcome_data = relationship("CaseOutcome", back_populates="case_record", uselist=False, cascade="all, delete-orphan")
-
-    def __repr__(self):
-        return f"<CaseRecord(case_type={self.case_type}, jurisdiction={self.jurisdiction}, outcome={self.outcome})>"
-
-
-class CaseOutcome(Base):
-    """Model for tracking appeal outcomes and follow-ups"""
-    __tablename__ = "case_outcomes"
-
-    id = Column(Integer, primary_key=True)
     case_id = Column(Integer, ForeignKey("case_records.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
     appeal_filed = Column(Boolean, default=False, nullable=False)
     appeal_date = Column(DateTime(timezone=True), nullable=True)
@@ -688,11 +580,10 @@ class OTPVerification(Base):
 
 
 class RevokedToken(Base):
-    """Model for storing revoked JWT tokens (logout blacklist)"""
     __tablename__ = "revoked_tokens"
 
     id = Column(Integer, primary_key=True)
-    jti = Column(String(255), unique=True, nullable=False, index=True)  # JWT ID
+    jti = Column(String(255), unique=True, nullable=False, index=True)
     revoked_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     expires_at = Column(DateTime(timezone=True), nullable=False, index=True)  # When the token would naturally expire
 
@@ -1382,95 +1273,21 @@ def aggregate_model_performance(db: Session, task: Optional[str] = None) -> List
         if r.is_accurate:
             stats[key]["accurate"] += 1
 
-    results = []
-    for (model_name, task_name, case_type, jurisdiction), v in stats.items():
-        samples = v["samples"]
-        accurate = v["accurate"]
-        accuracy = f"{(accurate / samples * 100):.1f}%" if samples > 0 else "0%"
-        mp = ModelPerformance(
-            model_name=model_name,
-            task=task_name,
-            case_type=case_type,
-            jurisdiction=jurisdiction,
-            samples=samples,
-            accurate_count=accurate,
-            accuracy=accuracy,
-        )
-        results.append(mp)
-
-    return results
+_OTP_RATE_LIMIT_WINDOW_SECONDS = 60 * 60
+_OTP_RATE_LIMIT_SCRIPT = """
+local current = redis.call('INCR', KEYS[1])
+if current == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return current
+"""
+_otp_rate_limit_client = None
+_otp_rate_limit_script = None
 
 
-def submit_similarity_feedback(
-    db: Session,
-    user_id: str,
-    candidate_case_id: int,
-    query_signature: str,
-    relevance: bool,
-) -> SimilarityFeedback:
-    """Persist feedback for a similarity search result"""
-    feedback = SimilarityFeedback(
-        user_id=str(user_id),
-        candidate_case_id=candidate_case_id,
-        query_signature=query_signature,
-        relevance=relevance,
-    )
-    db.add(feedback)
-    db.commit()
-    db.refresh(feedback)
-    return feedback
-
-
-def get_similarity_feedback(
-    db: Session,
-    user_id: Optional[str] = None,
-    query_signature: Optional[str] = None,
-    candidate_case_id: Optional[int] = None,
-    limit: int = 100,
-) -> List[SimilarityFeedback]:
-    """Get similarity feedback rows filtered by user, query, or candidate case"""
-    query = db.query(SimilarityFeedback)
-
-    if user_id is not None:
-        query = query.filter(SimilarityFeedback.user_id == str(user_id))
-    if query_signature is not None:
-        query = query.filter(SimilarityFeedback.query_signature == query_signature)
-    if candidate_case_id is not None:
-        query = query.filter(SimilarityFeedback.candidate_case_id == candidate_case_id)
-
-    return query.order_by(SimilarityFeedback.created_at.desc()).limit(limit).all()
-
-
-# ==================== User & Authentication Helper Functions ====================
-
-
-def get_user_by_email(db: Session, email: str) -> Optional[User]:
-    """Get user by email address"""
-    return db.query(User).filter(User.email == email).first()
-
-
-def create_user(db: Session, email: str) -> User:
-    """Create a new user"""
-    user = User(email=email)
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-    return user
-
-
-def update_user_last_login(db: Session, user_id: int) -> User:
-    """Update user's last login timestamp"""
-    user = db.query(User).filter(User.id == user_id).first()
-    if user:
-        user.last_login = dt.datetime.now(dt.timezone.utc)
-        db.commit()
-        db.refresh(user)
-    return user
-
-
-def _otp_rate_limit_key(email: str) -> str:
-    normalized_email = str(email).strip().lower()
-    digest = hashlib.sha256(normalized_email.encode("utf-8")).hexdigest()
+def _otp_rate_limit_key(identifier: str) -> str:
+    normalized = str(identifier).strip().lower()
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     return f"otp:rate:{digest}"
 
 
@@ -1488,13 +1305,13 @@ def _get_otp_rate_limit_script():
     return _otp_rate_limit_script
 
 
-def _reserve_otp_rate_limit_slot(email: str, max_requests_per_hour: int) -> int:
-    normalized_email = str(email).strip().lower()
-    if not normalized_email:
-        raise ValueError("Email is required for OTP rate limiting")
+def _reserve_otp_rate_limit_slot(identifier: str, max_requests_per_hour: int, label: str = "identifier") -> int:
+    normalized_identifier = str(identifier).strip().lower()
+    if not normalized_identifier:
+        raise ValueError(f"{label} is required for OTP rate limiting")
 
     script = _get_otp_rate_limit_script()
-    current = int(script(keys=[_otp_rate_limit_key(normalized_email)], args=[_OTP_RATE_LIMIT_WINDOW_SECONDS]))
+    current = int(script(keys=[_otp_rate_limit_key(normalized_identifier)], args=[_OTP_RATE_LIMIT_WINDOW_SECONDS]))
 
     if current > max_requests_per_hour:
         raise ValueError("Too many OTP requests. Please try again later.")
@@ -1508,9 +1325,12 @@ def create_otp_verification(
     otp_hash: str,
     expires_at: dt.datetime,
     max_requests_per_hour: int = 5,
+    requester_ip: Optional[str] = None,
 ) -> OTPVerification:
-    """Create a new OTP verification record with rate limiting"""
-    _reserve_otp_rate_limit_slot(email, max_requests_per_hour)
+    """Create a new OTP verification record with rate limiting."""
+    _reserve_otp_rate_limit_slot(email, max_requests_per_hour, label="Email")
+    if requester_ip:
+        _reserve_otp_rate_limit_slot(requester_ip, max_requests_per_hour, label="IP")
 
     otp = OTPVerification(
         email=email,
@@ -1524,7 +1344,6 @@ def create_otp_verification(
 
 
 def get_pending_otp(db: Session, email: str) -> Optional[OTPVerification]:
-    """Get unused, non-expired OTP for email"""
     now = dt.datetime.now(dt.timezone.utc)
     return db.query(OTPVerification).filter(
         OTPVerification.email == email,
@@ -1534,16 +1353,6 @@ def get_pending_otp(db: Session, email: str) -> Optional[OTPVerification]:
 
 
 def mark_otp_as_used(db: Session, otp_id: int) -> bool:
-    """
-    Mark an OTP as used to prevent reuse.
-    
-    Args:
-        db: Database session
-        otp_id: OTP record ID to mark as used
-    
-    Returns:
-        True if OTP was found and marked used, False otherwise
-    """
     try:
         otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
         if otp:
@@ -1558,30 +1367,11 @@ def mark_otp_as_used(db: Session, otp_id: int) -> bool:
 
 
 def record_otp_failed_attempt(db: Session, otp_id: int, lockout_duration_minutes: int = 15, max_failed_attempts: int = 5) -> bool:
-    """
-    Record a failed OTP verification attempt and implement lockout after max attempts.
-    
-    Args:
-        db: Database session
-        otp_id: OTP record ID
-        lockout_duration_minutes: Minutes to lock OTP after max attempts exceeded
-        max_failed_attempts: Maximum failed attempts before lockout
-    
-    Returns:
-        True if updated, False if OTP not found
-    """
     otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
     if otp:
         otp.failed_attempts += 1
-        
-        # Lock OTP if max attempts exceeded
         if otp.failed_attempts >= max_failed_attempts:
             otp.locked_until = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=lockout_duration_minutes)
-            auth_logger.warning(
-                f"OTP for {otp.email} locked after {otp.failed_attempts} failed attempts. "
-                f"Locked until {otp.locked_until}"
-            )
-        
         db.commit()
         db.refresh(otp)
         return True
@@ -1589,7 +1379,6 @@ def record_otp_failed_attempt(db: Session, otp_id: int, lockout_duration_minutes
 
 
 def reset_otp_failed_attempts(db: Session, otp_id: int) -> bool:
-    """Reset failed attempt counter on successful verification"""
     otp = db.query(OTPVerification).filter(OTPVerification.id == otp_id).first()
     if otp:
         otp.failed_attempts = 0
@@ -1601,17 +1390,34 @@ def reset_otp_failed_attempts(db: Session, otp_id: int) -> bool:
 
 
 def cleanup_expired_otps(db: Session) -> int:
-    """Delete expired OTPs, return count of deleted"""
     now = dt.datetime.now(dt.timezone.utc)
-    deleted = db.query(OTPVerification).filter(
-        OTPVerification.expires_at < now
-    ).delete()
+    deleted = db.query(OTPVerification).filter(OTPVerification.expires_at < now).delete()
     db.commit()
     return deleted
 
 
+def get_user_by_email(db: Session, email: str) -> Optional[User]:
+    return db.query(User).filter(User.email == email).first()
+
+
+def create_user(db: Session, email: str) -> User:
+    user = User(email=email)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def update_user_last_login(db: Session, user_id: int) -> Optional[User]:
+    user = db.query(User).filter(User.id == user_id).first()
+    if user:
+        user.last_login = dt.datetime.now(dt.timezone.utc)
+        db.commit()
+        db.refresh(user)
+    return user
+
+
 def revoke_token(db: Session, jti: str, expires_at: dt.datetime) -> RevokedToken:
-    """Add a token JTI to the revoked list"""
     token = RevokedToken(jti=jti, expires_at=expires_at)
     db.add(token)
     db.commit()
@@ -1620,16 +1426,12 @@ def revoke_token(db: Session, jti: str, expires_at: dt.datetime) -> RevokedToken
 
 
 def is_token_revoked(db: Session, jti: str) -> bool:
-    """Check if a token has been revoked"""
     return db.query(RevokedToken).filter(RevokedToken.jti == jti).first() is not None
 
 
 def cleanup_expired_revoked_tokens(db: Session) -> int:
-    """Delete revoked tokens that have naturally expired"""
     now = dt.datetime.now(dt.timezone.utc)
-    deleted = db.query(RevokedToken).filter(
-        RevokedToken.expires_at < now
-    ).delete()
+    deleted = db.query(RevokedToken).filter(RevokedToken.expires_at < now).delete()
     db.commit()
     return deleted
 
