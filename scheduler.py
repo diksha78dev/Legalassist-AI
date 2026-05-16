@@ -79,7 +79,11 @@ from db import (
     get_upcoming_deadlines,
     UserPreference,
 )
-from notifications.reminder_engine import build_reminder_jobs
+from notifications.reminder_engine import (
+    should_process_threshold,
+    is_notify_enabled,
+    is_reminder_time_for_user,
+)
 from notification_service import NotificationService
 
 # This module is imported by app.py, which handles logging configuration
@@ -177,8 +181,39 @@ def check_and_send_reminders():
         logger.info(f"Found {len(upcoming_deadlines)} upcoming deadlines")
 
         sent_count = 0
-        # Build actionable reminder jobs using extracted decision logic
-        for deadline, user_preference, days_left in build_reminder_jobs(upcoming_deadlines, db):
+
+        # Prefetch user preferences for eligible deadlines to avoid N+1 queries
+        eligible = []
+        for dl in upcoming_deadlines:
+            days_left = dl.days_until_deadline()
+            if should_process_threshold(days_left):
+                eligible.append((dl, days_left))
+
+        user_ids = {d.user_id for d, _ in eligible}
+        prefs_by_user = {}
+        if user_ids:
+            prefs = db.query(UserPreference).filter(UserPreference.user_id.in_(list(user_ids))).all()
+            prefs_by_user = {p.user_id: p for p in prefs}
+
+        for deadline, days_left in eligible:
+            user_preference = prefs_by_user.get(deadline.user_id)
+            if not user_preference:
+                logger.warning(f"No preferences found for user {deadline.user_id}. Skipping.")
+                continue
+
+            # Check if reminders should be sent based on preferences and time
+            if not is_notify_enabled(days_left, user_preference):
+                logger.debug(f"Notifications disabled for this threshold ({days_left} days) for user {deadline.user_id}")
+                continue
+
+            if not is_reminder_time_for_user(user_preference.timezone):
+                logger.debug(
+                    f"Not reminder hour yet in user's timezone",
+                    user_id=deadline.user_id,
+                    user_timezone=user_preference.timezone,
+                )
+                continue
+
             logger.info(f"Processing deadline: Case={deadline.case_id}, Days Left={days_left}")
 
             # Send reminders using the notification service
