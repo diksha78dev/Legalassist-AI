@@ -61,6 +61,8 @@ OTP_EXPIRY_MINUTES = Config.OTP_EXPIRY_MINUTES
 # OTP Verification Security - Failed Attempt Lockout
 OTP_MAX_FAILED_ATTEMPTS = int(os.getenv("OTP_MAX_FAILED_ATTEMPTS", "5"))  # Max failed verification attempts
 OTP_LOCKOUT_MINUTES = int(os.getenv("OTP_LOCKOUT_MINUTES", "15"))  # Lockout duration after max attempts
+OTP_REQUEST_RATE_LIMIT_MAX = int(os.getenv("OTP_REQUEST_RATE_LIMIT_MAX", str(Config.OTP_REQUEST_RATE_LIMIT_MAX)))
+OTP_REQUEST_RATE_LIMIT_HOURS = int(os.getenv("OTP_REQUEST_RATE_LIMIT_HOURS", str(Config.OTP_REQUEST_RATE_LIMIT_HOURS)))
 
 
 def _hash_otp(otp: str) -> str:
@@ -71,6 +73,40 @@ def _hash_otp(otp: str) -> str:
 def _verify_otp_hash(otp: str, otp_hash: str) -> bool:
     """Verify OTP against stored hash"""
     return _hash_otp(otp) == otp_hash
+
+
+def _otp_rate_limit_keys(email: str, requester_ip: Optional[str] = None) -> list[str]:
+    keys = [f"email:{str(email).strip().lower()}"]
+    if requester_ip:
+        keys.append(f"ip:{str(requester_ip).strip().lower()}")
+    return keys
+
+
+def _reserve_otp_request_slot(identifier: str, window_hours: int, max_requests: int) -> int:
+    normalized_identifier = str(identifier).strip().lower()
+    if not normalized_identifier:
+        raise ValueError("OTP request identifier is required")
+
+    now = datetime.now(timezone.utc)
+    rate_limit_start = now - timedelta(hours=window_hours)
+
+    db = SessionLocal()
+    try:
+        recent_otps = db.query(OTPVerification).filter(
+            OTPVerification.email == normalized_identifier,
+            OTPVerification.created_at >= rate_limit_start,
+        ).count()
+
+        if recent_otps >= max_requests:
+            raise ValueError("Too many OTP requests. Please try again later.")
+
+        script = _get_otp_rate_limit_script()
+        current = int(script(keys=[_otp_rate_limit_key(normalized_identifier)], args=[window_hours * 60 * 60]))
+        if current > max_requests:
+            raise ValueError("Too many OTP requests. Please try again later.")
+        return current
+    finally:
+        db.close()
 
 
 def generate_otp() -> str:
@@ -140,7 +176,7 @@ def send_otp_email(email: str, otp: str) -> bool:
         return False
 
 
-def request_otp(email: str) -> Tuple[bool, str]:
+def request_otp(email: str, requester_ip: Optional[str] = None) -> Tuple[bool, str]:
     """
     Request OTP for email authentication.
     Returns (success, message).
@@ -151,27 +187,14 @@ def request_otp(email: str) -> Tuple[bool, str]:
 
     db = SessionLocal()
     try:
-        # Check rate limiting
-        now = datetime.now(timezone.utc)
-        
-        rate_limit_start = now - timedelta(hours=OTP_RATE_LIMIT_HOURS)
-
-        recent_otps = db.query(OTPVerification).filter(
-            OTPVerification.email == email,
-            OTPVerification.created_at >= rate_limit_start,
-        ).count()
-
-        if recent_otps >= OTP_RATE_LIMIT_MAX:
-            return False, "Too many OTP requests. Please try again in an hour."
-
         # Generate OTP
         otp = generate_otp()
         otp_hash = _hash_otp(otp)
-        expires_at = now + timedelta(minutes=OTP_EXPIRY_MINUTES)
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=OTP_EXPIRY_MINUTES)
 
         # Store OTP
         try:
-            create_otp_verification(db, email, otp_hash, expires_at)
+            create_otp_verification(db, email, otp_hash, expires_at, requester_ip=requester_ip)
         except ValueError as exc:
             return False, str(exc)
 
@@ -339,8 +362,8 @@ def create_jwt_token(user_id: int, email: str) -> str:
         "jti": jti,                      # JWT ID
         "exp": expiration_time,          # Expiration Time
         "iat": issued_at_time,           # Issued At Time
-        "iss": JWT_ISSUER,               # Issuer (Who created the token)
-        "aud": JWT_AUDIENCE,             # Audience (Who the token is for)
+        "iss": Config.JWT_ISSUER,        # Issuer (Who created the token)
+        "aud": Config.JWT_AUDIENCE,      # Audience (Who the token is for)
         
         # --- Private/Custom Claims ---
         "user_id": user_id,              # The user's internal DB ID
@@ -355,7 +378,7 @@ def create_jwt_token(user_id: int, email: str) -> str:
         algorithm=JWT_ALGORITHM
     )
     
-    logger.debug(f"Created new JWT access token for user {email} with jti {jti}")
+    logger.debug("Created new JWT access token for user %s with jti %s", email, jti)
     
     return encoded_token
 
@@ -402,11 +425,12 @@ def verify_jwt_token(token: str) -> Optional[dict]:
         # =====================================================================
         
         payload = jwt.decode(
-            jwt=token, 
-            key=JWT_SECRET, 
+            jwt=token,
+            key=JWT_SECRET,
             algorithms=[JWT_ALGORITHM],
-            issuer=JWT_ISSUER,
-            audience=JWT_AUDIENCE
+            issuer=Config.JWT_ISSUER,
+            audience=Config.JWT_AUDIENCE,
+            options={"require": ["exp", "iat", "iss", "aud", "jti", "type"]},
         )
         
         # =====================================================================
@@ -542,14 +566,19 @@ def revoke_jwt_token(token: str) -> bool:
             jwt=token,
             key=JWT_SECRET,
             algorithms=[JWT_ALGORITHM],
-            issuer=JWT_ISSUER,
-            audience=JWT_AUDIENCE,
-            options={"verify_exp": False, "verify_signature": True},
+            issuer=Config.JWT_ISSUER,
+            audience=Config.JWT_AUDIENCE,
+            options={"verify_exp": False, "verify_signature": True, "require": ["exp", "iat", "iss", "aud", "jti", "type"]},
         )
         
         jti = payload.get("jti")
         exp = payload.get("exp")
+        token_type = payload.get("type")
         
+        if token_type != "access":
+            logger.warning("Attempted to revoke a non-access token")
+            return False
+
         if not jti or not exp:
             logger.error("Token payload missing required claims for revocation (jti or exp).")
             return False
