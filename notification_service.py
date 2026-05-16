@@ -41,9 +41,11 @@ from db import (
     NotificationLog,
     UserPreference,
     CaseDeadline,
-    log_notification,
-    has_notification_been_sent,
     get_notification_template_for_user,
+)
+from db.crud.notifications import (
+    get_or_create_notification_log,
+    update_notification_log_by_keys,
 )
 from core.template_renderer import render_template, validate_template, TemplateValidationError
 
@@ -199,7 +201,8 @@ def send_email_task(
     Returns:
         dict: A summary of the operation results.
     """
-    from database import db_session, log_notification, NotificationStatus, NotificationChannel
+    from database import db_session, NotificationStatus, NotificationChannel
+    from db.crud.notifications import update_notification_log_by_keys
     
     logger.info(
         "Starting background email delivery", 
@@ -225,13 +228,11 @@ def send_email_task(
             # We use the db_session context manager to ensure the connection 
             # is properly closed and the transaction is committed.
             with db_session() as db:
-                log_notification(
+                update_notification_log_by_keys(
                     db=db,
                     deadline_id=deadline_id,
-                    user_id=user_id,
-                    channel=NotificationChannel.EMAIL,
-                    recipient=to_email,
                     days_before=days_left,
+                    channel=NotificationChannel.EMAIL,
                     status=status,
                     message_id=message_id,
                     error_message=error,
@@ -413,17 +414,34 @@ class NotificationService:
 
         if message is None:
             message = self.build_sms_message(deadline.case_title, days_left, deadline.deadline_date)
-        success, message_id, error = self.sms_client.send_sms(user_preference.phone_number, message)
-
-        status = NotificationStatus.SENT if success else NotificationStatus.FAILED
-
-        log_notification(
+        # Idempotency: create a pending log row or get existing one
+        log = get_or_create_notification_log(
             db=db,
             deadline_id=deadline.id,
             user_id=deadline.user_id,
             channel=NotificationChannel.SMS,
             recipient=user_preference.phone_number,
             days_before=days_left,
+        )
+
+        # If already sent, skip
+        if log.status in (NotificationStatus.SENT, NotificationStatus.OPENED):
+            return NotificationResult(
+                success=False,
+                channel=NotificationChannel.SMS,
+                recipient=user_preference.phone_number,
+                message_id=log.message_id,
+                error="Already sent",
+            )
+
+        success, message_id, error = self.sms_client.send_sms(user_preference.phone_number, message)
+        status = NotificationStatus.SENT if success else NotificationStatus.FAILED
+
+        update_notification_log_by_keys(
+            db=db,
+            deadline_id=deadline.id,
+            days_before=days_left,
+            channel=NotificationChannel.SMS,
             status=status,
             message_id=message_id,
             error_message=error,
@@ -495,6 +513,25 @@ class NotificationService:
         
         # We use .delay() to send the task to the Redis broker. 
         # The background worker will pick it up and execute it.
+        # Idempotency: create or get pending log row
+        log = get_or_create_notification_log(
+            db=db,
+            deadline_id=deadline.id,
+            user_id=deadline.user_id,
+            channel=NotificationChannel.EMAIL,
+            recipient=user_preference.email,
+            days_before=days_left,
+        )
+
+        if log.status in (NotificationStatus.SENT, NotificationStatus.OPENED):
+            return NotificationResult(
+                success=False,
+                channel=NotificationChannel.EMAIL,
+                recipient=user_preference.email,
+                message_id=log.message_id,
+                error="Already sent",
+            )
+
         task_result = send_email_task.delay(
             to_email=user_preference.email,
             subject=subject,
@@ -503,10 +540,18 @@ class NotificationService:
             user_id=deadline.user_id,
             days_left=days_left
         )
-        
-        # We return a successful NotificationResult immediately, noting 
-        # that the message ID is the Celery Task ID until the actual 
-        # email is processed.
+
+        # Update the log with task id so background worker can correlate
+        update_notification_log_by_keys(
+            db=db,
+            deadline_id=deadline.id,
+            days_before=days_left,
+            channel=NotificationChannel.EMAIL,
+            status=NotificationStatus.PENDING,
+            message_id=f"task_{task_result.id}",
+            message_preview=html_content,
+        )
+
         return NotificationResult(
             success=True,
             channel=NotificationChannel.EMAIL,
