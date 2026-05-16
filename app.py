@@ -511,6 +511,7 @@ def main():
         # the same name correctly invalidates the cached result.
         file_bytes = uploaded_file.getvalue()
         content_hash = hashlib.md5(file_bytes).hexdigest()
+        cache_key = f"{uploaded_file.name}_{content_hash}_{language}"
         st.session_state.processed_file = uploaded_file.name
         st.session_state.processed_file_hash = content_hash
         st.session_state.last_language = language
@@ -524,7 +525,7 @@ def main():
 
         with st.spinner(ui["processing"]):
             try:
-                # Build the same content-based cache key used when the button was clicked.
+                # Compute content hash for cache validation
                 file_bytes = uploaded_file.getvalue()
                 content_hash = hashlib.md5(file_bytes).hexdigest()
                 cache_key = f"{uploaded_file.name}_{content_hash}_{language}"
