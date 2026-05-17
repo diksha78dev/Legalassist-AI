@@ -5,6 +5,7 @@ import chromadb
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
+from config import Config
 
 LOGGER = logging.getLogger(__name__)
 
@@ -148,7 +149,7 @@ ANSWER IN {language} (include citations if possible):
             from core.app_utils import safe_llm_call
             answer, error = safe_llm_call(
                 client=openai_client,
-                model="meta-llama/llama-3.1-8b-instruct",
+                model=Config.DEFAULT_MODEL,
                 messages=[
                     {"role": "system", "content": f"You are a helpful legal researcher. Output only in {language}."},
                     {"role": "user", "content": prompt}
