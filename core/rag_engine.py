@@ -1,5 +1,6 @@
 import logging
-from typing import List, Optional
+import re
+from typing import Dict, List, Optional
 import chromadb
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -18,11 +19,55 @@ class LegalRAG:
             raise
             
         self.vector_store = None
+        self.section_header_pattern = re.compile(
+            r"^(section\s+\d+[\w().:-]*|article\s+\d+[\w().:-]*|chapter\s+\d+[\w().:-]*|clause\s+\d+[\w().:-]*)",
+            re.IGNORECASE,
+        )
         self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200,
+            chunk_size=1400,
+            chunk_overlap=180,
             separators=["\n\n", "\n", ".", " ", ""]
         )
+
+    def _is_section_header(self, line: str) -> bool:
+        """Identify likely legal section headers so related rules stay together."""
+        stripped_line = line.strip()
+        if not stripped_line or len(stripped_line) > 160:
+            return False
+
+        return bool(self.section_header_pattern.match(stripped_line))
+
+    def _split_into_section_chunks(self, text: str) -> List[str]:
+        """Split judgment text on section-like headers before falling back to size-based chunking."""
+        chunks: List[str] = []
+        current_section_lines: List[str] = []
+
+        for line in text.splitlines():
+            if self._is_section_header(line) and current_section_lines:
+                section_text = "\n".join(current_section_lines).strip()
+                if section_text:
+                    chunks.append(section_text)
+                current_section_lines = [line.strip()]
+                continue
+
+            current_section_lines.append(line)
+
+        if current_section_lines:
+            section_text = "\n".join(current_section_lines).strip()
+            if section_text:
+                chunks.append(section_text)
+
+        if len(chunks) <= 1:
+            return self.text_splitter.split_text(text)
+
+        semantic_chunks: List[str] = []
+        for chunk in chunks:
+            if len(chunk) <= 1800:
+                semantic_chunks.append(chunk)
+            else:
+                semantic_chunks.extend(self.text_splitter.split_text(chunk))
+
+        return [chunk for chunk in semantic_chunks if chunk.strip()]
 
     def initialize_vector_store(self, text: str) -> bool:
         """Chunk the document and load it into an ephemeral vector store."""
@@ -32,7 +77,7 @@ class LegalRAG:
             
         try:
             LOGGER.info("Chunking document text...")
-            chunks = self.text_splitter.split_text(text)
+            chunks = self._split_into_section_chunks(text)
             LOGGER.info(f"Split document into {len(chunks)} chunks.")
             
             # Create vector store in memory using EphemeralClient
