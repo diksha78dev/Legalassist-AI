@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import threading
 import logging
 from typing import Optional, List
 from sqlalchemy import (
+    event,
     create_engine,
     Column,
     Integer,
@@ -39,6 +41,7 @@ except ImportError:  # pragma: no cover - runtime optional dependency
     redis = None
 
 # Database setup
+from config import Config
 DATABASE_URL = Config.DATABASE_URL
 _db_url = make_url(DATABASE_URL)
 _is_sqlite = _db_url.get_backend_name() == "sqlite"
@@ -118,6 +121,13 @@ __all__ = [
     "get_notification_history",
 ]
 
+class CaseOutcome(Base):
+    __table_args__ = {'extend_existing': True}
+    """Model for storing case outcomes and appeal information."""
+
+    __tablename__ = "case_outcomes"
+
+    id = Column(Integer, primary_key=True)
     case_id = Column(Integer, ForeignKey("case_records.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
     appeal_filed = Column(Boolean, default=False, nullable=False)
     appeal_date = Column(DateTime(timezone=True), nullable=True)
@@ -137,6 +147,7 @@ __all__ = [
 
 
 class CaseAnalytics(Base):
+    __table_args__ = {'extend_existing': True}
     """Model for aggregated analytics (refreshed periodically)"""
     __tablename__ = "case_analytics"
 
@@ -167,6 +178,8 @@ class CaseAnalytics(Base):
 
 
 class NotificationTemplate(Base):
+    __table_args__ = {'extend_existing': True}
+    __table_args__ = {'extend_existing': True}
     """Per-user notification templates for SMS and Email"""
     __tablename__ = "notification_templates"
 
@@ -184,6 +197,7 @@ class NotificationTemplate(Base):
 
 
 class UserFeedback(Base):
+    __table_args__ = {'extend_existing': True}
     """Model for tracking user feedback on case outcomes"""
     __tablename__ = "user_feedback"
 
@@ -210,6 +224,7 @@ class UserFeedback(Base):
 
 
 class ModelFeedback(Base):
+    __table_args__ = {'extend_existing': True}
     """User feedback on model outputs for later training and evaluation"""
     __tablename__ = "model_feedback"
 
@@ -230,6 +245,7 @@ class ModelFeedback(Base):
 
 
 class ModelPerformance(Base):
+    __table_args__ = {'extend_existing': True}
     """Aggregated model performance metrics (materialized/updated periodically)"""
     __tablename__ = "model_performance"
 
@@ -250,6 +266,7 @@ class ModelPerformance(Base):
 
 
 class ModelRoutingRule(Base):
+    __table_args__ = {'extend_existing': True}
     """Rule for routing tasks to specific models based on case attributes"""
     __tablename__ = "model_routing_rule"
 
@@ -268,6 +285,7 @@ class ModelRoutingRule(Base):
 
 
 class SimilarityFeedback(Base):
+    __table_args__ = {'extend_existing': True}
     """Model for tracking similarity search relevance feedback"""
     __tablename__ = "similarity_feedback"
 
@@ -291,6 +309,7 @@ class SimilarityFeedback(Base):
 
 
 class User(Base):
+    __table_args__ = {'extend_existing': True}
     """
     ===========================================================================
     User Model Definition
@@ -547,6 +566,7 @@ class User(Base):
 
 
 class OTPVerification(Base):
+    __table_args__ = {'extend_existing': True}
     """Model for storing email OTP codes for authentication"""
     __tablename__ = "otp_verifications"
 
@@ -578,6 +598,7 @@ class OTPVerification(Base):
 
 
 class RevokedToken(Base):
+    __table_args__ = {'extend_existing': True}
     __tablename__ = "revoked_tokens"
 
     id = Column(Integer, primary_key=True)
@@ -608,6 +629,7 @@ class DocumentType(str, enum.Enum):
 
 
 class Case(Base):
+    __table_args__ = {'extend_existing': True}
     """Model for tracking user cases"""
     __tablename__ = "cases"
     __table_args__ = (UniqueConstraint("user_id", "case_number", name="uq_user_case_number"),)
@@ -634,6 +656,7 @@ class Case(Base):
 
 
 class CaseDocument(Base):
+    __table_args__ = {'extend_existing': True}
     """Model for storing documents uploaded for a case"""
     __tablename__ = "case_documents"
 
@@ -654,6 +677,7 @@ class CaseDocument(Base):
 
 
 class Attachment(Base):
+    __table_args__ = {'extend_existing': True}
     """Model for storing uploaded attachments/evidence linked to cases or deadlines"""
     __tablename__ = "attachments"
 
@@ -676,6 +700,7 @@ class Attachment(Base):
 
 
 class CaseTimeline(Base):
+    __table_args__ = {'extend_existing': True}
     """Model for tracking timeline events in a case"""
     __tablename__ = "case_timeline"
 
@@ -691,13 +716,14 @@ class CaseTimeline(Base):
     case = relationship("Case", back_populates="timeline_events")
 
     def __repr__(self):
-        return f"<CaseTimeline(case_id={self.case_id}, event_type={self.event_type})>"
+        return f"<CaseTimeline(case_id={self.case_id}_type={self.event_type})>"
 
 
 # ==================== Case Search & Precedent Matching Models ====================
 
 
 class CaseEmbedding(Base):
+    __table_args__ = {'extend_existing': True}
     """Model for storing semantic embeddings of cases for similarity search"""
     __tablename__ = "case_embeddings"
 
@@ -728,6 +754,7 @@ class CaseEmbedding(Base):
 
 
 class CaseIssue(Base):
+    __table_args__ = {'extend_existing': True}
     """Model for tracking legal issues/topics extracted from cases"""
     __tablename__ = "case_issues"
 
@@ -761,6 +788,7 @@ class CaseIssue(Base):
 
 
 class CaseArgument(Base):
+    __table_args__ = {'extend_existing': True}
     """Model for tracking legal arguments used in cases"""
     __tablename__ = "case_arguments"
 
@@ -790,6 +818,7 @@ class CaseArgument(Base):
 
 
 class KnowledgeGraphEdge(Base):
+    __table_args__ = {'extend_existing': True}
     """Model for building a knowledge graph: Case → Issue → Argument → Outcome"""
     __tablename__ = "knowledge_graph_edges"
 
@@ -823,6 +852,7 @@ class KnowledgeGraphEdge(Base):
 
 
 class PrecedentMatch(Base):
+    __table_args__ = {'extend_existing': True}
     """Model for storing precedent matching results for quick lookup"""
     __tablename__ = "precedent_matches"
 
@@ -865,6 +895,7 @@ class PrecedentMatch(Base):
 def init_db():
     """Create all tables"""
     Base.metadata.create_all(bind=engine)
+    Index("ix_notification_logs_status", NotificationLog.status).create(bind=engine, checkfirst=True)
 
 
 @contextmanager
