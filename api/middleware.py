@@ -142,6 +142,9 @@ async def logging_middleware(request: Request, call_next: Callable):
 
     bind_request_context(request_id=request_id, user_id=user_id)
 
+    response = None
+    error_occurred = False
+    
     with traced_operation(
         f"http {request.method} {endpoint}",
         {
@@ -154,6 +157,7 @@ async def logging_middleware(request: Request, call_next: Callable):
         try:
             response = await call_next(request)
         except Exception as exc:
+            error_occurred = True
             duration = time.time() - start_time
             observe_request(endpoint, request.method, 500, duration)
             logger.error(
@@ -167,25 +171,30 @@ async def logging_middleware(request: Request, call_next: Callable):
                 error=str(exc),
             )
             raise
-        finally:
-            clear_request_context()
 
     process_time = time.time() - start_time
-    observe_request(endpoint, request.method, response.status_code, process_time)
-
-    logger.info(
-        "http_request_completed",
-        method=request.method,
-        path=endpoint,
-        status_code=response.status_code,
-        duration_ms=round(process_time * 1000, 2),
-        request_id=request_id,
-        user_id=user_id,
-    )
-
-    response.headers["X-Process-Time"] = str(process_time)
-    response.headers["X-Request-Id"] = request_id
+    
+    if not error_occurred and response:
+        observe_request(endpoint, request.method, response.status_code, process_time)
+        
+        logger.info(
+            "http_request_completed",
+            method=request.method,
+            path=endpoint,
+            status_code=response.status_code,
+            duration_ms=round(process_time * 1000, 2),
+            request_id=request_id,
+            user_id=user_id,
+        )
+        
+        response.headers["X-Process-Time"] = str(process_time)
+        response.headers["X-Request-Id"] = request_id
+    
+    clear_request_context()
     return response
+except Exception:
+    clear_request_context()
+    raise
 
 
 def _request_size_limit_for_path(path: str) -> int:
