@@ -695,7 +695,9 @@ def collect_pdf_files(folder: Path, recursive: bool) -> List[Path]:
 
 
 def print_cost_summary(snapshot: Dict[str, float]) -> None:
-    print("batch_cost_summary", **snapshot)
+    parts = [f"batch_cost_summary"]
+    parts.extend(f"{k}={v}" for k, v in snapshot.items())
+    print(" ".join(parts))
 
 
 def process_command(args: argparse.Namespace) -> int:
