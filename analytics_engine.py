@@ -735,9 +735,14 @@ class AnalyticsCalculator:
         Cases without outcome_data or with appeal_filed=False are safely ignored.
         Returns a percentage (0.0–100.0), or 0.0 if no qualifying cases.
         """
+        if not cases:
+            return 0.0
+        
         appeals_filed = 0
         appeals_won = 0
         for case in cases:
+            if case is None:
+                continue
             outcome_data = getattr(case, "outcome_data", None)
             if outcome_data is None:
                 continue
