@@ -629,10 +629,25 @@ def generate_anonymized_pdf(case_id: int, anon_id: str, user_id: int) -> Optiona
 
         # Classification info
         pdf.section_header('Case Classification')
-        pdf.labeled_value('Legal Category', case.case_type.title())
-        pdf.labeled_value('Venue Jurisdiction', case.jurisdiction)
-        pdf.labeled_value('Case Status', case.status.value.title())
-        pdf.labeled_value('Inception Date', case.created_at.strftime('%B %Y'))
+        
+        def safe_get(obj, key, default=''):
+            """Safely get value from dict or ORM object"""
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, key, default)
+        
+        pdf.labeled_value('Legal Category', str(safe_get(case, 'case_type', case.case_type)).title())
+        pdf.labeled_value('Venue Jurisdiction', safe_get(case, 'jurisdiction', case.jurisdiction))
+        status_val = safe_get(case, 'status', case.status)
+        if hasattr(status_val, 'value'):
+            status_val = status_val.value
+        pdf.labeled_value('Case Status', str(status_val).title())
+        
+        created_at = safe_get(case, 'created_at', case.created_at)
+        if hasattr(created_at, 'strftime'):
+            pdf.labeled_value('Inception Date', created_at.strftime('%B %Y'))
+        else:
+            pdf.labeled_value('Inception Date', str(created_at)[:7])
 
         # Document abstracts
         pdf.section_header('Evidence Summary')
