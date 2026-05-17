@@ -130,8 +130,13 @@ def create_app() -> FastAPI:
     app.include_router(models_router.router)
     
     # ========================================================================
-    # Global Exception Handlers
+    # OpenAPI Customization
     # ========================================================================
+    
+    def custom_openapi():
+        """Customize OpenAPI schema"""
+        if app.openapi_schema:
+            return app.openapi_schema
         
         openapi_schema = get_openapi(
             title=settings.API_TITLE,
@@ -167,6 +172,42 @@ def create_app() -> FastAPI:
         return app.openapi_schema
     
     app.openapi = custom_openapi
+    
+    # ========================================================================
+    # Global Exception Handlers
+    # ========================================================================
+    
+    @app.exception_handler(ValidationError)
+    async def validation_error_handler(request: Request, exc: ValidationError):
+        """Handle validation errors"""
+        logger.warning(
+            "validation_error",
+            path=request.url.path,
+            detail=exc.detail
+        )
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "error_code": "VALIDATION_ERROR",
+                "message": exc.detail
+            }
+        )
+    
+    @app.exception_handler(PayloadTooLargeError)
+    async def payload_too_large_handler(request: Request, exc: PayloadTooLargeError):
+        """Handle payload too large errors"""
+        logger.warning(
+            "payload_too_large",
+            path=request.url.path,
+            detail=exc.detail
+        )
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "error_code": "PAYLOAD_TOO_LARGE",
+                "message": exc.detail
+            }
+        )
     
     # ========================================================================
     # Root Endpoint
