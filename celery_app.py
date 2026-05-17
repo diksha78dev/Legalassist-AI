@@ -145,14 +145,14 @@ class ContextTask(Task):
 # CELERY APPLICATION INSTANTIATION
 # ============================================================================
 
-# The Redis message broker and backend URLs are now dynamically fetched 
-# from the environment variables to support seamless deployment across
-# different environments (development, staging, production).
-# 
-# We use REDIS_URL as the primary environment variable, defaulting to
-# a local Redis instance if it is not explicitly set.
-
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+# Redis URL must be explicitly configured - no silent fallback to localhost
+_redis_env = os.getenv("REDIS_URL")
+if not _redis_env:
+    raise RuntimeError(
+        "REDIS_URL environment variable is required. "
+        "Cannot start with localhost fallback in production."
+    )
+REDIS_URL = _redis_env
 
 # Initialize the Celery application instance
 celery_app = Celery(
