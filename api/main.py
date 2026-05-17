@@ -1,7 +1,12 @@
 """
 Main FastAPI Application
 """
-from fastapi import FastAPI, Request
+# asyncio imported at module level for performance - avoids repeated import
+# resolution inside async hot paths like WebSocket loops
+import asyncio
+from contextlib import asynccontextmanager
+
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
@@ -9,7 +14,6 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.openapi.utils import get_openapi
 from fastapi import status
 import structlog
-import asyncio
 
 from api.config import get_settings
 from api.middleware import (
@@ -30,6 +34,7 @@ from api.validation import (
 
 # Import routes
 from api.routes import documents, cases, reports, analytics, deadlines, auth, health, case_search
+from api.auth import get_current_user_optional
 
 settings = get_settings()
 logger = structlog.get_logger(__name__)
@@ -68,10 +73,31 @@ def create_app() -> FastAPI:
 
     settings.validate_runtime_security()
     
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        """Application lifespan manager"""
+        initialize_observability_for_environment()
+        
+        if settings.RATE_LIMIT_ENABLED:
+            logger.info(
+                "Rate limiter enabled",
+                redis_url=settings.REDIS_URL,
+                requests=settings.RATE_LIMIT_REQUESTS,
+                window=settings.RATE_LIMIT_WINDOW
+            )
+        
+        logger.info("API Starting", version=settings.API_VERSION)
+        
+        yield
+        
+        await cleanup_limiter()
+        logger.info("API Shutting down")
+    
     app = FastAPI(
         title=settings.API_TITLE,
         description="Comprehensive legal case analysis and deadline management API",
         version=settings.API_VERSION,
+        lifespan=lifespan,
         middleware=middleware
     )
     
@@ -87,7 +113,7 @@ def create_app() -> FastAPI:
     if settings.RATE_LIMIT_ENABLED:
         app.middleware("http")(rate_limit_middleware)
     
-    # ========================================================================
+# ========================================================================
     # Include Routers
     # ========================================================================
     
@@ -106,94 +132,6 @@ def create_app() -> FastAPI:
     # ========================================================================
     # Global Exception Handlers
     # ========================================================================
-    
-    @app.exception_handler(ValidationError)
-    async def validation_error_handler(request: Request, exc: ValidationError):
-        """Handle validation errors"""
-        logger.warning(
-            "validation_error",
-            path=request.url.path,
-            detail=exc.detail
-        )
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={
-                "error_code": "VALIDATION_ERROR",
-                "message": exc.detail
-            }
-        )
-    
-    @app.exception_handler(PayloadTooLargeError)
-    async def payload_too_large_handler(request: Request, exc: PayloadTooLargeError):
-        """Handle payload too large errors"""
-        logger.warning(
-            "payload_too_large",
-            path=request.url.path,
-            detail=exc.detail
-        )
-        return JSONResponse(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            content={
-                "error_code": "PAYLOAD_TOO_LARGE",
-                "message": exc.detail,
-                "status_code": 413
-            },
-            headers={"Retry-After": "60"}
-        )
-    
-    @app.exception_handler(Exception)
-    async def generic_exception_handler(request: Request, exc: Exception):
-        """Handle all uncaught exceptions"""
-        logger.error(
-            "Unhandled exception",
-            path=request.url.path,
-            error=_sanitize_log_text(str(exc)),
-            exception_type=exc.__class__.__name__
-        )
-        return JSONResponse(
-            status_code=500,
-            content={
-                "error_code": "INTERNAL_SERVER_ERROR",
-                "message": "An internal error occurred"
-            }
-        )
-    
-    # ========================================================================
-    # Startup/Shutdown Events
-    # ========================================================================
-    
-    @app.on_event("startup")
-    async def startup_event():
-        """Initialize on startup"""
-        initialize_observability_for_environment()
-        
-        if settings.RATE_LIMIT_ENABLED:
-            logger.info(
-                "Rate limiter enabled",
-                redis_url=settings.REDIS_URL,
-                requests=settings.RATE_LIMIT_REQUESTS,
-                window=settings.RATE_LIMIT_WINDOW
-            )
-        
-        logger.info(
-            "API Starting",
-            version=settings.API_VERSION,
-        )
-    
-    @app.on_event("shutdown")
-    async def shutdown_event():
-        """Cleanup on shutdown"""
-        await cleanup_limiter()
-        logger.info("API Shutting down")
-    
-    # ========================================================================
-    # OpenAPI Customization
-    # ========================================================================
-    
-    def custom_openapi():
-        """Customize OpenAPI schema"""
-        if app.openapi_schema:
-            return app.openapi_schema
         
         openapi_schema = get_openapi(
             title=settings.API_TITLE,
@@ -235,14 +173,16 @@ def create_app() -> FastAPI:
     # ========================================================================
     
     @app.get("/")
-    async def root():
+    async def root(user=Depends(get_current_user_optional)):
         """API root endpoint"""
+        user_info = {"authenticated": True, "user_id": user.user_id} if user else {"authenticated": False}
         return {
             "name": settings.API_TITLE,
             "version": settings.API_VERSION,
             "docs": "/docs",
             "redoc": "/redoc",
-            "openapi": "/openapi.json"
+            "openapi": "/openapi.json",
+            "user": user_info
         }
 
     @app.get("/metrics")
@@ -262,18 +202,37 @@ app = create_app()
 # ============================================================================
 
 if settings.ENABLE_WEBSOCKET:
-    from fastapi import WebSocket
+    from fastapi import WebSocket, Query
     from celery_app import TaskStatus
+    from api.auth import AuthError, TokenExpiredError, InvalidTokenError
     
     @app.websocket("/ws/progress/{job_id}")
-    async def websocket_progress_endpoint(websocket: WebSocket, job_id: str):
+    async def websocket_progress_endpoint(
+        websocket: WebSocket,
+        job_id: str,
+        token: str = Query(None)
+    ):
         """
         WebSocket endpoint for real-time job progress
         
-        Usage:
-        ws = new WebSocket('ws://localhost:8000/ws/progress/job_id')
-        ws.onmessage = (event) => console.log(event.data)
+        Requires authentication via token query parameter.
         """
+        if not token:
+            await websocket.close(code=4001, reason="Authentication required")
+            return
+        
+        try:
+            from api.auth import verify_token
+            payload = verify_token(token)
+            user_id = payload.get("sub")
+            
+            if not user_id:
+                await websocket.close(code=4003, reason="Invalid token")
+                return
+        except (TokenExpiredError, InvalidTokenError, AuthError):
+            await websocket.close(code=4001, reason="Invalid or expired token")
+            return
+        
         await websocket.accept()
         
         try:

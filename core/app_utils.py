@@ -690,7 +690,7 @@ def parse_remedies_response(response_text: str) -> Dict:
         remedies["appeal_days"] = _clean_answer(str(data.get("appeal_days", "")))
         remedies["appeal_court"] = _validate_court_name(data.get("appeal_court", ""))
         remedies["cost_estimate"] = _clean_answer(data.get("cost_estimate", ""))
-        remedies["cost"] = remedies["cost_estimate"]
+        remedies["cost"] = _clean_answer(data.get("cost", "") or data.get("cost_estimate", ""))
         remedies["first_action"] = _clean_answer(data.get("first_action", ""))
         remedies["important_deadline"] = _clean_answer(data.get("important_deadline", ""))
         remedies["deadline"] = remedies["important_deadline"]
@@ -1116,7 +1116,7 @@ UI_TEXT = {
     "simplified_judgment": "✅ Simplified Judgment",
     "summary_success": "The judgment has been simplified successfully.",
     "remedies_title": "⚖️ What Can You Do Now?",
-    "remedies_spinner": "Analyzing your legal options...",
+    "remedies_spinner": "Fetching remedies advice...",
     "what_happened": "What Happened?",
     "can_appeal": "Can You Appeal?",
     "appeal_details": "Appeal Details",
