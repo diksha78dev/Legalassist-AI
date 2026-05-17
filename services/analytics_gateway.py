@@ -62,9 +62,9 @@ def get_dashboard_summary(db=None) -> Dict[str, Any]:
             return _coerce_summary(response.json())
         except Exception as exc:
             logger.warning(
-                "Falling back to local analytics summary",
-                api_base_url=api_base_url,
-                error=str(exc),
+                "Falling back to local analytics summary. api_base_url=%s, error=%s",
+                api_base_url,
+                str(exc),
             )
 
     if db is None:

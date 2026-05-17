@@ -695,7 +695,9 @@ def collect_pdf_files(folder: Path, recursive: bool) -> List[Path]:
 
 
 def print_cost_summary(snapshot: Dict[str, float]) -> None:
-    print("batch_cost_summary", **snapshot)
+    parts = [f"batch_cost_summary"]
+    parts.extend(f"{k}={v}" for k, v in snapshot.items())
+    print(" ".join(parts))
 
 
 def process_command(args: argparse.Namespace) -> int:
@@ -982,11 +984,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_batch.set_defaults(func=batch_command)
 
-    # process_batch alias for better UX/compatibility
+    # process_batch alias - reuses batch_command to avoid duplication
     p_batch_alias = subparsers.add_parser(
         "process_batch",
         parents=[common],
-        help="Alias for the 'batch' command.",
+        help="Alias for 'batch' command (reuses same implementation).",
     )
     p_batch_alias.add_argument("--folder", "--input", dest="folder", required=True, help="Input directory.")
     p_batch_alias.add_argument("--output", required=True, help="Output base path.")

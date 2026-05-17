@@ -8,11 +8,31 @@ from sqlalchemy import (
     Boolean,
     Text,
     ForeignKey,
+    Enum as SQLEnum,
     UniqueConstraint,
     Index,
+    JSON,
 )
 from sqlalchemy.orm import relationship
 from db.base import Base
+
+
+class CaseStatus(str, enum.Enum):
+    """Status of a case"""
+    ACTIVE = "active"
+    APPEALED = "appealed"
+    CLOSED = "closed"
+    PENDING = "pending"
+
+
+class DocumentType(str, enum.Enum):
+    """Type of legal document"""
+    FIR = "FIR"
+    CHARGESHEET = "ChargeSheet"
+    JUDGMENT = "Judgment"
+    APPEAL = "Appeal"
+    ORDER = "Order"
+    OTHER = "Other"
 
 
 class CaseDeadline(Base):
@@ -34,12 +54,14 @@ class CaseDeadline(Base):
     attachments = relationship("Attachment", back_populates="deadline", cascade="all, delete-orphan")
 
     def days_until_deadline(self) -> int:
+        from db.session import _to_utc_datetime
         now = dt.datetime.now(dt.timezone.utc)
-        deadline = self.deadline_date
-        if deadline and deadline.tzinfo is None:
-            deadline = deadline.replace(tzinfo=dt.timezone.utc)
-        delta = deadline - now
-        return max(0, delta.days)
+        deadline = _to_utc_datetime(self.deadline_date)
+        
+        # Calculate calendar days difference in UTC to avoid 1-day errors 
+        # caused by truncation of fractional days in timedelta.days.
+        delta_days = (deadline.date() - now.date()).days
+        return max(0, delta_days)
 
 
 class Case(Base):
@@ -51,7 +73,7 @@ class Case(Base):
     case_number = Column(String(255), nullable=False)
     case_type = Column(String(255), nullable=False, index=True)
     jurisdiction = Column(String(255), nullable=False, index=True)
-    status = Column(String(255), default="active", nullable=False)
+    status = Column(SQLEnum(CaseStatus), default=CaseStatus.ACTIVE, nullable=False)
     title = Column(String(255), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), onupdate=lambda: dt.datetime.now(dt.timezone.utc))
@@ -68,12 +90,12 @@ class CaseDocument(Base):
 
     id = Column(Integer, primary_key=True)
     case_id = Column(Integer, ForeignKey("cases.id", ondelete="CASCADE"), nullable=False, index=True)
-    document_type = Column(String(255), nullable=False)
+    document_type = Column(SQLEnum(DocumentType), nullable=False)
     document_content = Column(Text, nullable=True)
     file_path = Column(String(255), nullable=True)
     uploaded_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
     summary = Column(Text, nullable=True)
-    remedies = Column(Text, nullable=True)
+    remedies = Column(JSON, nullable=True)
 
     case = relationship("Case", back_populates="documents")
 
@@ -103,7 +125,7 @@ class CaseTimeline(Base):
     event_type = Column(String(255), nullable=False, index=True)
     event_date = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False, index=True)
     description = Column(Text, nullable=False)
-    event_metadata = Column(Text, nullable=True)
+    event_metadata = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: dt.datetime.now(dt.timezone.utc), nullable=False)
 
     case = relationship("Case", back_populates="timeline_events")
