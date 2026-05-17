@@ -409,8 +409,13 @@ def analyze_document_task(
         clear_request_context()
         try:
             idemp.release_lock(idempotency_key)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                "lock_release_failed",
+                key=idempotency_key,
+                error=str(e),
+                task_id=self.request.id
+            )
 
 
 @celery_app.task(bind=True, name="generate_report")
