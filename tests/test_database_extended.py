@@ -2,7 +2,7 @@
 import pytest
 from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock, patch
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import sessionmaker
 
 from database import (
@@ -16,6 +16,7 @@ from database import (
     CaseStatus,
     DocumentType,
     CaseDocument,
+    NotificationLog,
     init_db,
     create_case_record,
     update_case_outcome,
@@ -241,6 +242,25 @@ class TestDatabaseExtended:
         """Test database initialization (schema creation)"""
         # This just ensures metadata.create_all doesn't crash
         init_db()
+
+    def test_init_db_creates_notification_status_index(self, monkeypatch):
+        """init_db should create the NotificationLog.status index for existing databases."""
+        from database import Base, NotificationLog, init_db
+
+        engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(bind=engine)
+
+        with engine.begin() as connection:
+            connection.exec_driver_sql("DROP INDEX IF EXISTS ix_notification_logs_status")
+
+        index_names_before = {index["name"] for index in inspect(engine).get_indexes(NotificationLog.__tablename__)}
+        assert "ix_notification_logs_status" not in index_names_before
+
+        monkeypatch.setattr("database.engine", engine)
+        init_db()
+
+        index_names_after = {index["name"] for index in inspect(engine).get_indexes(NotificationLog.__tablename__)}
+        assert "ix_notification_logs_status" in index_names_after
 
 
 class TestAutoDeadlineDeduplication:
